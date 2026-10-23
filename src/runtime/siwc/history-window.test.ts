@@ -1,0 +1,71 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createHistory } from "../history.js";
+import { readRecoveryHistoryWindow, SIWC_COLD_RECOVERY_SAFE_TOKENS } from "./history-window.js";
+import type { ChatMessage } from "../types.js";
+
+test("normal SIWC recovery replays complete SQLite history, independent of age", async () => {
+  const messages: ChatMessage[] = Array.from({length: 100}, (_, i) => ({
+    role: i % 2 ? "assistant" : "user",
+    content: "x".repeat(1000) + String(i),
+    at: new Date(Date.parse("2026-09-01T08:00:00Z") + i * 24 * 60 * 60_000).toISOString(),
+  }));
+  let scanned = 0;
+  const history = createHistory(messages.length, async (offset, limit) => {
+    scanned += 1;
+    return messages.slice(offset, offset + limit);
+  });
+  const window = await readRecoveryHistoryWindow(history);
+  assert.equal(window.expanded, false);
+  assert.equal(window.truncated, false);
+  assert.deepEqual(window.messages, messages);
+  assert.equal(window.startSeq, 0);
+  assert.equal(messages.length, 100, "SQLite source remains unchanged");
+  assert.ok(scanned <= 1, "small test history is read lazily in one batch");
+});
+
+test("verified checkpoint cursor replays only new messages", async () => {
+  const messages: ChatMessage[] = Array.from({ length: 70 }, (_, i) => ({
+    role: i % 2 ? "assistant" : "user",
+    content: "turn " + i,
+    at: "2026-10-10T08:00:00Z",
+  }));
+  const offsets: number[] = [];
+  const history = createHistory(messages.length, async (offset, limit) => {
+    offsets.push(offset);
+    return messages.slice(offset, offset + limit);
+  });
+  const window = await readRecoveryHistoryWindow(history, 60);
+  assert.deepEqual(window.messages, messages.slice(60));
+  assert.deepEqual(offsets, [60]);
+  assert.equal(window.expanded, true);
+  assert.equal(window.truncated, false);
+  await assert.rejects(readRecoveryHistoryWindow(history, 71), /cursor/);
+});
+
+test("SIWC recovery can retain sparse chats without any time-based expiration", async () => {
+  const messages: ChatMessage[] = [
+    { role: "user", content: "last week", at: "2026-10-11T08:00:00Z" },
+    { role: "assistant", content: "see you", at: "2026-10-11T08:01:00Z" },
+    { role: "user", content: "yesterday", at: "2026-10-17T08:00:00Z" },
+    { role: "assistant", content: "hello", at: "2026-10-17T08:01:00Z" },
+  ];
+  const history = createHistory(messages.length, async (offset, limit) => messages.slice(offset, offset + limit));
+  const window = await readRecoveryHistoryWindow(history);
+  assert.deepEqual(window.messages, messages);
+  assert.equal(window.expanded, false);
+});
+
+test("checkpoint-free oversize recovery reports suffix degradation, never alters SQLite", async () => {
+  const messages: ChatMessage[] = Array.from({ length: 220 }, (_, i) => ({
+    role: i % 2 ? "assistant" : "user", content: "z".repeat(2_500), at: "2026-10-10T08:00:00Z",
+  }));
+  const history = createHistory(messages.length, async (offset, limit) => messages.slice(offset, offset + limit));
+  const cold = await readRecoveryHistoryWindow(history);
+  assert.ok(cold.truncated);
+  assert.ok(cold.estimatedTokens <= SIWC_COLD_RECOVERY_SAFE_TOKENS);
+  assert.ok(cold.messages.length < messages.length);
+  assert.equal(cold.messages.at(-1), messages.at(-1));
+  await assert.rejects(readRecoveryHistoryWindow(history, 2), /checkpoint delta exceeds safe capacity/);
+  assert.equal(messages.length, 220);
+});

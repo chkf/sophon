@@ -1,0 +1,48 @@
+{
+  "name": "sophon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "init": "tsx src/main.ts init",
+    "core": "tsx src/main.ts core",
+    "dev": "tsx src/main.ts serve",
+    "serve": "tsx src/main.ts serve",
+    "gateway:check": "tsx src/main.ts gateway check",
+    "bootstrap:siwc": "node scripts/bootstrap-siwc.mjs",
+    "credentials:create": "node scripts/create-credential-key.mjs",
+    "auth:login": "tsx src/main.ts auth login",
+    "auth:status": "tsx src/main.ts auth status",
+    "auth:reconsent": "tsx src/main.ts auth reconsent",
+    "runtime:models": "tsx src/main.ts runtime models",
+    "runtime:test": "tsx src/main.ts runtime test",
+    "runtime:diagnose": "tsx src/main.ts runtime diagnose",
+    "build": "node scripts/build.mjs",
+    "start": "node dist/main.js serve",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node scripts/run-tests.mjs",
+    "sessions": "node --import tsx scripts/session-storage.mjs"
+  },
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "dependencies": {
+    "openai": "^7.10.0",
+    "qrcode": "^1.5.4",
+    "silk-wasm": "^3.7.1",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "license": "MIT",
+  "description": "Self-hosted messaging gateway with local SQLite context, configurable personas and provider routing.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chkf/sophon.git"
+  }
+}
