@@ -1,4 +1,5 @@
 import { replyText } from "./runtime/reply-segments.js";
+import { LifeStore, LIFE_TOOL } from "./life/store.js";
 import { MoodStore, MOOD_TOOL } from "./mood/store.js";
 import { LOCAL_CONTEXT_TOOLS, executeLocalContextTool } from "./core/tools.js";
 import { DeliveryCoordinator } from "./delivery/coordinator.js";
@@ -110,6 +111,7 @@ export class Gateway {
     private readonly voiceAllowed?: (message: InboundMessage) => Promise<boolean>,
     private readonly onCompaction?: (checkpoint: import("./runtime/siwc/stateful-types.js").CompactionCheckpoint) => Promise<void>,
     private readonly mood?: MoodStore,
+    private readonly life?: LifeStore,
   ) { this.delivery = new DeliveryCoordinator(runtime, sessions); }
 
   private runtimeTools(contextAvailable: boolean): RuntimeTool[] {
@@ -173,6 +175,7 @@ export class Gateway {
     if(native?.enabled) tools.push(NATIVE_REPLY_DEFINITION);
     if(voice) tools.push(voiceTool);
     if(this.mood) tools.push(MOOD_TOOL);
+    if(this.life) tools.push(LIFE_TOOL);
     const attachments = richAttachments(message);
     const allChannelAttachments = [...(message.replyTo?.attachments ?? []),
       ...(message.platformMessages ?? []).flatMap(fragment => fragment.references ?? []).flatMap(reference => reference.attachments ?? []), ...message.attachments];
@@ -191,6 +194,7 @@ export class Gateway {
       ] : []),
       ...(this.personas && !context.data.persona ? [personaInstruction(await this.personas.snapshot())] : []),
       temporalContext,
+      ...(this.life ? [ "【当前 Life】" + (this.life.snapshot().current || "暂无连续生活事件") + "。这是虚构角色生活状态；现实地点、活动和开放信息必须经工具核验。" ] : []),
       ...(this.mood ? [ "【当前 Mood】" + JSON.stringify(this.mood.snapshot(this.clock())) + "。这是当前动态状态，不是永久人格。只有真实额外情绪变化才调用 gateway_mood_adjust；普通聊天的基础增长由系统完成。" ] : []),
       view.unansweredCount
         ? "历史记录中还有 " + view.unansweredCount + " 条用户消息在发送后没有得到成功交付的 Gateway 答复。本轮请结合这些未答消息和当前消息，优先回答仍有效的实质问题；对重复的催问只需自然回应一次，不要机械逐条复述。如果当前消息明确取消或取代旧问题，以最新意图为准。"
@@ -247,6 +251,9 @@ export class Gateway {
           tools,
           executeTool: async (name: string, args: Record<string, unknown>) => {
             if (!tools.some(tool => tool.name === name)) throw new Error("本轮未开放该工具。");
+            if (name === LIFE_TOOL.name && this.life) {
+              return this.life.update(String(args.current ?? ""), this.clock());
+            }
             if (name === MOOD_TOOL.name && this.mood) {
               return this.mood.adjust(Number(args.delta), this.clock());
             }
