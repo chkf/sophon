@@ -124,6 +124,7 @@ export type ChatRequest = ChatInput & {
   /** Optional natural-language delivery instruction; fixed user voice never changes. */
   getPreparedVoiceInstruction?: () => string | undefined;
   /** A verified native TG target chosen in this turn; returned only as metadata. */
+  getPreparedSticker?: () => import("../channels/types.js").TelegramSticker | undefined;
   getPreparedNativeReply?: () => TelegramNativeReply | undefined;
   /** Local, non-serialized final text renderer; completed replies are persisted after rendering. */
   finalizeReplyText?: (text: string) => string;
@@ -134,6 +135,7 @@ export interface ChatResponse {
   replySegments?: ReplySegment[];
   voiceText?: string;
   voiceInstruction?: string;
+  sticker?: import("../channels/types.js").TelegramSticker;
   nativeReply?: TelegramNativeReply;
   deliveryId?: string;
   skipped?: "background_disabled";

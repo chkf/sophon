@@ -16,7 +16,13 @@ export interface TelegramNativeReply {
   quote?: string;
 }
 
+export interface TelegramSticker {
+  fileId: string; accountId: string; chatId: string;
+  emoji?: string; setName?: string; format: "static" | "animated" | "video";
+}
+
 export interface Attachment {
+  sticker?: TelegramSticker;
   kind: AttachmentKind;
   fileName?: string;
   mimeType?: string;

@@ -571,7 +571,7 @@ export class TelegramAdapter implements ProactiveSender {
       }
 
       const reply = result?.text.trim() ?? "";
-      if (!reply && !(result?.kind === "model_reply" && result.images?.length)) {
+      if (!reply && !(result?.kind === "model_reply" && (result.images?.length || result.sticker))) {
         if (consumeInFlight) {
           await this.mutateState(() => {
             delete this.state.inFlight;
@@ -670,7 +670,7 @@ export class TelegramAdapter implements ProactiveSender {
     });
     if (!pending) return;
     const reply = normalizePendingReply(pending);
-    if (!reply.text && !(reply.kind === "model_reply" && reply.images?.length)) return;
+    if (!reply.text && !(reply.kind === "model_reply" && (reply.images?.length || reply.sticker))) return;
 
     await deliverPreparedReply(this.api, reply, this.config,
       (target, text, onSent, nativeReply, strict) => this.sendText(target, text, onSent, nativeReply, strict),
@@ -678,6 +678,29 @@ export class TelegramAdapter implements ProactiveSender {
   }
 
   private async collectAttachments(message: TelegramMessage): Promise<Attachment[]> {
+    if (message.sticker) {
+      const sticker = message.sticker;
+      const format = sticker.is_video ? "video" : sticker.is_animated ? "animated" : "static";
+      const metadata = { fileId: sticker.file_id, accountId: telegramAccountId(this.config.token) ?? "",
+        chatId: String(message.chat.id), format, emoji: sticker.emoji, setName: sticker.set_name } as const;
+      const textPreview = "Telegram 贴纸" + (sticker.emoji ? " " + sticker.emoji : "") +
+        (sticker.set_name ? "，贴纸集：" + sticker.set_name : "") +
+        (format === "static" ? "（静态图片）" : "（动态贴纸；仅提供静态预览，无法据此判断完整动作）");
+      const file = format === "static" ? sticker : sticker.thumbnail;
+      const base: Attachment = { kind: "image", sticker: metadata, remoteId: sticker.file_id, textPreview };
+      if (!file) return [{ ...base, error: "此动态贴纸没有可用预览，不能读取画面。" }];
+      try {
+        const info = await this.api.getFile(file.file_id);
+        const maxBytes = this.config.maxMediaBytes ?? 20 * 1024 * 1024;
+        if (!info.file_path || (info.file_size ?? file.file_size ?? 0) > maxBytes) throw new Error("Invalid sticker file");
+        const bytes = await this.api.downloadFile(info.file_path, maxBytes);
+        if (bytes.byteLength > maxBytes) throw new Error("Sticker too large");
+        const saved = await this.config.mediaStore.save({ channel: "telegram", kind: "image", bytes,
+          fileName: format === "static" ? "sticker.webp" : basename(info.file_path),
+          ...(format === "static" ? { mimeType: "image/webp" } : {}) });
+        return [{ ...saved, ...base }];
+      } catch { return [{ ...base, error: "贴纸预览下载失败，不能读取画面。" }]; }
+    }
     const candidates: Array<{ kind: AttachmentKind; file: TelegramFile | TelegramPhoto }> = [];
     const photo = largestPhoto(message.photo);
     if (photo) candidates.push({ kind: "image", file: photo });

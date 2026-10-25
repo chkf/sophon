@@ -608,7 +608,8 @@ export class StatefulResponsesBridge {
           const voiceText = options.getPreparedVoice?.();
           const voiceInstruction = voiceText ? options.getPreparedVoiceInstruction?.() : undefined;
           const nativeReply = options.getPreparedNativeReply?.();
-          if (!text && !voiceText && !replySegments?.length) {
+          const sticker = options.getPreparedSticker?.();
+          if (!text && !voiceText && !replySegments?.length && !sticker) {
             const outputTypes = output.map((item) => String(item.type ?? "unknown")).join(",") || "none";
             throw new Error(
               "Responses WebSocket completed without a final text response (output types: " + outputTypes + ").",
@@ -648,7 +649,7 @@ export class StatefulResponsesBridge {
             ...(replySegments ? {replySegments} : {}),
             ...(lane.checkpoint ? { compaction: lane.checkpoint } : {}),
             ...(voiceText ? {voiceText} : {}), ...(voiceInstruction ? {voiceInstruction} : {}),
-            ...(nativeReply ? { nativeReply } : {}) };
+            ...(sticker ? { sticker } : {}), ...(nativeReply ? { nativeReply } : {}) };
         }
 
         if (!options.executeTool) throw new Error("Model requested a tool but no tool executor is configured.");

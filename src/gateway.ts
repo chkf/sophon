@@ -7,6 +7,7 @@ import type { InboundMessage, PlatformMessageFragment } from "./channels/types.j
 import type { ReplyOutcome } from "./channels/reply.js";
 import { randomUUID, createHash } from "node:crypto";
 import { HISTORY_DEFINITION, HISTORY_TOOL, readHistoryTool } from "./runtime/history-tool.js";
+import { StickerTurn, STICKER_TOOL, validSticker } from "./runtime/stickers.js";
 import { NativeReplyTurn, NATIVE_REPLY_TOOL, RETIRED_TEXT_QUOTE_TOOL, NATIVE_REPLY_GUIDANCE, NATIVE_REPLY_DEFINITION, stripLegacyQuoteTokens, nativeReplyParameters } from "./runtime/native-reply.js";
 import type { RuntimeImage, ChatMessage, ChatRuntime, ChatResponse, RuntimeAttachment, RuntimeTool } from "./runtime/types.js";
 import type { SessionStore } from "./sessions/store.js";
@@ -25,7 +26,7 @@ import { ContextObservationCollector, type ContextObservation } from "./control/
 function attachmentLabel(attachment: InboundMessage["attachments"][number], index: number): string {
   const name = attachment.fileName ? " " + attachment.fileName : "";
   const type = attachment.mimeType ? " (" + attachment.mimeType + ")" : "";
-  return "[附件 " + (index + 1) + "：" + attachment.kind + name + type + "]";
+  return "[附件 " + (index + 1) + "：" + attachment.kind + name + type + "]" + (attachment.sticker ? " " + (attachment.textPreview ?? "Telegram 贴纸") + (attachment.error ? "；" + attachment.error : "") : "");
 }
 
 function replyContextSummary(message: InboundMessage): string {
@@ -54,7 +55,7 @@ function replyContextSummary(message: InboundMessage): string {
 function attachmentSummary(message: InboundMessage): string {
   if (!message.attachments.length) return "";
   const lines = message.attachments.map((attachment, index) => {
-    const preview = attachment.textPreview ? "\n文字预览：\n" + attachment.textPreview : "";
+    const preview = attachment.textPreview && !attachment.sticker ? "\n文字预览：\n" + attachment.textPreview : "";
     return attachmentLabel(attachment, index) + preview;
   });
   return "\n\n" + lines.join("\n\n");
@@ -176,13 +177,15 @@ export class Gateway {
     const voice = message.channel === "telegram" && await this.voiceAllowed?.(message) ? replyTurn : undefined;
     // Real native targets only: Telegram, same bot and private owner chat.
     const native = message.channel === "telegram" ? new NativeReplyTurn(view.history, message) : undefined;
+    const stickers = native?.enabled ? new StickerTurn(view.history, message) : undefined;
     const tools = discoveredTools.filter(tool =>
       tool.name !== RETIRED_TEXT_QUOTE_TOOL && tool.name !== NATIVE_REPLY_TOOL &&
-      tool.name !== HISTORY_TOOL);
+      tool.name !== HISTORY_TOOL && tool.name !== STICKER_TOOL.name);
     // Keep the advertised list and the real function definitions in sync.
     // The Provider also wraps this definition to handle direct/background calls.
     if (view.history.count > 0) tools.push(HISTORY_DEFINITION);
     if(native?.enabled) tools.push(NATIVE_REPLY_DEFINITION);
+    if(stickers) tools.push(STICKER_TOOL);
     if(voice) tools.push(voiceTool);
     const fileTools = this.files?.tools(message) ?? [];
     tools.push(...fileTools);
@@ -195,6 +198,7 @@ export class Gateway {
     const turnInstructions = [
       "本轮可用函数：" + (availableToolNames || "无") + "。",
       NATIVE_REPLY_GUIDANCE,
+      stickers ? "发送 Telegram 贴纸前，先用 gateway_sticker 的 list 查找，再用 select 登记一个。可指定 history_index 查找较早记录。不要编造贴纸 ID；动态贴纸仅提供静态预览。工具登记不代表已经送达。" : "",
       voice?.guidance ?? "本轮不提供语音输出工具，请使用文字回复，不承诺发送音频。",
       "本轮来源渠道：" + message.channel + "。回复仅发回该渠道。微信默认文字回复。",
       "【当前 Recent 活跃话题目录（实时、仅作索引）】\n" +
@@ -236,6 +240,7 @@ export class Gateway {
         finalizeReplyText: text => replyTurn.finalize(stripLegacyQuoteTokens(text)),
         recordReplyText: (text, id) => replyTurn.recordText(stripLegacyQuoteTokens(text), id),
         getPreparedReplySegments: () => replyTurn.segments,
+        ...(stickers ? { getPreparedSticker: () => stickers.prepared } : {}),
         ...(native?.enabled ? { getPreparedNativeReply: () => native.prepared } : {}),
         ...(voice ? {getPreparedVoice:()=>voice.text, getPreparedVoiceInstruction:()=>voice.instruction} : {}),
         sessionId: this.sessions.sessionKey?.(message.channel, message.conversationId) ?? message.channel + ":" + message.conversationId,
@@ -266,6 +271,7 @@ export class Gateway {
             if (name === HISTORY_TOOL) {
               return readHistoryTool(view.history, args);
             }
+            if (name === STICKER_TOOL.name && stickers) return stickers.execute(args);
             if (name === NATIVE_REPLY_TOOL) {
               if (!native?.enabled) throw new Error("本轮不支持原生回复目标选择。");
               return native.select(args);
@@ -354,8 +360,10 @@ export class Gateway {
       ]);
       const nativeReply = message.channel === "telegram" ? response.nativeReply ?? native?.prepared : undefined;
       const account = message.platformMessages?.[0]?.accountId;
+      const sticker = message.channel === "telegram" ? response.sticker ?? stickers?.prepared : undefined;
       const verifiedNative = nativeReplyParameters(nativeReply, message.conversationId, account);
       return { kind: "model_reply", text: reply, replySegments, ...legacyVoice, deliveryId: response.deliveryId ?? deliveryId,
+        ...(validSticker(sticker, message.conversationId, account) ? { sticker } : {}),
         ...(verifiedNative && nativeReply ? { nativeReply } : {}),
         ...(response.images?.length ? { images: response.images } : {}),
       };

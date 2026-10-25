@@ -354,8 +354,9 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
           const voiceText=request.getPreparedVoice?.();
           const voiceInstruction=voiceText ? request.getPreparedVoiceInstruction?.() : undefined;
           const nativeReply=request.getPreparedNativeReply?.();
-          if(!text && !images.length && !voiceText && !replySegments?.length) throw this.failure("OpenRouter 返回空回复。");
-          const result: ChatResponse={text,model,usage,...(replySegments?{replySegments}:{}),...(images.length?{images}:{}),...(voiceText?{voiceText}:{}),...(voiceInstruction?{voiceInstruction}:{}),...(nativeReply?{nativeReply}:{}),contextEffect:globalStart>0 ? "history_windowed" : "none"};
+          const sticker=request.getPreparedSticker?.();
+          if(!text && !images.length && !voiceText && !replySegments?.length && !sticker) throw this.failure("OpenRouter 返回空回复。");
+          const result: ChatResponse={text,model,usage,...(replySegments?{replySegments}:{}),...(images.length?{images}:{}),...(voiceText?{voiceText}:{}),...(voiceInstruction?{voiceInstruction}:{}),...(nativeReply?{nativeReply}:{}),...(sticker?{sticker}:{}),contextEffect:globalStart>0 ? "history_windowed" : "none"};
           await writeJsonAtomic(turnPath,request.ephemeral ? { status:"completed", usage } : {status:"completed",response:result}); return result;
         }
         if(round===maxRounds || toolCount+calls.length>OPENROUTER_LIMITS.toolCalls) throw this.failure("OpenRouter 工具调用达到本轮上限。");
