@@ -1,3 +1,4 @@
+import { LifeStore } from "./life/store.js";
 import { MoodStore } from "./mood/store.js";
 import { SerialQueue } from "./util/serial-queue.js";
 import { IlinkAdapter } from "./channels/ilink/adapter.js";
@@ -54,6 +55,7 @@ export class GatewayService {
   private readonly ilink?: IlinkAdapter;
   private readonly personas: PersonaStore;
   private readonly mood: MoodStore;
+  private readonly life: LifeStore;
   private readonly gatewayContext: LocalCoreContextProvider;
   private readonly localKnowledge?: LocalKnowledgeStore;
   private readonly gateway: Gateway;
@@ -78,6 +80,7 @@ export class GatewayService {
     this.sessions = new SessionStore(config.dataDir);
     this.personas = new PersonaStore(config.dataDir);
     this.mood = new MoodStore(config.dataDir);
+    this.life = new LifeStore(config.dataDir);
     const speechSettings=new VoiceSettingsStore(config.dataDir);
     const speechClient=new BailianSpeech(config.voice ?? {});
     const speechQueue=new SerialQueue();
@@ -99,7 +102,7 @@ export class GatewayService {
           ? "距离上次成功压缩已满 7 天" : "上下文达到容量阈值（120K token）";
         await this.telegram.notifyTemporary(
           "🧠 Gateway 上下文已压缩\n原因：" + reason + "\n历史检查点已保存，对话可以继续。", 60_000);
-      }, this.mood);
+      }, this.mood, this.life);
 
     if (config.telegram) {
       const telegramVoice=new TelegramVoiceTransport(this.voice,config.telegram.ownerId);
