@@ -1,4 +1,5 @@
 import { replyText } from "./runtime/reply-segments.js";
+import { MoodStore, MOOD_TOOL } from "./mood/store.js";
 import { LOCAL_CONTEXT_TOOLS, executeLocalContextTool } from "./core/tools.js";
 import { DeliveryCoordinator } from "./delivery/coordinator.js";
 import { VoiceTurn, voiceTool, VOICE_TOOL } from "./voice/tool.js";
@@ -108,6 +109,7 @@ export class Gateway {
     private readonly localKnowledge?: LocalKnowledgeStore,
     private readonly voiceAllowed?: (message: InboundMessage) => Promise<boolean>,
     private readonly onCompaction?: (checkpoint: import("./runtime/siwc/stateful-types.js").CompactionCheckpoint) => Promise<void>,
+    private readonly mood?: MoodStore,
   ) { this.delivery = new DeliveryCoordinator(runtime, sessions); }
 
   private runtimeTools(contextAvailable: boolean): RuntimeTool[] {
@@ -170,6 +172,7 @@ export class Gateway {
     if (view.history.count > 0) tools.push(HISTORY_DEFINITION);
     if(native?.enabled) tools.push(NATIVE_REPLY_DEFINITION);
     if(voice) tools.push(voiceTool);
+    if(this.mood) tools.push(MOOD_TOOL);
     const attachments = richAttachments(message);
     const allChannelAttachments = [...(message.replyTo?.attachments ?? []),
       ...(message.platformMessages ?? []).flatMap(fragment => fragment.references ?? []).flatMap(reference => reference.attachments ?? []), ...message.attachments];
@@ -188,6 +191,7 @@ export class Gateway {
       ] : []),
       ...(this.personas && !context.data.persona ? [personaInstruction(await this.personas.snapshot())] : []),
       temporalContext,
+      ...(this.mood ? [ "【当前 Mood】" + JSON.stringify(this.mood.snapshot(this.clock())) + "。这是当前动态状态，不是永久人格。只有真实额外情绪变化才调用 gateway_mood_adjust；普通聊天的基础增长由系统完成。" ] : []),
       view.unansweredCount
         ? "历史记录中还有 " + view.unansweredCount + " 条用户消息在发送后没有得到成功交付的 Gateway 答复。本轮请结合这些未答消息和当前消息，优先回答仍有效的实质问题；对重复的催问只需自然回应一次，不要机械逐条复述。如果当前消息明确取消或取代旧问题，以最新意图为准。"
         : "",
@@ -243,6 +247,9 @@ export class Gateway {
           tools,
           executeTool: async (name: string, args: Record<string, unknown>) => {
             if (!tools.some(tool => tool.name === name)) throw new Error("本轮未开放该工具。");
+            if (name === MOOD_TOOL.name && this.mood) {
+              return this.mood.adjust(Number(args.delta), this.clock());
+            }
             if (name === HISTORY_TOOL) {
               return readHistoryTool(view.history, args);
             }
@@ -366,7 +373,9 @@ export class Gateway {
 
   commitDeliveredAssistant(channel: InboundMessage["channel"], conversationId: string, senderId: string,
     reply: string, images?: RuntimeImage[], deliveryId?: string, complete = true, platformMessages?: PlatformMessageFragment[]): Promise<void> {
-    return this.delivery.commitDeliveredAssistant(channel, conversationId, senderId, reply, images, deliveryId, complete, platformMessages);
+    return this.delivery.commitDeliveredAssistant(channel, conversationId, senderId, reply, images, deliveryId, complete, platformMessages).then(async () => {
+      if (complete) this.mood?.exchange(this.clock());
+    });
   }
   discardUndeliveredAssistant(channel: InboundMessage["channel"], conversationId: string, deliveryId?: string): Promise<void> {
     return this.delivery.discardUndeliveredAssistant(channel, conversationId, deliveryId);
