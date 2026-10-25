@@ -38,7 +38,7 @@ test("Gateway advertises and executes file tools through the owner Telegram tran
     assert.equal(await readFile(result.path, "utf8"), "label,value\nA,1\n");
     return { text: "文档已生成并发送。" };
   } };
-  const gateway = new Gateway(runtime, sessions, new LocalCoreContextProvider(data), 10, "UTC", undefined, undefined, undefined, undefined, undefined, files);
+  const gateway = new Gateway(runtime, sessions, new LocalCoreContextProvider(data), 10, "UTC", undefined, undefined, undefined, undefined, undefined, undefined, files);
   const result = await gateway.handle({ channel: "telegram", senderId: "70001", conversationId: "70001", messageId: "fixture-1",
     receivedAt: "2030-01-02T09:00:00Z", text: "请生成 CSV 文件", attachments: [] });
   assert.equal(result.kind, "model_reply");

@@ -21,6 +21,7 @@
     "start": "node dist/main.js serve",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node scripts/run-tests.mjs",
+    "test:control-ui": "node scripts/control-ui-smoke.mjs",
     "sessions": "node --import tsx scripts/session-storage.mjs"
   },
   "engines": {

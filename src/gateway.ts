@@ -8,7 +8,7 @@ import type { ReplyOutcome } from "./channels/reply.js";
 import { randomUUID, createHash } from "node:crypto";
 import { HISTORY_DEFINITION, HISTORY_TOOL, readHistoryTool } from "./runtime/history-tool.js";
 import { NativeReplyTurn, NATIVE_REPLY_TOOL, RETIRED_TEXT_QUOTE_TOOL, NATIVE_REPLY_GUIDANCE, NATIVE_REPLY_DEFINITION, stripLegacyQuoteTokens, nativeReplyParameters } from "./runtime/native-reply.js";
-import type { RuntimeImage, ChatMessage, ChatRuntime, RuntimeAttachment, RuntimeTool } from "./runtime/types.js";
+import type { RuntimeImage, ChatMessage, ChatRuntime, ChatResponse, RuntimeAttachment, RuntimeTool } from "./runtime/types.js";
 import type { SessionStore } from "./sessions/store.js";
 import { readSessionView } from "./sessions/view.js";
 import type { LocalCoreContextProvider } from "./core/context.js";
@@ -20,6 +20,7 @@ import { executeLocalKnowledgeTool, localKnowledgeTools, LOCAL_KNOWLEDGE_TOOLS, 
 import { runtimeFailureReply, runtimeFailureRetryAfterMs } from "./runtime/failure-message.js";
 import { inboundManualRetryHint, inboundRetryHint, isSubscriptionUsageLimitError } from "./runtime/retry-policy.js";
 import { elapsedDescription, formatLocalTimestamp } from "./util/time-context.js";
+import { ContextObservationCollector, type ContextObservation } from "./control/context-observation.js";
 
 function attachmentLabel(attachment: InboundMessage["attachments"][number], index: number): string {
   const name = attachment.fileName ? " " + attachment.fileName : "";
@@ -109,6 +110,7 @@ export class Gateway {
     private readonly localKnowledge?: LocalKnowledgeStore,
     private readonly voiceAllowed?: (message: InboundMessage) => Promise<boolean>,
     private readonly onCompaction?: (checkpoint: import("./runtime/siwc/stateful-types.js").CompactionCheckpoint) => Promise<void>,
+    private readonly onContextObservation?: (observation: ContextObservation) => void | Promise<void>,
     private readonly files?: FileService,
   ) { this.delivery = new DeliveryCoordinator(runtime, sessions); }
 
@@ -116,6 +118,16 @@ export class Gateway {
     if (!contextAvailable || !this.localKnowledge) return [];
     return [...localKnowledgeTools(this.localKnowledge),
       ...(this.localKnowledge.supportsContextTools ? LOCAL_CONTEXT_TOOLS : [])];
+  }
+
+  private async publishContextObservation(collector: ContextObservationCollector | undefined,
+    response: Pick<ChatResponse, "contextEffect" | "compaction"> = {}): Promise<void> {
+    try {
+      const observed = collector?.completed(response);
+      if (observed) await this.onContextObservation?.(observed);
+    } catch {
+      console.error("[gateway] context observation could not be saved; request handling continues.");
+    }
   }
 
   async handle(message: InboundMessage): Promise<ReplyOutcome> {
@@ -215,7 +227,10 @@ export class Gateway {
     try {
       const deliveryId = randomUUID();
       const recentCreateSlots = new Map<string, number>();
-      const response = await this.runtime.reply({
+      const observation = this.onContextObservation ? new ContextObservationCollector(this.clock) : undefined;
+      let response: ChatResponse;
+      try { response = await this.runtime.reply({
+        ...(observation ? { trace: observation } : {}),
         deliveryId,
         purpose: "chat",
         finalizeReplyText: text => replyTurn.finalize(stripLegacyQuoteTokens(text)),
@@ -293,7 +308,13 @@ export class Gateway {
           },
           ...(this.maxToolRounds > 0 ? { maxToolRounds: this.maxToolRounds } : {}),
         } : {}),
-      });
+      }); } catch (error) {
+        // A failed real request is still the latest observation. Preserve the
+        // original exception and its retry/delivery hints even if storage fails.
+        await this.publishContextObservation(observation);
+        throw error;
+      }
+      await this.publishContextObservation(observation, response);
       if (response.compaction) {
         // The SIWC checkpoint is already committed before this signal. Telegram
         // notification is a separate best-effort effect, never chat history.

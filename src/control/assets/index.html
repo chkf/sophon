@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="same-origin">
+  <title>Sophon · Control Center</title>
+  <link rel="stylesheet" href="/control/app.css">
+  <script src="/control/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="/control/" aria-label="Sophon 控制中心"><span class="brand-mark">S</span><span>Sophon<small>CONTROL CENTER</small></span></a>
+      <p class="nav-label">工作空间</p>
+      <nav id="navigation" aria-label="控制中心页面">
+        <button type="button" data-page="tasks" aria-current="page"><span class="nav-icon" aria-hidden="true">◈</span>主动任务<span class="nav-active-dot"></span></button>
+        <button type="button" data-page="history"><span class="nav-icon" aria-hidden="true">▤</span>聊天历史</button>
+        <button type="button" data-page="memory"><span class="nav-icon" aria-hidden="true">▧</span>Core / Recent</button>
+        <button type="button" data-page="context"><span class="nav-icon" aria-hidden="true">▱</span>上下文</button>
+        <button type="button" data-page="host"><span class="nav-icon" aria-hidden="true">▥</span>主机监控</button>
+      </nav>
+      <div class="sidebar-foot"><span class="live-dot"></span><span>OWNER WORKSPACE<small>数据与执行轨迹</small></span></div>
+    </aside>
+    <main>
+      <header class="page-header">
+        <div><p class="breadcrumb">控制中心 <span>/</span> <span id="page-name">主动任务</span></p><h1 id="page-title">主动任务</h1><p id="page-description" class="page-description">从触发到交付，查看每一步真实执行。</p></div>
+        <div class="header-actions" id="header-actions" hidden><span class="session-badge"><span class="live-dot"></span>已连接</span><button id="refresh" type="button" class="button subtle">刷新</button><button id="logout" type="button" class="button subtle">退出</button></div>
+      </header>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <section id="login" class="login-panel" aria-labelledby="login-title">
+        <div class="login-symbol" aria-hidden="true">S</div>
+        <p class="eyebrow">PRIVATE WORKSPACE</p><h2 id="login-title">连接你的 Sophon</h2>
+        <p>在 Telegram 所有者私聊发送 <code>/status</code>，将一次性登录码粘贴到下方。</p>
+        <form id="login-form"><label for="login-code">一次性登录码</label><input id="login-code" name="code" type="password" autocomplete="one-time-code" maxlength="256" required placeholder="输入登录码"><button class="button primary" type="submit">进入控制中心 <span aria-hidden="true">→</span></button></form>
+        <p class="muted small">登录码仅可使用一次。页面关闭不会停止 Sophon。</p>
+      </section>
+      <div id="workspace" hidden><section id="page-content" aria-live="polite"></section><footer><span>SOPHON <span class="footer-divider">/</span> 你的数据，你的工作空间</span><span id="updated-at"></span></footer></div>
+    </main>
+  </div>
+</body>
+</html>

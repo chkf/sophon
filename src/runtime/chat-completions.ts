@@ -16,6 +16,8 @@ import { readChatStream } from "./openrouter-stream.js";
 import { isBackground, requestMessages } from "./request.js";
 import { withHistoryTool } from "./history-tool.js";
 import { historyFromMessages } from "./history.js";
+import { safeTraceStart, safeTraceFinish } from "../observability/runtime-trace.js";
+import { reportedTraceUsage, traceContent, tracedToolStatus } from "./trace-content.js";
 
 export interface OpenRouterConfig {
   dataDir: string; apiKey?: string; defaultModel?: string; imageModel?: string; timezone?: string;
@@ -205,6 +207,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
     return { inputTokens: Number(raw?.prompt_tokens ?? 0), outputTokens: Number(raw?.completion_tokens ?? 0), cachedInputTokens: Number(raw?.prompt_tokens_details?.cached_tokens ?? 0), reasoningTokens: Number(raw?.completion_tokens_details?.reasoning_tokens ?? 0), totalTokens: Number(raw?.total_tokens ?? 0), ...(typeof raw?.cost === "number" ? { costUsd: raw.cost } : {}) };
   }
   private async run(request: ChatRequest): Promise<ChatResponse> {
+    const captureTraceContent = Boolean(request.trace && request.trace.captureContent !== false);
     const input = requestMessages(request);
     if (request.purpose === "chat" && !request.ephemeral) request = withHistoryTool(request, request.history ?? historyFromMessages(input.slice(0, -1)));
     if (request.ephemeral && (!request.testModel || ![2048, 4096, 8192].includes(request.testHistoryTokens ?? -1))) {
@@ -313,10 +316,23 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
         assertRequestBudget(messages, tools, spec.contextLength);
         if (request.ephemeral && request.testAuthorized?.() === false) throw this.failure("测试模式已经切换或关闭，未发送付费请求。");
         const stream = this.provider === "openrouter" || this.config.stream !== false;
-        const response=await this.request("chat/completions",{model,messages,
-          ...((!request.ephemeral || request.purpose === "diagnostic") && (this.provider === "openrouter" || tools.length) ? { tools } : {}),
-          stream,max_tokens:request.ephemeral?1024:OPENROUTER_LIMITS.responseTokens,
-          ...(this.provider === "openrouter" ? {stream_options:{include_usage:true},provider:{allow_fallbacks:false,...(tools.length?{require_parameters:true}:{})}} : {})},stream);
+        const traceStep = safeTraceStart(request.trace, { kind: "model", name: "chat.completions", provider: this.provider, model,
+          input: captureTraceContent ? { messages: traceContent(messages), tools: tools.map(tool => tool.function?.name ?? tool.type), stream } : undefined });
+        let response: any;
+        try {
+          response=await this.request("chat/completions",{model,messages,
+            ...((!request.ephemeral || request.purpose === "diagnostic") && (this.provider === "openrouter" || tools.length) ? { tools } : {}),
+            stream,max_tokens:request.ephemeral?1024:OPENROUTER_LIMITS.responseTokens,
+            ...(this.provider === "openrouter" ? {stream_options:{include_usage:true},provider:{allow_fallbacks:false,...(tools.length?{require_parameters:true}:{})}} : {})},stream);
+          const valid = response.choices?.[0]?.message?.role === "assistant";
+          safeTraceFinish(request.trace, traceStep, { status: valid ? "completed" : "failed",
+            ...(valid ? { output: captureTraceContent ? traceContent(response.choices[0].message) : undefined } : { error: "模型未返回有效 assistant 回复。" }),
+            ...(reportedTraceUsage(response.usage, "chat") ? { usage: reportedTraceUsage(response.usage, "chat") } : {}),
+            ...(typeof response.model === "string" ? { model: response.model } : {}) });
+        } catch (error) {
+          safeTraceFinish(request.trace, traceStep, { status: "failed", error: error instanceof Error ? error.message : "模型调用失败。" });
+          throw error;
+        }
         await addUsage(response.usage);
         const reply=response.choices?.[0]?.message;
         if(!reply || reply.role!=="assistant") throw this.failure("OpenRouter 没有返回有效回复。");
@@ -350,11 +366,13 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
           if(call.type!=="function" || typeof call.id!=="string" || !call.id || seen.has(call.id)) throw this.failure("OpenRouter 工具调用无效或重复。");
           seen.add(call.id);
           let output: unknown;
+          let toolTrace: string | undefined;
           try {
             const args=JSON.parse(call.function?.arguments??"{}");
             if(!args || typeof args!=="object" || Array.isArray(args)) throw new Error("Invalid arguments.");
             const name=call.function?.name;
             if(name===IMAGE_TOOL && imageAllowed) {
+              toolTrace = safeTraceStart(request.trace, { kind: "tool", name, provider: this.provider, parentId: traceStep, input: captureTraceContent ? args : undefined });
               const result = await imageTool!.execute(args);
               output = result.output;
               if (result.response) {
@@ -365,10 +383,20 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
                 if (imageUsage.costUsd !== undefined) usage.costUsd = (usage.costUsd ?? 0) + imageUsage.costUsd;
                 images.push(image); if (!request.ephemeral) record.images = images; await writeJsonAtomic(turnPath, record);
               }
-            } else if(tools.some(t=>t.function?.name===name) && request.executeTool) output=await request.executeTool(name,args);
+            } else if(tools.some(t=>t.function?.name===name) && request.executeTool) {
+              toolTrace = safeTraceStart(request.trace, { kind: "tool", name, provider: this.provider, parentId: traceStep, input: captureTraceContent ? args : undefined });
+              output=await request.executeTool(name,args);
+            }
             else throw new Error("工具不可用或未授权。");
+            safeTraceFinish(request.trace, toolTrace, { status: tracedToolStatus(output), output: captureTraceContent ? output : undefined });
           } catch {
             output={success:false,error:"工具调用失败、参数无效或能力不支持。不要声称已成功；生图失败不得重试。"};
+            if (toolTrace) safeTraceFinish(request.trace, toolTrace, { status: "failed", output: captureTraceContent ? output : undefined, error: "工具调用失败。" });
+            else {
+              const rejected = safeTraceStart(request.trace, { kind: "system", name: "tool_rejected", parentId: traceStep,
+                input: captureTraceContent ? { name: call.function?.name, arguments: call.function?.arguments } : undefined });
+              safeTraceFinish(request.trace, rejected, { status: "failed", output: captureTraceContent ? output : undefined });
+            }
           }
           messages.push({role:"tool",tool_call_id:call.id,content:safeToolOutput(output)});
         }

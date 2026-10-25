@@ -98,6 +98,7 @@ export interface LaneState {
 
 export interface StatefulResponseOptions {
   webSearchAllowed?: boolean;
+  trace?: import("../../observability/types.js").RuntimeTraceObserver;
   history?: RuntimeHistory;
   deliveryId?: string;
   accessToken: string;
