@@ -192,6 +192,8 @@ export class GatewayService {
         this.localKnowledge,
         this.conversationQueue,
         async () => { const settings=await this.voice.settings.get();return this.voice.configured()&&settings.tts&&settings.proactive; },
+        this.mood,
+        this.life,
       );
     }
   }
