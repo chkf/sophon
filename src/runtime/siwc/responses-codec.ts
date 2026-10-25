@@ -73,8 +73,8 @@ export async function currentUserItem(
   return { role: "user", content };
 }
 
-export function responseTools(tools: RuntimeTool[]): Record<string, unknown>[] {
-  return [{ type: "web_search" }, ...toolNamespace(tools)];
+export function responseTools(tools: RuntimeTool[], webSearchAllowed = true): Record<string, unknown>[] {
+  return [...(webSearchAllowed ? [{ type: "web_search" }] : []), ...toolNamespace(tools)];
 }
 
 export function callsFrom(output: Record<string, unknown>[]): FunctionCallItem[] {

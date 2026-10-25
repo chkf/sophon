@@ -150,6 +150,15 @@ export class TelegramAdapter implements ProactiveSender {
       photo:new Blob([new Uint8Array(bytes)],{type:"image/png"}),protect_content:true,caption:"微信绑定二维码：请用自己的微信扫码。建议在电脑 TG 展示、手机微信扫描。"});
     await this.scheduleCommandReplyDeletion(this.config.ownerId,[sent.message_id],300_000);
   }
+  async sendDocumentToOwner(file: import("../../files/service.js").OutboundDocument): Promise<number> {
+    const sent = await this.api.call<{ message_id: number }>("sendDocument", {
+      chat_id: this.config.ownerId,
+      document: new File([new Uint8Array(file.bytes)], file.filename, { type: "application/octet-stream" }),
+      ...(file.caption ? { caption: file.caption } : {}),
+    }, 60_000);
+    if (!Number.isSafeInteger(sent?.message_id) || sent.message_id <= 0) throw new Error("Telegram did not acknowledge document delivery");
+    return sent.message_id;
+  }
   async notify(text:string,open?:()=>Promise<import("./panels.js").PanelView>):Promise<void> {
     await this.panels.open(this.config.ownerId,{text,rows:open?[[{text:"微信管理 / 重新绑定",run:open}]]:[]});
   }

@@ -25,6 +25,8 @@ export interface HeartbeatConfig {
 
 export interface GatewayConfig {
   dataDir: string;
+  files?: { enabled: boolean; generatedDir: string };
+  recentReview?: { enabled: boolean };
   logDir?: string;
   siwcDevkitDir: string;
   model?: string;
@@ -124,6 +126,11 @@ export function loadConfig(): GatewayConfig {
       heartbeat: bool("OPENROUTER_HEARTBEAT_ENABLED", false),
     },
     dataDir: resolve(process.env.GATEWAY_DATA_DIR ?? "./data"),
+    files: {
+      enabled: bool("GATEWAY_FILES_ENABLED", false),
+      generatedDir: resolve(optional("GATEWAY_GENERATED_FILES_DIR") ?? resolve(process.env.GATEWAY_DATA_DIR ?? "./data", "files/generated")),
+    },
+    recentReview: { enabled: bool("GATEWAY_RECENT_REVIEW_ENABLED", false) },
     ...(optional("GATEWAY_LOG_DIR") ? { logDir: resolve(optional("GATEWAY_LOG_DIR")!) } : {}),
     siwcDevkitDir: resolve(process.env.GATEWAY_SIWC_DEVKIT_DIR ?? "./vendor/siwc"),
     ...(model ? { model } : {}),

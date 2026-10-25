@@ -14,6 +14,7 @@ Self-hosted messaging gateway with local SQLite context, configurable personas, 
 - 通用 OpenAI 兼容 API（自定义地址、密钥、模型）；可选 OpenRouter 专用模式与 ChatGPT 登录适配器。
 - 可选语音、图片生成和主动消息。
 - 内置 Core、Persona、Recent 和聊天历史工具。
+- 可选本地文件浏览、保存与发送、确认后修改或删除，以及独立的后台 Recent 整理。
 
 当前是单用户、单实例框架。API、数据库格式和配置仍可能演进。主动消息默认关闭；没有内置个人资料、私人业务工作流或固定角色设定。
 
@@ -81,6 +82,8 @@ npm start
 - **微信 iLink**：启用 `GATEWAY_ILINK_ENABLED=true`，通过 `/proactive` 绑定。在无系统凭据存储的主机上，先用 `npm run credentials:create -- ./secrets/chatgpt-credential.key` 生成密钥，再设置 `GATEWAY_CREDENTIAL_KEY_FILE=./secrets/chatgpt-credential.key`；此密钥不依赖 SIWC。
 
 提供商不会因出错自动切换；选择和历史各自持久保存。模型与服务可用性由对应账号和上游服务决定。
+
+文件工具与后台记忆整理默认关闭，启用方法及边界见 [文件操作](docs/files.md) 和 [Recent 后台整理](docs/recent-review.md)。两项功能均使用现有服务和 SQLite；后台整理无需开启主动消息。
 
 服务启动后将带时间戳并脱敏的日志写入 `data/logs/gateway.log`，供 Telegram `/logs` 读取；单文件最多约 5 MiB，并保留一份轮换文件。`GATEWAY_LOG_DIR` 可覆盖目录，`GATEWAY_LOG_ENABLED=false` 可关闭文件日志。
 

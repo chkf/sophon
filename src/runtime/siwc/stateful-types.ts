@@ -97,6 +97,7 @@ export interface LaneState {
 }
 
 export interface StatefulResponseOptions {
+  webSearchAllowed?: boolean;
   history?: RuntimeHistory;
   deliveryId?: string;
   accessToken: string;

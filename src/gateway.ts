@@ -1,4 +1,5 @@
 import { replyText } from "./runtime/reply-segments.js";
+import type { FileService } from "./files/service.js";
 import { LOCAL_CONTEXT_TOOLS, executeLocalContextTool } from "./core/tools.js";
 import { DeliveryCoordinator } from "./delivery/coordinator.js";
 import { VoiceTurn, voiceTool, VOICE_TOOL } from "./voice/tool.js";
@@ -108,6 +109,7 @@ export class Gateway {
     private readonly localKnowledge?: LocalKnowledgeStore,
     private readonly voiceAllowed?: (message: InboundMessage) => Promise<boolean>,
     private readonly onCompaction?: (checkpoint: import("./runtime/siwc/stateful-types.js").CompactionCheckpoint) => Promise<void>,
+    private readonly files?: FileService,
   ) { this.delivery = new DeliveryCoordinator(runtime, sessions); }
 
   private runtimeTools(contextAvailable: boolean): RuntimeTool[] {
@@ -170,6 +172,8 @@ export class Gateway {
     if (view.history.count > 0) tools.push(HISTORY_DEFINITION);
     if(native?.enabled) tools.push(NATIVE_REPLY_DEFINITION);
     if(voice) tools.push(voiceTool);
+    const fileTools = this.files?.tools(message) ?? [];
+    tools.push(...fileTools);
     const attachments = richAttachments(message);
     const allChannelAttachments = [...(message.replyTo?.attachments ?? []),
       ...(message.platformMessages ?? []).flatMap(fragment => fragment.references ?? []).flatMap(reference => reference.attachments ?? []), ...message.attachments];
@@ -243,6 +247,7 @@ export class Gateway {
           tools,
           executeTool: async (name: string, args: Record<string, unknown>) => {
             if (!tools.some(tool => tool.name === name)) throw new Error("本轮未开放该工具。");
+            if (this.files && fileTools.some(tool => tool.name === name)) return this.files.execute(name, args, message);
             if (name === HISTORY_TOOL) {
               return readHistoryTool(view.history, args);
             }

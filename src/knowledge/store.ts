@@ -232,7 +232,7 @@ export class LocalKnowledgeStore {
    * Scope must be a formal session key; never pass ephemeral session data.
    */
   commitReview(scope: string, expectedCursor: number, throughSeq: number, changes: RecentChange[],
-    creates: Omit<RecentCreate, "sourceId">[] = []): "committed" | "already" {
+    creates: Omit<RecentCreate, "sourceId">[] = [], deletes: RecentDelete[] = []): "committed" | "already" {
     required(scope, "review scope");
     if (!scope.startsWith("formal:")) throw new Error("Only formal review scope is supported.");
     if (!Number.isSafeInteger(expectedCursor) || expectedCursor < -1 || !Number.isSafeInteger(throughSeq) || throughSeq < expectedCursor) {
@@ -250,7 +250,11 @@ export class LocalKnowledgeStore {
       if (row.n !== expected || row.first_seq !== current + 1 || row.last_seq !== throughSeq) {
         throw new Error("Cannot advance Recent review cursor across missing or unseen messages.");
       }
-      if (changes.length > 12 || creates.length > 12) throw new Error("Review proposal exceeds bounded change count.");
+      if (changes.length > 12 || creates.length > 12 || deletes.length > 12) throw new Error("Review proposal exceeds bounded change count.");
+      const targets = [...changes, ...deletes].map(item => item.id);
+      if (new Set(targets).size !== targets.length) throw new Error("Review targets overlap or repeat.");
+      if (deletes.length && !this.supportsContextTools) throw new Error("Review deletion requires the current database schema.");
+      if (deletes.length) this.deleteRecentTx(deletes);
       for (const change of changes) this.updateRecentTx(change);
       const bodies = new Set<string>();
       for (const [index, create] of creates.entries()) {
