@@ -5,7 +5,10 @@ import { randomInt } from "node:crypto";
 import { join } from "node:path";
 import type { ActiveChannelRouter } from "../channels/active.js";
 import type { HeartbeatConfig } from "../config/index.js";
-import type { ChatRuntime } from "../runtime/types.js";
+import type { ChatRequest, ChatResponse, ChatRuntime } from "../runtime/types.js";
+import { TaskTraceStore, type TaskTraceFinish, type TaskTraceStart } from "../observability/store.js";
+import { safeTraceStart, safeTraceFinish } from "../observability/runtime-trace.js";
+import type { TraceStepStart } from "../observability/types.js";
 import type { SessionMessage, SessionStore } from "../sessions/store.js";
 import { readSessionView } from "../sessions/view.js";
 import type { LocalCoreContextProvider } from "../core/context.js";
@@ -38,6 +41,7 @@ export class HeartbeatRunner {
   private readonly statePath: string;
   private running = false;
   private pendingTick?: Promise<void>;
+  private readonly traceSkipTimes = new Map<string, number>();
 
   constructor(
     dataDir: string,
@@ -51,8 +55,53 @@ export class HeartbeatRunner {
     _localKnowledge?: LocalKnowledgeStore,
     private readonly conversationQueue?: import("../util/serial-queue.js").SerialQueue,
     private readonly voiceAllowed?: () => Promise<boolean>,
+    private readonly traces?: TaskTraceStore,
   ) {
     this.statePath = join(dataDir, "heartbeat", "state.json");
+  }
+
+  private traceBegin(input: TaskTraceStart): string | undefined {
+    try { return this.traces?.begin(input); } catch { return undefined; }
+  }
+  private traceFinish(id: string | undefined, status: TaskTraceFinish["status"], reason?: string): void {
+    try { if (id) this.traces?.finish(id, {status, reason}); } catch { /* Observation does not alter delivery. */ }
+  }
+  private traceEvent(id: string | undefined, event: TraceStepStart, output?: unknown): void {
+    if (!id || !this.traces) return;
+    const observer = this.traces.observer(id);
+    const step = safeTraceStart(observer,event); safeTraceFinish(observer,step,{status:"completed",output});
+  }
+  private traceSkip(reason: string, now: Date): void {
+    if (!this.traces) return;
+    // Timer polling is not a new model task. Coalesce unchanged gate states for 30 minutes.
+    const previous = this.traceSkipTimes.get(reason);
+    if (previous !== undefined && now.getTime() - previous < 30 * 60_000) return;
+    this.traceSkipTimes.set(reason,now.getTime());
+    const id = this.traceBegin({kind:"heartbeat_check",trigger:"scheduler_gate",at:now});
+    this.traceEvent(id,{kind:"condition",name:"调度条件检查"},{eligible:false,reason});
+    this.traceFinish(id,"skipped",reason);
+  }
+  private async tracedReply(runId: string | undefined, request: ChatRequest): Promise<ChatResponse> {
+    const observer = runId && this.traces ? this.traces.observer(runId) : undefined;
+    const step = safeTraceStart(observer,{kind:"system",name:"准备模型任务",input:{purpose:request.purpose,instructions:request.instructions,text:request.text,tools:request.tools}});
+    safeTraceFinish(observer,step,{status:"completed",output:{prepared:true}});
+    try { return await this.runtime.reply({...request,...(observer ? {trace:observer} : {})}); }
+    catch (error) {
+      this.traceEvent(runId,{kind:"system",name:"模型任务失败"},{error:error instanceof Error ? error.message : "request_failed"});
+      this.traceFinish(runId,"failed","model_request_failed"); throw error;
+    }
+  }
+  private async traceDelivery(runId: string | undefined, name: string, input: unknown, send: () => Promise<boolean>): Promise<boolean> {
+    const observer = runId && this.traces ? this.traces.observer(runId) : undefined;
+    const step = safeTraceStart(observer,{kind:"delivery",name,input});
+    try {
+      const sent = await send();
+      safeTraceFinish(observer,step,{status:sent ? "completed" : "skipped",output:{acknowledged:sent,...(!sent ? {reason:"channel_unavailable"} : {})}});
+      return sent;
+    } catch (error) {
+      safeTraceFinish(observer,step,{status:"failed",error:error instanceof Error ? error.message : "delivery_unknown",output:{acknowledged:false,result:"unknown"}});
+      throw error;
+    }
   }
 
   private async routeView(channel: "telegram" | "wechat", target:string) {
@@ -125,6 +174,7 @@ export class HeartbeatRunner {
     // Never defer an old evening message until the next morning after quiet hours.
     const preparedAt = new Date(pending.at).getTime();
     if (!Number.isFinite(preparedAt) || now.getTime() - preparedAt > 45 * 60_000) {
+      this.traceFinish(pending.traceId,"skipped","pending_expired");
       delete state.pending;
       await writeJsonAtomic(this.statePath, state);
       return;
@@ -132,11 +182,13 @@ export class HeartbeatRunner {
     if (isQuietTime(now, this.config.timezone, this.config.quietStart, this.config.quietEnd)) return;
 
     if (!pending.channel) {
+      this.traceFinish(pending.traceId,"skipped","pending_channel_missing");
       delete state.pending;
       await writeJsonAtomic(this.statePath, state);
       return;
     }
     if (!(await this.router.isActive(pending.channel))) {
+      this.traceFinish(pending.traceId,"skipped","channel_changed");
       delete state.pending;
       await writeJsonAtomic(this.statePath, state);
       return;
@@ -162,25 +214,35 @@ export class HeartbeatRunner {
     delete state.pending;
     await writeJsonAtomic(this.statePath, state);
 
+    let traceId = pending.traceId;
+    try { if (!traceId || this.traces?.get(traceId)?.status !== "running") traceId = this.traceBegin({kind:"heartbeat_delivery",trigger:"pending_delivery",channel:pending.channel,at:now}); } catch { traceId = undefined; }
+    this.traceEvent(traceId,{kind:"system",name:"发送尝试已登记"},{deliveryId:"heartbeat:"+pending.at,attemptReserved:true});
+    let delivered = false;
     try {
       const deliveryId = "heartbeat:" + pending.at;
       if (pending.images?.length) {
-        const sent = await this.router.sendImagesIfActive(pending.channel, pending.target, pending.images, deliveryId);
-        if (!sent) return;
+        const sent = await this.traceDelivery(traceId,"图片交付",{channel:pending.channel,count:pending.images.length,deliveryId},() => this.router.sendImagesIfActive(pending.channel!, pending.target, pending.images!, deliveryId));
+        if (!sent) { this.traceFinish(traceId,"skipped","channel_unavailable"); return; }
+        delivered = true;
       }
       if (pending.text) {
         let platformMessages: PlatformMessageFragment[] | undefined;
-        const sent = await this.router.sendIfActive(pending.channel, pending.target, pending.text, pending.voiceText, fragments => { platformMessages = fragments; }, { deliveryId: deliveryId + ":text", at: now.toISOString(), ...(pending.replySegments ? {replySegments:pending.replySegments} : {}), ...(pending.channel==="telegram"&&pending.voiceText&&pending.voiceInstruction ? {voiceInstruction:pending.voiceInstruction} : {}) });
-        if (!sent) return;
+        const sent = await this.traceDelivery(traceId,"文字与语音交付",{channel:pending.channel,text:pending.text,voice:Boolean(pending.voiceText),deliveryId:deliveryId+":text"},() => this.router.sendIfActive(pending.channel!, pending.target, pending.text, pending.voiceText, fragments => { platformMessages = fragments; }, { deliveryId: deliveryId + ":text", at: now.toISOString(), ...(pending.replySegments ? {replySegments:pending.replySegments} : {}), ...(pending.channel==="telegram"&&pending.voiceText&&pending.voiceInstruction ? {voiceInstruction:pending.voiceInstruction} : {}) }));
+        if (!sent) { this.traceFinish(traceId,delivered ? "completed" : "skipped",delivered ? "partial_delivery" : "channel_unavailable"); return; }
+        delivered = true;
         await recordDeliveredAssistant(this.sessions, pending.channel, pending.target,
           pending.target, pending.text, undefined, deliveryId + ":text", now.toISOString(), { origin: "proactive" }, platformMessages);
       }
       if (pending.stickerIndex) {
-        const sent = await this.router.sendStickerIfActive(pending.channel, pending.target, pending.stickerIndex);
+        const sent = await this.traceDelivery(traceId,"贴纸交付",{channel:pending.channel,index:pending.stickerIndex},() => this.router.sendStickerIfActive(pending.channel!, pending.target, pending.stickerIndex!));
         if (sent) await recordDeliveredAssistant(this.sessions, pending.channel, pending.target,
           pending.target, "[贴纸]", undefined, deliveryId + ":sticker", now.toISOString());
+        if (!sent) { this.traceFinish(traceId,delivered ? "completed" : "skipped",delivered ? "partial_delivery" : "channel_unavailable"); return; }
+        delivered = true;
       }
+      this.traceFinish(traceId,delivered ? "delivered" : "skipped",delivered ? undefined : "empty_delivery");
     } catch (error) {
+      this.traceFinish(traceId,"delivery_unknown",error instanceof VoiceSupplementError ? "partial_voice_delivery" : "delivery_failed_or_uncertain");
       if(error instanceof VoiceSupplementError) {
         await recordDeliveredAssistant(this.sessions,pending.channel,pending.target,pending.target,
           error.deliveredText,undefined,"heartbeat:"+pending.at+":text",now.toISOString(),{origin:"proactive",partial:true});
@@ -200,12 +262,12 @@ export class HeartbeatRunner {
   private async plannedDue(now: Date, state: HeartbeatState): Promise<string | undefined> {
     // Do not create today's plan in the midnight–01:00 active window.
     // The first eligible wake at or after 07:00 starts the day's planning.
-    if (!basePlanningWindowOpen(now, this.config.timezone)) return undefined;
+    if (!basePlanningWindowOpen(now, this.config.timezone)) { this.traceSkip("planning_window_closed",now); return undefined; }
     const today = dateKey(now, this.config.timezone);
-    if (state.dateKey === today && state.sentToday >= this.config.dailyCap) return undefined;
-    if (isQuietTime(now, this.config.timezone, this.config.quietStart, this.config.quietEnd)) return undefined;
+    if (state.dateKey === today && state.sentToday >= this.config.dailyCap) { this.traceSkip("daily_cap",now); return undefined; }
+    if (isQuietTime(now, this.config.timezone, this.config.quietStart, this.config.quietEnd)) { this.traceSkip("quiet_hours",now); return undefined; }
     const route = await this.router.resolve();
-    if (!route) return undefined;
+    if (!route) { this.traceSkip("channel_unavailable",now); return undefined; }
 
     const view = await this.routeView(route.channel, route.target);
     const messages = view?.tail ?? [];
@@ -218,21 +280,22 @@ export class HeartbeatRunner {
     if (stale) {
       // Avoid planning around an unfinished burst of user messages.
       const sinceUserMs = lastUserAt ? now.getTime() - new Date(lastUserAt).getTime() : Infinity;
-      if (sinceUserMs >= 0 && sinceUserMs < 10 * 60_000) return undefined;
+      if (sinceUserMs >= 0 && sinceUserMs < 10 * 60_000) { this.traceSkip("planning_debounce",now); return undefined; }
       const lastAttempt = state.planAttemptAt ? new Date(state.planAttemptAt) : undefined;
       const attemptedThisMorning = lastAttempt && Number.isFinite(lastAttempt.getTime()) &&
         dateKey(lastAttempt, this.config.timezone) === today &&
         basePlanningWindowOpen(lastAttempt, this.config.timezone);
       const lastAttemptMs = lastAttempt ? now.getTime() - lastAttempt.getTime() : Infinity;
-      if (attemptedThisMorning && lastAttemptMs >= 0 && lastAttemptMs < 20 * 60_000) return undefined;
+      if (attemptedThisMorning && lastAttemptMs >= 0 && lastAttemptMs < 20 * 60_000) { this.traceSkip("planning_throttle",now); return undefined; }
 
       const context = await this.gateway.load();
-      if (!context.available) return undefined;
+      if (!context.available) { this.traceSkip("core_unavailable",now); return undefined; }
       state.planAttemptAt = now.toISOString();
       await writeJsonAtomic(this.statePath, state);
 
+      const planTrace = this.traceBegin({kind:"heartbeat_plan",trigger:plan ? "context_changed" : "daily_plan",channel:route.channel,at:now});
       try {
-        const response = await this.runtime.reply({
+        const response = await this.tracedReply(planTrace,{
           sessionId: "heartbeat-planner",
           purpose: "heartbeat_plan",
           text: "为今天剩余时间提出主动聊天的候选唤醒计划。",
@@ -253,16 +316,21 @@ export class HeartbeatRunner {
             ...(this.personas && !context.data?.persona ? [personaInstruction(await this.personas.snapshot())] : []),
           ].join("\n"),
         });
-        if (response.skipped) return undefined;
+        if (response.skipped) { this.traceFinish(planTrace,"skipped",response.skipped); return undefined; }
         plan = parseWakePlan(response.text, now, this.config.timezone, this.config.quietStart,
           this.config.quietEnd, this.config.dailyCap, route.channel, lastUserAt);
+        this.traceEvent(planTrace,{kind:"system",name:"解析候选计划"},plan);
       } catch (error) {
+        this.traceFinish(planTrace,"failed","planning_failed");
         console.error("[heartbeat] daily planning failed; retry at next planning window:",
           error instanceof Error ? error.message : error);
         return undefined;
       }
       state.plan = plan;
-      await writeJsonAtomic(this.statePath, state);
+      try {
+        await writeJsonAtomic(this.statePath, state);
+        this.traceFinish(planTrace,"completed",plan.wakes.length ? undefined : "empty_plan");
+      } catch (error) { this.traceFinish(planTrace,"failed","plan_persistence_failed"); throw error; }
     }
 
     const due = nextDueWake(plan!, now, this.config.timezone);
@@ -284,7 +352,7 @@ export class HeartbeatRunner {
     return this.conversationQueue ? this.conversationQueue.run(() => this.tickOrdered(now)) : this.tickOrdered(now);
   }
   private async tickOrdered(now: Date): Promise<void> {
-    if (await this.paused()) return;
+    if (await this.paused()) { this.traceSkip("paused",now); return; }
     const state = await this.loadState(now);
     if (state.pending) {
       await this.flushPending(state, now);
@@ -302,13 +370,13 @@ export class HeartbeatRunner {
 
     const lastActivity = await this.sessions.latestActivityAt();
     const policy = heartbeatEligible(now, this.config, state, lastActivity);
-    if (!policy.eligible) return;
+    if (!policy.eligible) { this.traceSkip(policy.reason ?? "policy_blocked",now); return; }
 
     const route = await this.router.resolve();
-    if (!route) return;
+    if (!route) { this.traceSkip("channel_unavailable",now); return; }
 
     const context = await this.gateway.load();
-    if (!context.available) return;
+    if (!context.available) { this.traceSkip("core_unavailable",now); return; }
 
     const conversation = await this.routeView(route.channel, route.target);
     const conversationMessages = conversation?.tail ?? [];
@@ -355,54 +423,61 @@ export class HeartbeatRunner {
     const persona = context.data?.persona ?? await this.personas?.snapshot();
     const replyTurn = new VoiceTurn(persona?.showStageDirections === true);
     const voice = route.channel === "telegram" && await this.voiceAllowed?.() ? replyTurn : undefined;
-    const response = await this.runtime.reply({
-      sessionId: "heartbeat",
-      recordReplyText: (text,id) => replyTurn.recordText(text,id),
-      finalizeReplyText: text => replyTurn.finalize(text),
-      getPreparedReplySegments: () => replyTurn.segments,
-      purpose: "heartbeat_decision",
-      ...(voice ? {getPreparedVoice:()=>voice.text,getPreparedVoiceInstruction:()=>voice.instruction} : {}),
-      operationId: "heartbeat:" + now.toISOString(),
-      text: "进行一次主动消息判断。",
-      imageOutputAllowed: route.channel === "telegram",
-      instructions: prompt+(voice ? "\n"+voice.guidance+"\nTelegram 主动语音已启用，按情境自由选择，尊重近期明确偏好；决定静默时不要调用。" : ""),
-      ...(voice ? { tools: [voiceTool], executeTool: async (name: string, args: Record<string, unknown>) => {
-        if (name !== VOICE_TOOL) throw new Error("本轮未授权该工具。");
-        return voice.select(args);
-      } } : {}),
-    });
-    if (!response.replySegments && voice && response.voiceText && !voice.text) voice.select({text:response.voiceText,...(response.voiceInstruction?{instruction:response.voiceInstruction}:{})});
-    const images = response.images?.slice(0, 1);
-    const rawText = response.text.trim();
-    const stickerMatch = rawText.match(/(?:^|\n)\[STICKER:(\d+)\]\s*$/i);
-    const count = this.router.availableStickers?.(route.channel) ?? 0;
-    const requestedIndex = stickerMatch ? Number(stickerMatch[1]) : 0;
-    const stickerIndex = Number.isSafeInteger(requestedIndex) && requestedIndex >= 1 &&
-      requestedIndex <= count ? requestedIndex : undefined;
-    const cleaned = stickerMatch ? rawText.slice(0, stickerMatch.index).trim() : rawText;
-    const silent=displayText(cleaned,false).toUpperCase() === "SILENT";
-    if (silent) return;
-    if (response.replySegments) replyTurn.restore(response.replySegments, Boolean(voice));
-    else replyTurn.combine(cleaned);
-    // Sticker control tokens are never a delivered text fragment.
-    const replySegments = replyTurn.segments.map(part=>({...part, text:part.text.replace(/(?:^|\n)\[STICKER:\d+\]\s*$/i, "").trim()})).filter(part=>part.text);
-    const text = replyText(replySegments);
-    if (!text && !images?.length && !stickerIndex) return;
+    const traceId = this.traceBegin({kind:"heartbeat_decision",trigger:plannedIntent ? "planned_wake" : "scheduled_check",channel:route.channel,at:now});
+    this.traceEvent(traceId,{kind:"condition",name:"基础条件检查"},{eligible:true,...(plannedIntent ? {intent:plannedIntent} : {})});
+    try {
+      const response = await this.tracedReply(traceId,{
+        sessionId: "heartbeat",
+        recordReplyText: (text,id) => replyTurn.recordText(text,id),
+        finalizeReplyText: text => replyTurn.finalize(text),
+        getPreparedReplySegments: () => replyTurn.segments,
+        purpose: "heartbeat_decision",
+        ...(voice ? {getPreparedVoice:()=>voice.text,getPreparedVoiceInstruction:()=>voice.instruction} : {}),
+        operationId: "heartbeat:" + now.toISOString(),
+        text: "进行一次主动消息判断。",
+        imageOutputAllowed: route.channel === "telegram",
+        instructions: prompt+(voice ? "\n"+voice.guidance+"\nTelegram 主动语音已启用，按情境自由选择，尊重近期明确偏好；决定静默时不要调用。" : ""),
+        ...(voice ? { tools: [voiceTool], executeTool: async (name: string, args: Record<string, unknown>) => {
+          if (name !== VOICE_TOOL) throw new Error("本轮未授权该工具。");
+          return voice.select(args);
+        } } : {}),
+      });
+      if (response.skipped) { this.traceFinish(traceId,"skipped",response.skipped); return; }
+      this.traceEvent(traceId,{kind:"system",name:"模型返回结果"},{text:response.text,model:response.model});
+      if (!response.replySegments && voice && response.voiceText && !voice.text) voice.select({text:response.voiceText,...(response.voiceInstruction?{instruction:response.voiceInstruction}:{})});
+      const images = response.images?.slice(0, 1);
+      const rawText = response.text.trim();
+      const stickerMatch = rawText.match(/(?:^|\n)\[STICKER:(\d+)\]\s*$/i);
+      const count = this.router.availableStickers?.(route.channel) ?? 0;
+      const requestedIndex = stickerMatch ? Number(stickerMatch[1]) : 0;
+      const stickerIndex = Number.isSafeInteger(requestedIndex) && requestedIndex >= 1 &&
+        requestedIndex <= count ? requestedIndex : undefined;
+      const cleaned = stickerMatch ? rawText.slice(0, stickerMatch.index).trim() : rawText;
+      const silent=displayText(cleaned,false).toUpperCase() === "SILENT";
+      if (silent) { this.traceFinish(traceId,"silent","model_returned_silent"); return; }
+      if (response.replySegments) replyTurn.restore(response.replySegments, Boolean(voice));
+      else replyTurn.combine(cleaned);
+      // Sticker control tokens are never a delivered text fragment.
+      const replySegments = replyTurn.segments.map(part=>({...part, text:part.text.replace(/(?:^|\n)\[STICKER:\d+\]\s*$/i, "").trim()})).filter(part=>part.text);
+      const text = replyText(replySegments);
+      if (!text && !images?.length && !stickerIndex) { this.traceFinish(traceId,"skipped","empty_output"); return; }
 
-    const fingerprint = heartbeatFingerprint(text + (images?.[0]?.sha256 ?? "") + (stickerIndex ? ":sticker:" + stickerIndex : ""));
-    if (state.recent.some((item) => item.fingerprint === fingerprint)) return;
+      const fingerprint = heartbeatFingerprint(text + (images?.[0]?.sha256 ?? "") + (stickerIndex ? ":sticker:" + stickerIndex : ""));
+      if (state.recent.some((item) => item.fingerprint === fingerprint)) { this.traceFinish(traceId,"skipped","duplicate_output"); return; }
 
-    state.pending = {
-      fingerprint,
-      text,
-      replySegments,
-      ...(images?.length ? { images } : {}),
-      ...(stickerIndex ? { stickerIndex } : {}),
-      target: route.target,
-      channel: route.channel,
-      at: now.toISOString(),
-    };
-    await writeJsonAtomic(this.statePath, state);
-    await this.flushPending(state, now);
+      state.pending = {
+        ...(traceId ? {traceId} : {}),
+        fingerprint,
+        text,
+        replySegments,
+        ...(images?.length ? { images } : {}),
+        ...(stickerIndex ? { stickerIndex } : {}),
+        target: route.target,
+        channel: route.channel,
+        at: now.toISOString(),
+      };
+      await writeJsonAtomic(this.statePath, state);
+      await this.flushPending(state, now);
+    } catch (error) { this.traceFinish(traceId,"failed","task_failed"); throw error; }
   }
 }

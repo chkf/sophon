@@ -13,6 +13,7 @@ export const TELEGRAM_COMMANDS = [
   { command: "proactive", description: "选择 Telegram/微信/关闭主动消息" },
   { command: "logs", description: "查看最近 15 分钟日志" },
   { command: "test", description: "打开诊断面板" },
+  { command: "status", description: "打开 Sophon 控制中心" },
 ] as const;
 
 interface ParsedCommand {
@@ -42,6 +43,7 @@ export class GatewayCommandRouter {
     private readonly logReader?: GatewayLogReader,
     private readonly testRunner?: HostTestRunner,
     private readonly personas?: PersonaStore,
+    private readonly controlEntry?: (message: InboundMessage) => string | Promise<string>,
   ) {}
 
   async handle(message: InboundMessage): Promise<string | undefined> {
@@ -66,6 +68,9 @@ export class GatewayCommandRouter {
     if (!parsed) return undefined;
 
     switch (parsed.name) {
+      case "status":
+        if (parsed.args) return "请直接发送 /status 获取控制中心入口。";
+        return this.controlEntry ? this.controlEntry(message) : "控制中心未启用；请配置 GATEWAY_CONTROL_PUBLIC_URL。";
       case "retry":
         return "恢复待回复消息仅在所有者的 Telegram 私聊提供。";
       case "persona":

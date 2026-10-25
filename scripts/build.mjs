@@ -15,3 +15,5 @@ const compiler = new URL("../node_modules/typescript/bin/tsc", import.meta.url);
 const result = spawnSync(process.execPath, [fileURLToPath(compiler), "-p", "tsconfig.json"], { stdio: "inherit" });
 if (result.status !== 0) process.exit(result.status ?? 1);
 await cp("schema-compatibility.json", "dist/schema-compatibility.json");
+
+await cp("src/control/assets", "dist/control/assets", { recursive: true });

@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { safeToolOutput } from "../tool-output.js";
+import { safeTraceStart, safeTraceFinish } from "../../observability/runtime-trace.js";
+import { tracedToolStatus } from "../trace-content.js";
 import { SerialQueue } from "../../util/serial-queue.js";
 import { isMissingPreviousResponseError, isRetryableTransportError, isSubscriptionUsageLimitError, tagInboundRetryability } from "../retry-policy.js";
 import type { LaneState, ResponseSnapshot, StatefulResponsesSocket, StatefulResponsesSocketFactory, StatefulResponseOptions, StatefulResponseResult } from "./stateful-types.js";
@@ -375,6 +377,7 @@ export class StatefulResponsesBridge {
     // Reads and local unpaid intents are safe to replay after a failed model
     // continuation; writes and unknown tools are potentially irreversible.
     let unsafeToolInvocationStarted = false;
+    const captureTraceContent = Boolean(options.trace && options.trace.captureContent !== false);
     const replayableTools = new Set((options.tools ?? []).filter((tool) => tool.readOnly === true || tool.replaySafe === true).map((tool) => tool.name));
     let socket = this.ensureSocket(lane, options.accessToken);
     const tools = responseTools(options.tools ?? []);
@@ -499,7 +502,7 @@ export class StatefulResponsesBridge {
         stepIndex += 1;
         const usedPreviousResponseId = Boolean(previousResponseId);
         const stepInputItems = nextInput.length;
-        let completed: { response: ResponseSnapshot; retries: number };
+        let completed: { response: ResponseSnapshot; retries: number; traceStepId?: string };
         try {
           completed = await this.transport.completedResponseWithRetry(socket, {
             type: "response.create",
@@ -516,7 +519,7 @@ export class StatefulResponsesBridge {
               compact_threshold: weeklyDue && !explicitlyCompacted
                 ? SIWC_WEEKLY_COMPACT_TOKENS : compactThresholdForModel(options.model),
             }],
-          });
+          }, options.trace);
         } catch (error) {
           if (
             previousResponseId &&
@@ -541,7 +544,7 @@ export class StatefulResponsesBridge {
           }
           throw error;
         }
-        const { response, retries } = completed;
+        const { response, retries, traceStepId } = completed;
 
         if (typeof response.id !== "string" || !response.id) {
           throw new Error("Responses WebSocket returned no response id.");
@@ -694,10 +697,14 @@ export class StatefulResponsesBridge {
               call_id: call.call_id,
               output: JSON.stringify({ error: "工具参数不是有效的 JSON 对象。" }),
             };
+            const rejected = safeTraceStart(options.trace, { kind: "system", name: "tool_rejected", parentId: traceStepId,
+              input: captureTraceContent ? { name: call.name, arguments: call.arguments } : undefined });
+            safeTraceFinish(options.trace, rejected, { status: "failed", error: "工具参数不是有效的 JSON 对象。" });
             await recordToolResults();
             continue;
           }
 
+          const toolTrace = safeTraceStart(options.trace, { kind: "tool", name: call.name, provider: "siwc", parentId: traceStepId, input: captureTraceContent ? args : undefined });
           try {
             if (!replayableTools.has(call.name)) unsafeToolInvocationStarted = true;
             const outputValue = await options.executeTool(call.name, args);
@@ -706,7 +713,9 @@ export class StatefulResponsesBridge {
               call_id: call.call_id,
               output: safeToolOutput(outputValue),
             };
+            safeTraceFinish(options.trace, toolTrace, { status: tracedToolStatus(outputValue), output: captureTraceContent ? outputValue : undefined });
           } catch (error) {
+            safeTraceFinish(options.trace, toolTrace, { status: "failed", error: error instanceof Error ? error.message : String(error) });
             outputs[index] = {
               type: "function_call_output",
               call_id: call.call_id,
