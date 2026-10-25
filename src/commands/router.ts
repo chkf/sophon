@@ -1,3 +1,4 @@
+import type { MoodStore } from "../mood/store.js";
 import { IMAGE_PRESETS } from "../runtime/image-settings.js";
 import { HOST_TEST_SCRIPTS, isHostTestScript, type HostTestRunner } from "./host-tests.js";
 import type { InboundMessage } from "../channels/types.js";
@@ -8,6 +9,7 @@ import { API_UNSUPPORTED_IMAGES, isProvider, providerLabel } from "./providers.j
 
 export const TELEGRAM_COMMANDS = [
   { command: "retry", description: "重试失败的待回复消息" },
+  { command: "mood", description: "查看当前心情等级" },
   { command: "persona", description: "人格预设：切换、添加、修改、删除" },
   { command: "model", description: "Provider/聊天模型/生图设置" },
   { command: "proactive", description: "选择 Telegram/微信/关闭主动消息" },
@@ -42,6 +44,7 @@ export class GatewayCommandRouter {
     private readonly logReader?: GatewayLogReader,
     private readonly testRunner?: HostTestRunner,
     private readonly personas?: PersonaStore,
+    private readonly mood?: MoodStore,
   ) {}
 
   async handle(message: InboundMessage): Promise<string | undefined> {
@@ -66,6 +69,14 @@ export class GatewayCommandRouter {
     if (!parsed) return undefined;
 
     switch (parsed.name) {
+      case "mood": {
+        if (parsed.args) return "用法：/mood（仅查看）";
+        if (!this.mood) return "Mood 尚未启用。";
+        const state = this.mood.snapshot();
+        return ["Mood：" + state.level + "/10 · " + state.label,
+          "自然增长：" + (state.roundsToNext === null ? "已达自然增长上限" : "还需 " + state.roundsToNext + " 轮"),
+          "上次交流：" + (state.lastInteractionAt ?? "尚无记录")].join("\n");
+      }
       case "retry":
         return "恢复待回复消息仅在所有者的 Telegram 私聊提供。";
       case "persona":
