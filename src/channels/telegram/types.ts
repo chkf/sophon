@@ -12,6 +12,7 @@ export interface TelegramMessage {
   from?: { id: number | string; is_bot?: boolean };
   chat: { id: number | string; type: string };
   reply_to_message?: TelegramMessage;
+  sticker?: TelegramFile & { is_animated?: boolean; is_video?: boolean; emoji?: string; set_name?: string; thumbnail?: TelegramPhoto };
   photo?: TelegramPhoto[];
   document?: TelegramFile;
   audio?: TelegramFile;

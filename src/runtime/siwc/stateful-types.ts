@@ -119,6 +119,7 @@ export interface StatefulResponseOptions {
   getPreparedReplySegments?: () => ReplySegment[];
   getPreparedVoice?: () => string | undefined;
   getPreparedVoiceInstruction?: () => string | undefined;
+  getPreparedSticker?: () => import("../../channels/types.js").TelegramSticker | undefined;
   getPreparedNativeReply?: () => import("../../channels/types.js").TelegramNativeReply | undefined;
   finalizeReplyText?: (text: string) => string;
   maxToolRounds?: number;
@@ -128,6 +129,7 @@ export interface StatefulResponseResult {
   replySegments?: ReplySegment[];
   voiceText?: string;
   voiceInstruction?: string;
+  sticker?: import("../../channels/types.js").TelegramSticker;
   nativeReply?: import("../../channels/types.js").TelegramNativeReply;
   text: string;
   usage: ChatUsage;

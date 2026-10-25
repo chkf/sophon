@@ -8,6 +8,7 @@ import { TelegramBotApiError } from "./api.js";
 import { splitHumanMessages } from "../message-splitting.js";
 import { normalizeInboundReply } from "../reply.js";
 import type { InboundReply, PlatformMessageFragment, TelegramNativeReply } from "../types.js";
+import { validSticker } from "../../runtime/stickers.js";
 import { nativeReplyParameters } from "../../runtime/native-reply.js";
 export type TelegramTextProgress = (text: string, messageId: number) => void;
 export async function sendTelegramImage(api: TelegramApiClient, target: string, image: RuntimeImage,
@@ -119,6 +120,19 @@ export async function deliverPreparedReply(api: TelegramApiClient, pending: Tele
   };
   try {
     // The durable pending reply was consumed before the first network attempt.
+    if (pending.kind === "model_reply" && pending.sticker) {
+      if (pending.senderId !== pending.chatId || !validSticker(pending.sticker, pending.chatId, accountId))
+        throw new Error("Prepared sticker is not authorized for this bot and chat.");
+      const reply = attached ? undefined : verified;
+      const sent = await api.call<{ message_id?: number }>("sendSticker", { chat_id: pending.chatId,
+        sticker: pending.sticker.fileId, ...(reply ? { reply_parameters: reply } : {}) });
+      const id = sent?.message_id;
+      if (id === undefined || !Number.isSafeInteger(id) || id <= 0) throw new Error("Sticker delivery is uncertain: missing message_id.");
+      if (reply) attached = true;
+      deliveredText.push("[已发送贴纸]");
+      record(id, "[已发送贴纸]");
+      if (platformMessages.length) platformMessages[platformMessages.length - 1]!.attachments = [{ kind: "image", sticker: pending.sticker }];
+    }
     for (const image of (pending.kind === "model_reply" ? pending.images ?? [] : []).slice(0, 1)) {
       const reply = attached ? undefined : verified;
       if (reply) attached = true;
@@ -160,7 +174,7 @@ export async function deliverPreparedReply(api: TelegramApiClient, pending: Tele
     if (pending.kind === "model_reply") {
       try {
         await callbacks.onReplyDelivered?.({
-          conversationId: pending.chatId, senderId: pending.senderId, reply: pending.text,
+          conversationId: pending.chatId, senderId: pending.senderId, reply: pending.text || (pending.sticker ? "[已发送贴纸]" : ""),
           images: pending.images, deliveryId: pending.deliveryId,
           ...(platformMessages.length ? { platformMessages } : {}),
         });

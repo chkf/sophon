@@ -12,7 +12,7 @@ export type ReplyOutcome =
   | { kind: "retry"; retryAfterMs: number }
   | { kind: "pause"; reason: "subscription_usage_limit" | "model_failure" }
   | { kind: "local_reply"; text: string }
-  | { kind: "model_reply"; text: string; replySegments?: ReplySegment[]; images?: InboundReply["images"]; voiceRequested?: boolean; voiceText?: string; voiceInstruction?: string; nativeReply?: TelegramNativeReply; deliveryId: string };
+  | { kind: "model_reply"; text: string; replySegments?: ReplySegment[]; images?: InboundReply["images"]; voiceRequested?: boolean; voiceText?: string; voiceInstruction?: string; nativeReply?: TelegramNativeReply; sticker?: import("./types.js").TelegramSticker; deliveryId: string };
 export function replyOutcome(value: InboundReply): ReplyOutcome {
   if (value.retryAfterMs !== undefined) {
     if (value.text || value.images?.length || value.commitAssistant) throw new Error("Retry cannot contain a prepared reply.");

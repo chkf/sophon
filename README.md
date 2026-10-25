@@ -9,6 +9,7 @@ Self-hosted messaging gateway with local SQLite context, configurable personas, 
 ## 能力与范围
 
 - Telegram 管理员私聊、消息合并、原生回复、媒体传输与持久化交付状态。
+- [Telegram 贴纸](docs/telegram-stickers.md)：静态图片识别、动态贴纸预览，以及当前或历史贴纸的选择发送。
 - 可选微信 iLink；通过 Telegram 管理员管理绑定。
 - SQLite 会话历史、全文检索、Core 与 Recent 上下文、可编辑的表达风格。
 - 通用 OpenAI 兼容 API（自定义地址、密钥、模型）；可选 OpenRouter 专用模式与 ChatGPT 登录适配器。

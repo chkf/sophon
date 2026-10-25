@@ -165,6 +165,7 @@ export class SiwcRuntime implements ManagedChatRuntime {
         ...(request.getPreparedReplySegments ? {getPreparedReplySegments:request.getPreparedReplySegments} : {}),
         ...(request.getPreparedVoice ? {getPreparedVoice:request.getPreparedVoice} : {}),
         ...(request.getPreparedVoiceInstruction ? {getPreparedVoiceInstruction:request.getPreparedVoiceInstruction} : {}),
+        ...(request.getPreparedSticker ? {getPreparedSticker:request.getPreparedSticker} : {}),
         ...(request.getPreparedNativeReply ? {getPreparedNativeReply:request.getPreparedNativeReply} : {}),
         ...(request.finalizeReplyText ? { finalizeReplyText: request.finalizeReplyText } : {}),
         ...(request.maxToolRounds !== undefined ? { maxToolRounds: request.maxToolRounds } : {}),
@@ -174,6 +175,7 @@ export class SiwcRuntime implements ManagedChatRuntime {
         ...(result.replySegments ? {replySegments:result.replySegments} : {}),
         ...(result.voiceText ? {voiceText:result.voiceText} : {}),
         ...(result.voiceInstruction ? {voiceInstruction:result.voiceInstruction} : {}),
+        ...(result.sticker ? {sticker:result.sticker} : {}),
         ...(result.nativeReply ? {nativeReply:result.nativeReply} : {}),
         model: selected.id,
         usage: result.usage,
@@ -203,7 +205,7 @@ export class SiwcRuntime implements ManagedChatRuntime {
         ...(request.finalizeReplyText ? { finalizeReplyText: request.finalizeReplyText } : {}),
         ...(request.maxToolRounds !== undefined ? { maxToolRounds: request.maxToolRounds } : {}),
       });
-      return { text, model: selected.id, ...(request.getPreparedReplySegments ? {replySegments:request.getPreparedReplySegments()} : {}), ...(request.getPreparedNativeReply?.() ? { nativeReply: request.getPreparedNativeReply!() } : {}) };
+      return { text, model: selected.id, ...(request.getPreparedReplySegments ? {replySegments:request.getPreparedReplySegments()} : {}), ...(request.getPreparedSticker?.() ? {sticker:request.getPreparedSticker!()} : {}), ...(request.getPreparedNativeReply?.() ? { nativeReply: request.getPreparedNativeReply!() } : {}) };
     }
 
     const result = await this.client.streamResponse({
@@ -213,7 +215,7 @@ export class SiwcRuntime implements ManagedChatRuntime {
     });
     const text = request.finalizeReplyText?.(result.text) ?? result.text;
     if (!text.trim()) throw new Error("The ChatGPT runtime returned an empty response.");
-    return { text, model: selected.id, ...(request.getPreparedReplySegments ? {replySegments:request.getPreparedReplySegments()} : {}), ...(request.getPreparedNativeReply?.() ? { nativeReply: request.getPreparedNativeReply!() } : {}) };
+    return { text, model: selected.id, ...(request.getPreparedReplySegments ? {replySegments:request.getPreparedReplySegments()} : {}), ...(request.getPreparedSticker?.() ? {sticker:request.getPreparedSticker!()} : {}), ...(request.getPreparedNativeReply?.() ? { nativeReply: request.getPreparedNativeReply!() } : {}) };
   }
 }
 
