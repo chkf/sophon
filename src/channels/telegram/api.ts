@@ -41,7 +41,7 @@ export class TelegramBotApi {
     if (multipart) {
       const form = new FormData();
       for (const [key, value] of Object.entries(body)) {
-        if (value instanceof Blob) form.append(key, value, value.type === "audio/ogg" ? "voice.ogg" : value.type === "image/jpeg" ? "generated.jpg" : value.type === "image/webp" ? "generated.webp" : "generated.png");
+        if (value instanceof Blob) form.append(key, value, value instanceof File ? value.name : value.type === "audio/ogg" ? "voice.ogg" : value.type === "image/jpeg" ? "generated.jpg" : value.type === "image/webp" ? "generated.webp" : "generated.png");
         else form.append(key, typeof value === "object" ? JSON.stringify(value) : String(value));
       }
       payloadBody = form;

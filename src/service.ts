@@ -1,4 +1,6 @@
 import { SerialQueue } from "./util/serial-queue.js";
+import { FileService } from "./files/service.js";
+import { RecentReview } from "./knowledge/review.js";
 import { IlinkAdapter } from "./channels/ilink/adapter.js";
 import { IlinkStore } from "./channels/ilink/store.js";
 import { createCredentialEncryption } from "./runtime/siwc/credential-encryption.js";
@@ -67,6 +69,7 @@ export class GatewayService {
   private readonly diagnostics: DiagnosticRegistry;
   private readonly commands: GatewayCommandRouter;
   private readonly heartbeat?: HeartbeatRunner;
+  private readonly recentReview?: RecentReview;
   private readonly control?: ControlCenter;
   private readonly taskTraces?: TaskTraceStore;
   private server?: Server;
@@ -91,6 +94,13 @@ export class GatewayService {
     this.gatewayContext = new LocalCoreContextProvider(config.dataDir,
       () => renderRecentSummary(this.localKnowledge!.listRecent()),
       () => this.personas.snapshot(), () => this.localKnowledge!.getRecentRevision());
+    const files = config.files?.enabled && config.telegram ? new FileService(config.dataDir,
+      config.files.generatedDir, config.telegram.ownerId, file => {
+        if (!this.telegram) throw new Error("Telegram is unavailable for document delivery");
+        return this.telegram.sendDocumentToOwner(file);
+      }) : undefined;
+    if (config.recentReview?.enabled && config.telegram) this.recentReview = new RecentReview(config.dataDir,
+      config.telegram.ownerId, runtime, this.sessions, this.localKnowledge, this.gatewayContext, this.conversationQueue);
     this.gateway = new Gateway(runtime, this.sessions, this.gatewayContext,
       config.maxToolRounds, config.heartbeat.timezone,
       undefined, this.personas, this.localKnowledge, async message =>
@@ -103,7 +113,7 @@ export class GatewayService {
           ? "距离上次成功压缩已满 7 天" : "上下文达到容量阈值（120K token）";
         await this.telegram.notifyTemporary(
           "🧠 Gateway 上下文已压缩\n原因：" + reason + "\n历史检查点已保存，对话可以继续。", 60_000);
-      }, config.control ? observation => persistContextObservation(config.dataDir, observation) : undefined);
+      }, config.control ? observation => persistContextObservation(config.dataDir, observation) : undefined, files);
 
     if (config.telegram) {
       const telegramVoice=new TelegramVoiceTransport(this.voice,config.telegram.ownerId);
@@ -259,6 +269,7 @@ export class GatewayService {
       if (this.telegram) await this.telegram.start((message) => this.handleInbound(message));
       if (this.ilink) await this.ilink.start((message) => this.handleInbound(message));
       await this.heartbeat?.start();
+      this.recentReview?.start();
 
       console.error(
         "[gateway] ready on http://" + this.config.server.host + ":" + this.config.server.port +
@@ -284,6 +295,7 @@ export class GatewayService {
     this.control?.beginShutdown();
     // Drain decisions and deliveries before releasing their runtime and lock.
     await attempt(() => this.heartbeat?.stop());
+    await attempt(() => this.recentReview?.stop());
     await attempt(() => this.ilink?.stop());
     await attempt(() => this.telegram?.stop());
     await attempt(() => this.runtime.close?.());

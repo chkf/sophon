@@ -2,7 +2,7 @@ import type { ChatMessage, ChatRequest } from "./types.js";
 
 /** Check inputs before provider discovery, paid journals or tool execution. */
 export function requestMessages(request: ChatRequest): ChatMessage[] {
-  if (!["chat", "heartbeat_plan", "heartbeat_decision", "media_exploration", "diagnostic"].includes(request.purpose)) {
+  if (!["chat", "heartbeat_plan", "heartbeat_decision", "recent_review", "media_exploration", "diagnostic"].includes(request.purpose)) {
     throw new Error("请求用途无效。");
   }
   if (request.text !== undefined && (typeof request.text !== "string" || !request.text.trim())) throw new Error("请求正文为空。");
@@ -17,5 +17,5 @@ export function requestMessages(request: ChatRequest): ChatMessage[] {
 
 export function isBackground(request: ChatRequest): boolean {
   return request.purpose === "heartbeat_plan" || request.purpose === "heartbeat_decision" ||
-    request.purpose === "media_exploration";
+    request.purpose === "recent_review" || request.purpose === "media_exploration";
 }

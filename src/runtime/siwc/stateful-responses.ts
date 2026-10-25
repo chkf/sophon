@@ -380,7 +380,7 @@ export class StatefulResponsesBridge {
     const captureTraceContent = Boolean(options.trace && options.trace.captureContent !== false);
     const replayableTools = new Set((options.tools ?? []).filter((tool) => tool.readOnly === true || tool.replaySafe === true).map((tool) => tool.name));
     let socket = this.ensureSocket(lane, options.accessToken);
-    const tools = responseTools(options.tools ?? []);
+    const tools = responseTools(options.tools ?? [], options.webSearchAllowed !== false);
     const currentUser = await currentUserItem(options.messages,
       options.attachments ?? options.messages.at(-1)?.attachments ?? [], options.timezone);
     const input: Record<string, unknown>[] = [];

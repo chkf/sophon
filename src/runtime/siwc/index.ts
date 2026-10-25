@@ -143,6 +143,7 @@ export class SiwcRuntime implements ManagedChatRuntime {
       const sessionId = background ? "background:" + randomUUID() : request.sessionId;
       try {
       const result = await this.statefulResponses.reply({
+        ...(request.purpose === "recent_review" ? { webSearchAllowed: false } : {}),
         ...(request.trace ? { trace: request.trace } : {}),
         accessToken,
         model: selected.id,

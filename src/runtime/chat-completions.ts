@@ -307,7 +307,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
       const imageTool = imageAllowed ? new ImageTool(request, autonomousImage,
         imageRequest => this.imageService().generateImage(imageRequest)) : undefined;
       if (imageTool) tools.push({ type: "function", function: imageTool.definition });
-      if(this.provider === "openrouter" && this.config.webSearch && !request.ephemeral) tools.push({type:"openrouter:web_search",parameters:{engine:"exa",max_results:3,max_uses:1,max_total_results:3}});
+      if(this.provider === "openrouter" && this.config.webSearch && !request.ephemeral && request.purpose !== "recent_review") tools.push({type:"openrouter:web_search",parameters:{engine:"exa",max_results:3,max_uses:1,max_total_results:3}});
       if (request.purpose === "media_exploration" && (this.provider === "api" || !this.config.webSearch)) messages[0].content += "\n本轮联网检索未启用，不能声称核实了实时热点。仅依据已提供的明确兴趣，或返回空 candidates。";
       let toolCount=0;
       const seen=new Set<string>();

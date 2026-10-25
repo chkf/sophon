@@ -83,7 +83,7 @@ export interface ImageSettings {
   dailyLimit: number;
 }
 
-export type RequestPurpose = "chat" | "heartbeat_plan" | "heartbeat_decision" | "media_exploration" | "diagnostic";
+export type RequestPurpose = "chat" | "heartbeat_plan" | "heartbeat_decision" | "recent_review" | "media_exploration" | "diagnostic";
 export type ChatInput = { text: string; messages?: ChatMessage[] } | { text?: string; messages: ChatMessage[] };
 export type ChatRequest = ChatInput & {
   /** Optional local observability; never serialized to providers. */
