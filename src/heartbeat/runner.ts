@@ -1,3 +1,5 @@
+import { LifeStore, LIFE_TOOL } from "../life/store.js";
+import { MoodStore } from "../mood/store.js";
 import { displayText, replyText, visibleSegments } from "../runtime/reply-segments.js";
 import type { PlatformMessageFragment } from "../channels/types.js";
 import { VoiceTurn, voiceTool, VOICE_TOOL, VoiceSupplementError } from "../voice/tool.js";
@@ -51,6 +53,8 @@ export class HeartbeatRunner {
     _localKnowledge?: LocalKnowledgeStore,
     private readonly conversationQueue?: import("../util/serial-queue.js").SerialQueue,
     private readonly voiceAllowed?: () => Promise<boolean>,
+    private readonly mood?: MoodStore,
+    private readonly life?: LifeStore,
   ) {
     this.statePath = join(dataDir, "heartbeat", "state.json");
   }
@@ -250,6 +254,8 @@ export class HeartbeatRunner {
             "不要编造事件、安排或经历；这里只提出候选理由，不决定实际聊天内容。",
             "最近会话末尾：\n" + (recentConversationText(messages, this.config.timezone) || "没有历史消息。"),
             renderLocalContext(context),
+      ...(this.mood ? ["当前 Mood：" + this.mood.snapshot(now).level + "/10（" + this.mood.snapshot(now).label + "）。它只影响表达倾向，不决定是否必须发送。"] : []),
+      ...(this.life ? ["当前虚构生活连续状态：" + (this.life.snapshot().current || "暂无") + "。可主动分享生活或艺术创作，但不要把虚构经历说成可核验的真实活动。"] : []),
             ...(this.personas && !context.data?.persona ? [personaInstruction(await this.personas.snapshot())] : []),
           ].join("\n"),
         });
@@ -366,9 +372,10 @@ export class HeartbeatRunner {
       text: "进行一次主动消息判断。",
       imageOutputAllowed: route.channel === "telegram",
       instructions: prompt+(voice ? "\n"+voice.guidance+"\nTelegram 主动语音已启用，按情境自由选择，尊重近期明确偏好；决定静默时不要调用。" : ""),
-      ...(voice ? { tools: [voiceTool], executeTool: async (name: string, args: Record<string, unknown>) => {
-        if (name !== VOICE_TOOL) throw new Error("本轮未授权该工具。");
-        return voice.select(args);
+      ...((voice || this.life) ? { tools: [...(voice ? [voiceTool] : []), ...(this.life ? [LIFE_TOOL] : [])], executeTool: async (name: string, args: Record<string, unknown>) => {
+        if (name === LIFE_TOOL.name && this.life) return this.life.update(String(args.current ?? ""), now);
+        if (name === VOICE_TOOL && voice) return voice.select(args);
+        throw new Error("本轮未授权该工具。");
       } } : {}),
     });
     if (!response.replySegments && voice && response.voiceText && !voice.text) voice.select({text:response.voiceText,...(response.voiceInstruction?{instruction:response.voiceInstruction}:{})});
