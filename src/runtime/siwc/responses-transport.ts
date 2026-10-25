@@ -3,6 +3,9 @@ import { ResponsesWS } from "openai/resources/responses/ws";
 import { isMissingPreviousResponseError, isRetryableTransportError } from "../retry-policy.js";
 import type { ResponseSnapshot, SocketStreamMessage, StatefulResponsesSocket } from "./stateful-types.js";
 import { mergedOutput } from "./responses-codec.js";
+import type { RuntimeTraceObserver } from "../../observability/types.js";
+import { safeTraceStart, safeTraceFinish } from "../../observability/runtime-trace.js";
+import { reportedTraceUsage, traceContent } from "../trace-content.js";
 interface ModelApiErrorLike {
   code?: unknown;
   status?: unknown;
@@ -174,11 +177,23 @@ export class ResponsesTransport {
   async completedResponseWithRetry(
     socket: StatefulResponsesSocket,
     event: Record<string, unknown>,
-  ): Promise<{ response: ResponseSnapshot; retries: number }> {
+    trace?: RuntimeTraceObserver,
+  ): Promise<{ response: ResponseSnapshot; retries: number; traceStepId?: string }> {
+    const captureTraceContent = Boolean(trace && trace.captureContent !== false);
     for (let attempt = 0; ; attempt += 1) {
+      const traceStepId = safeTraceStart(trace, { kind: "model", name: "responses.create", provider: "siwc",
+        ...(typeof event.model === "string" ? { model: event.model } : {}),
+        input: captureTraceContent ? { input: traceContent(event.input), instructions: event.instructions,
+          tools: Array.isArray(event.tools) ? event.tools.map(tool => tool?.name ?? tool?.type) : [],
+          continuation: typeof event.previous_response_id === "string", attempt: attempt + 1 } : undefined });
       try {
-        return { response: await this.completedResponse(socket, event), retries: attempt };
+        const response = await this.completedResponse(socket, event);
+        safeTraceFinish(trace, traceStepId, { status: "completed",
+          output: captureTraceContent ? traceContent({ output: response.output, output_text: response.output_text ?? response.streamedText }) : undefined,
+          ...(reportedTraceUsage(response.usage, "responses") ? { usage: reportedTraceUsage(response.usage, "responses") } : {}) });
+        return { response, retries: attempt, ...(traceStepId ? { traceStepId } : {}) };
       } catch (error) {
+        safeTraceFinish(trace, traceStepId, { status: "failed", error: errorMessage(error) });
         // With store:false, a failed same-lane continuation can evict its
         // previous_response_id from the WebSocket-local cache (4xx/5xx).
         // Never resend that ID: the caller must rebootstrap full context

@@ -25,6 +25,7 @@ export interface HeartbeatConfig {
 
 export interface GatewayConfig {
   dataDir: string;
+  control?: { publicUrl: string };
   logDir?: string;
   siwcDevkitDir: string;
   model?: string;
@@ -86,6 +87,16 @@ function apiBaseUrl(): string | undefined {
   return url.href.replace(/\/+$/, "");
 }
 
+export function controlPublicUrl(value: string): string {
+  const message = "GATEWAY_CONTROL_PUBLIC_URL must be an HTTPS /control/ URL, or HTTP on localhost/127.0.0.1/[::1], without credentials, query or fragment.";
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error(message); }
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if ((url.protocol !== "https:" && !(url.protocol === "http:" && local)) || url.username || url.password ||
+      url.search || url.hash || url.pathname !== "/control/") throw new Error(message);
+  return url.href;
+}
+
 export function loadConfig(): GatewayConfig {
   loadLocalEnv();
 
@@ -124,6 +135,7 @@ export function loadConfig(): GatewayConfig {
       heartbeat: bool("OPENROUTER_HEARTBEAT_ENABLED", false),
     },
     dataDir: resolve(process.env.GATEWAY_DATA_DIR ?? "./data"),
+    ...(optional("GATEWAY_CONTROL_PUBLIC_URL") ? { control: { publicUrl: controlPublicUrl(optional("GATEWAY_CONTROL_PUBLIC_URL")!) } } : {}),
     ...(optional("GATEWAY_LOG_DIR") ? { logDir: resolve(optional("GATEWAY_LOG_DIR")!) } : {}),
     siwcDevkitDir: resolve(process.env.GATEWAY_SIWC_DEVKIT_DIR ?? "./vendor/siwc"),
     ...(model ? { model } : {}),
@@ -155,6 +167,13 @@ export function loadConfig(): GatewayConfig {
 }
 
 export function validateServeConfig(config: GatewayConfig): void {
+  if (config.control) {
+    controlPublicUrl(config.control.publicUrl);
+    if (!["127.0.0.1", "::1", "localhost"].includes(config.server.host)) {
+      throw new Error("启用控制中心时 GATEWAY_HOST 必须为回环地址；公网访问请仅反向代理 /control/。");
+    }
+    if (!config.telegram || !/^\d+$/.test(config.telegram.ownerId)) throw new Error("控制中心需要数字 Telegram 管理员 ID。");
+  }
   if (config.ilink && !config.telegram) throw new Error("iLink 需要 Telegram 管理员配置与扫码绑定。");
   const partialTelegram = Boolean(optional("TELEGRAM_BOT_TOKEN")) !== Boolean(optional("TELEGRAM_OWNER_ID"));
   if (partialTelegram) throw new Error("Set both TELEGRAM_BOT_TOKEN and TELEGRAM_OWNER_ID, or neither.");

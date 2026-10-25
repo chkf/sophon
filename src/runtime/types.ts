@@ -86,6 +86,8 @@ export interface ImageSettings {
 export type RequestPurpose = "chat" | "heartbeat_plan" | "heartbeat_decision" | "media_exploration" | "diagnostic";
 export type ChatInput = { text: string; messages?: ChatMessage[] } | { text?: string; messages: ChatMessage[] };
 export type ChatRequest = ChatInput & {
+  /** Optional local observability; never serialized to providers. */
+  trace?: import("../observability/types.js").RuntimeTraceObserver;
   purpose: RequestPurpose;
   deliveryId?: string;
   history?: RuntimeHistory;

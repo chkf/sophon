@@ -15,6 +15,8 @@ export interface HeartbeatPolicyConfig {
 }
 
 export interface HeartbeatPendingSend {
+  /** Optional local observation link; never a delivery authorization. */
+  traceId?: string;
   replySegments?: ReplySegment[];
   voiceText?: string;
   voiceInstruction?: string;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { loadConfig, validateServeConfig } from "./index.js";
+import { controlPublicUrl, loadConfig, validateServeConfig } from "./index.js";
 import { rm } from "node:fs/promises";
 import { createTestSandbox } from "../../scripts/testing/environment.mjs";
 
@@ -9,6 +9,28 @@ async function isolatedConfig(run: () => void) {
   try { process.env = sandbox.env; process.chdir(sandbox.root); run(); }
   finally { process.chdir(savedCwd); process.env = savedEnv; await rm(sandbox.root, { recursive: true, force: true }); }
 }
+
+test("control center is opt-in and accepts HTTPS or explicit local HTTP only", () => isolatedConfig(() => {
+  assert.equal(loadConfig().control, undefined);
+  for (const value of ["https://gateway.example/control/", "http://127.0.0.1:8790/control/", "http://localhost:8790/control/", "http://[::1]:8790/control/"]) {
+    assert.equal(controlPublicUrl(value), value);
+  }
+  for (const value of ["http://public.example/control/", "file:///control/", "https://gateway.example/", "https://gateway.example/control", "https://user:fixture-private@gateway.example/control/", "https://gateway.example/control/?key=fixture-private", "https://gateway.example/control/#fragment"]) {
+    assert.throws(() => controlPublicUrl(value), error => error instanceof Error && /GATEWAY_CONTROL_PUBLIC_URL/.test(error.message) && !error.message.includes("fixture-private"));
+  }
+  process.env.TELEGRAM_BOT_TOKEN = "fixture-token";
+  process.env.TELEGRAM_OWNER_ID = "100";
+  process.env.GATEWAY_CONTROL_PUBLIC_URL = "https://gateway.example/control/";
+  assert.deepEqual(loadConfig().control, { publicUrl: "https://gateway.example/control/" });
+  assert.doesNotThrow(() => validateServeConfig(loadConfig()));
+  for (const host of ["0.0.0.0", "::", "192.0.2.1"]) {
+    process.env.GATEWAY_HOST = host;
+    assert.throws(() => validateServeConfig(loadConfig()), /回环地址/);
+  }
+  process.env.GATEWAY_HOST = "127.0.0.1";
+  process.env.TELEGRAM_OWNER_ID = "invalid-owner";
+  assert.throws(() => validateServeConfig(loadConfig()), /数字 Telegram/);
+}));
 
 test("generic API is the default and has no vendor endpoint or credentials", () => isolatedConfig(() => {
   const config = loadConfig();

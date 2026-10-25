@@ -97,6 +97,7 @@ export interface LaneState {
 }
 
 export interface StatefulResponseOptions {
+  trace?: import("../../observability/types.js").RuntimeTraceObserver;
   history?: RuntimeHistory;
   deliveryId?: string;
   accessToken: string;

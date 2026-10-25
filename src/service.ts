@@ -36,6 +36,11 @@ import { SessionStore } from "./sessions/store.js";
 import { LocalCoreContextProvider, renderRecentSummary } from "./core/context.js";
 import { LocalKnowledgeStore } from "./knowledge/store.js";
 import { CompactionNoticeLedger } from "./runtime/siwc/compaction-notice.js";
+import { ControlCenter } from "./control/server.js";
+import { ControlData } from "./control/data.js";
+import { HostMonitor } from "./control/host.js";
+import { TaskTraceStore } from "./observability/store.js";
+import { persistContextObservation } from "./control/context-observation.js";
 import {
   acquireInstanceLock,
   instanceOwnerAlive,
@@ -62,6 +67,8 @@ export class GatewayService {
   private readonly diagnostics: DiagnosticRegistry;
   private readonly commands: GatewayCommandRouter;
   private readonly heartbeat?: HeartbeatRunner;
+  private readonly control?: ControlCenter;
+  private readonly taskTraces?: TaskTraceStore;
   private server?: Server;
   private instanceLock?: InstanceLock;
 
@@ -96,7 +103,7 @@ export class GatewayService {
           ? "距离上次成功压缩已满 7 天" : "上下文达到容量阈值（120K token）";
         await this.telegram.notifyTemporary(
           "🧠 Gateway 上下文已压缩\n原因：" + reason + "\n历史检查点已保存，对话可以继续。", 60_000);
-      });
+      }, config.control ? observation => persistContextObservation(config.dataDir, observation) : undefined);
 
     if (config.telegram) {
       const telegramVoice=new TelegramVoiceTransport(this.voice,config.telegram.ownerId);
@@ -151,7 +158,33 @@ export class GatewayService {
       defaultChannel,
     );
     const logDir = config.logDir ?? join(config.dataDir, "logs");
-    this.commands = new GatewayCommandRouter(runtime, this.activeChannels, undefined, undefined, this.personas);
+    if (config.control) {
+      this.taskTraces = new TaskTraceStore(config.dataDir, { secrets: [config.telegram?.token,
+        config.api?.apiKey, config.openrouter?.apiKey, config.voice?.apiKey].filter((value): value is string => Boolean(value)) });
+      this.control = new ControlCenter({
+        publicUrl: config.control.publicUrl,
+        data: new ControlData(config.dataDir, { sessions: this.sessions, knowledge: this.localKnowledge,
+          context: this.gatewayContext, personas: this.personas, timezone: config.heartbeat.timezone }),
+        traces: this.taskTraces, host: new HostMonitor(config.dataDir),
+        mutate: work => this.conversationQueue.run(async () => work()),
+        heartbeat: async () => {
+          const now = new Date();
+          const state = await readJsonFile<HeartbeatState>(join(config.dataDir, "heartbeat", "state.json"),
+            { dateKey: dateKey(now, config.heartbeat.timezone), sentToday: 0, recent: [] });
+          return { enabled: config.heartbeat.enabled, timezone: config.heartbeat.timezone,
+            plan: state.plan ?? null, nextCheckAt: state.nextCheckAt ?? null,
+            attemptsToday: state.dateKey === dateKey(now, config.heartbeat.timezone) ? state.sentToday : 0,
+            activeChannel: await this.activeChannels.getActive() };
+        },
+      });
+    }
+    this.commands = new GatewayCommandRouter(runtime, this.activeChannels, undefined, undefined, this.personas,
+      message => {
+        if (message.channel !== "telegram" || message.senderId !== config.telegram?.ownerId || message.conversationId !== config.telegram?.ownerId) {
+          return "控制中心入口仅向已配置的管理员私聊提供。";
+        }
+        return this.control?.loginMessage() ?? "控制中心未启用；请配置 GATEWAY_CONTROL_PUBLIC_URL。";
+      });
 
     this.diagnostics = new DiagnosticRegistry(systemDiagnostics(config.dataDir, {
       services: async () => {
@@ -186,6 +219,7 @@ export class GatewayService {
         this.localKnowledge,
         this.conversationQueue,
         async () => { const settings=await this.voice.settings.get();return this.voice.configured()&&settings.tts&&settings.proactive; },
+        this.taskTraces,
       );
     }
   }
@@ -204,6 +238,7 @@ export class GatewayService {
     try {
       // The old Gateway is stopped; verify SQLite integrity before starting channels.
       await this.sessions.prepare();
+      this.taskTraces?.recoverInterrupted();
       const session = await this.runtime.getSession();
       if (session.status !== "connected" || !session.sharing) {
         throw new Error("Selected runtime is not ready. For API providers check the configured endpoint, model and credentials; for SIWC run auth:login / auth:reconsent.");
@@ -220,6 +255,7 @@ export class GatewayService {
       // If an older Gateway still owns the port, this instance exits before it
       // can create a second getUpdates request and trigger Telegram 409 conflicts.
       await this.startHttpServer();
+      this.control?.start();
       if (this.telegram) await this.telegram.start((message) => this.handleInbound(message));
       if (this.ilink) await this.ilink.start((message) => this.handleInbound(message));
       await this.heartbeat?.start();
@@ -245,11 +281,14 @@ export class GatewayService {
       try { await work(); } catch (error) { errors.push(error); }
     };
     this.diagnostics.stop();
+    this.control?.beginShutdown();
     // Drain decisions and deliveries before releasing their runtime and lock.
     await attempt(() => this.heartbeat?.stop());
     await attempt(() => this.ilink?.stop());
     await attempt(() => this.telegram?.stop());
     await attempt(() => this.runtime.close?.());
+    await attempt(() => this.control?.close());
+    await attempt(() => this.taskTraces?.close());
     await attempt(() => this.voice.close());
     await attempt(() => this.localKnowledge?.close());
     await attempt(() => this.sessions.close());
@@ -309,6 +348,7 @@ export class GatewayService {
   private async startHttpServer(): Promise<void> {
     this.server = createServer(async (req, res) => {
       try {
+        if (await this.control?.handle(req, res)) return;
         const url = new URL(req.url ?? "/", "http://localhost");
         if (url.pathname === "/__gateway/takeover" && req.method === "POST") {
           const token = req.headers["x-gateway-takeover-token"];
