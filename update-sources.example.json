@@ -1,0 +1,7 @@
+{
+  "default": "official",
+  "sources": {
+    "official": { "repository": "chkf/sophon", "branch": "main" },
+    "custom": { "repository": "example-account/sophon", "branch": "main" }
+  }
+}

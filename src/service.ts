@@ -1,3 +1,4 @@
+import { requestHostUpdate } from "./commands/update.js";
 import { MemoryRecent } from "./memory/recent.js";
 import { MemoryWorker } from "./memory/worker.js";
 import { cleanupBackgroundArchives, cleanupConfirmedArchivesOnStartup } from "./runtime/siwc/background-cleanup.js";
@@ -205,6 +206,10 @@ export class GatewayService {
           return "控制中心入口仅向已配置的管理员私聊提供。";
         }
         return this.control?.loginMessage() ?? "控制中心未启用；请配置 GATEWAY_CONTROL_PUBLIC_URL。";
+      }, async (message, args) => {
+        if(message.channel!=="telegram" || message.senderId!==config.telegram?.ownerId || message.conversationId!==config.telegram?.ownerId)
+          return "更新功能仅向已配置的管理员私聊提供。";
+        return requestHostUpdate(args);
       });
 
     this.diagnostics = new DiagnosticRegistry(systemDiagnostics(config.dataDir, {

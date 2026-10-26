@@ -264,11 +264,17 @@ async function main(): Promise<void> {
     const onSignal = () => requestShutdown("signal");
     process.once("SIGINT", onSignal);
     process.once("SIGTERM", onSignal);
+    const onHostMessage = (message: unknown) => {
+      if(process.env.SOPHON_MANAGED_HOST === "1" && (message as {type?:string})?.type === "sophon:shutdown") onSignal();
+    };
+    process.on("message", onHostMessage);
+    if(process.env.SOPHON_MANAGED_HOST === "1") process.once("disconnect", onSignal);
 
     let service: GatewayService | undefined;
     try {
       service = new GatewayService(config, runtime, requestShutdown);
       await service.start();
+      if(process.env.SOPHON_MANAGED_HOST === "1" && process.send) process.send({type:"sophon:ready"});
       await shutdown;
     } catch (error) {
       const detail = logging.redact(error instanceof Error ? error.message : String(error));
@@ -283,6 +289,8 @@ async function main(): Promise<void> {
       } finally {
         process.removeListener("SIGINT", onSignal);
         process.removeListener("SIGTERM", onSignal);
+        process.removeListener("message", onHostMessage);
+        process.removeListener("disconnect", onSignal);
         await logging.close();
       }
     }

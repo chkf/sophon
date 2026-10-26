@@ -22,7 +22,7 @@ test("public commands direct configuration to authenticated panels and do not la
   for(const command of ["/model 2","/expression formal","/proactive wechat","/test runtime:test","/logs all"])
     assert.match((await router.handle(message(command)))!,/面板/);
   assert.match((await router.handle(message("npm run test")))!,/诊断面板/);
-  assert.match((await router.handle(message("/update")))!,/不提供远程自动更新/);
+  assert.match((await router.handle(message("/update")))!,/未由更新管理进程启动/);
 });
 
 test("credit query distinguishes account balance, no key limit and failure; never leaks credentials",async()=>{
