@@ -105,3 +105,26 @@ test('deleting source text invalidates graph evidence and preserves remaining tr
  assert.equal(bootstrapStatus(graph).ready,false);
  assert.equal((await sessions.view('telegram',owner)).history.count,1);
 }));
+
+test('recall instructions retain original-history access with and without graph wiring',()=>fixture(async(root,sessions,graph)=>{
+ const {Gateway}=await import('../gateway.js');const {LocalCoreContextProvider}=await import('../core/context.js');
+ await exchange(sessions);beginBootstrap(graph);const job=graph.claim(new Date(Date.now()+1000))!,turn=graph.collect(job.assistant_rowid);
+ graph.complete(job,turn,graph.revision(),parseClassification(JSON.stringify(result)));
+ const captured:any[]=[];const runtime={reply:async(request:any)=>{captured.push(request);return {text:'合成答复'};}};
+ const context=new LocalCoreContextProvider(root);
+ const gateway=new Gateway(runtime,sessions,context,0,'UTC',undefined,undefined,undefined,undefined,undefined,undefined,undefined,graph);
+ const input={channel:'telegram' as const,conversationId:owner,senderId:owner,messageId:'recall-1',text:'文档整理',attachments:[]};
+ assert.equal((await gateway.handle(input)).kind,'model_reply');
+ const request=captured[0];assert.match(request.instructions,/优先参考本轮相关记忆线索/);
+ assert.match(request.instructions,/不主动播报检索过程/);assert.match(request.instructions,/询问出处.*如实说明/);
+ assert.match(request.instructions,/不把已知内容说成忘了/);assert.match(request.instructions,/讨论日程/);
+ const hits=await request.executeTool('gateway_memory_search',{query:'文档整理'});assert.equal(hits.length,1);
+ assert.match(JSON.stringify(await request.executeTool('gateway_memory_read',{ids:[hits[0].id],detail_level:'detail'})),/下周整理文档索引/);
+ const original=await request.executeTool('gateway_read_history',{query:'下周整理文档索引'});
+ assert.equal(original.entries[0].at,at);
+ const withoutGraph=new Gateway(runtime,sessions,context);
+ await withoutGraph.handle({...input,messageId:'recall-2',text:'再看目录'});
+ assert.equal(captured[1].tools.some((t:any)=>t.name==='gateway_memory_search'),false);
+ assert.match(captured[1].instructions,/若本轮未提供记忆工具/);
+ assert.ok(captured[1].tools.some((t:any)=>t.name==='gateway_read_history'));
+}));

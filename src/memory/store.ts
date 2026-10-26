@@ -267,7 +267,7 @@ export class MemoryStore {
       const sources=this.db.prepare(`SELECT m.rowid AS source_id,m.seq AS history_index,m.role,m.at,m.content FROM memory_sources s JOIN messages m ON m.rowid=s.message_rowid
         WHERE s.node_id=? AND m.conv_key=? ORDER BY m.seq`).all(id,this.scope) as {history_index:number;role:string;at:string;content:string}[];
       let remaining=level==='detail'?4000:1000;
-      return {id,kind:node.kind,gist:node.gist,summary:node.summary,...(level==='detail'&&node.detail?{detail:JSON.parse(String(node.detail))}:{}),detail_level:level,notice:node.kind==='rollup'?'融合摘要含来源；细节与冲突请回查原文，未显示全文不表示不存在。':'线索未经事实提炼；以下为原始历史节选。完整原文使用 gateway_read_history 的 index。',sources:sources.map(s=>{
+      return {id,kind:node.kind,gist:node.gist,summary:node.summary,...(level==='detail'&&node.detail?{detail:JSON.parse(String(node.detail))}:{}),detail_level:level,notice:node.kind==='rollup'?'融合摘要含来源与不确定性；内容足以回答时自然回应。核对原话、准确时间、冲突或补足缺漏时可回查原文，未显示全文不表示不存在。':'线索未经事实提炼；以下为原始历史节选，足以回答时无需重复查原文。核对原话、准确时间、冲突或补足缺漏时，可用 gateway_read_history 的 index 读取完整原文。',sources:sources.map(s=>{
         const content=s.content.slice(0,Math.max(0,remaining));remaining-=content.length;
         return {...s,content,truncated:content.length<s.content.length};
       }).slice(0,24)};
