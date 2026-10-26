@@ -49,7 +49,8 @@ export async function acquireLock(root,name,metadata={}){
 }
 export function buildEnvironment(env=process.env){
  const result={GIT_TERMINAL_PROMPT:'0',CI:'true'};
- for(const key of ['PATH','HOME','USERPROFILE','APPDATA','LOCALAPPDATA','SYSTEMROOT','WINDIR','COMSPEC','TEMP','TMP','TMPDIR','LANG','TZ','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','http_proxy','https_proxy','all_proxy','no_proxy'])if(env[key])result[key]=env[key];
+ const allowed=new Set(['PATH','PATHEXT','HOME','USERPROFILE','APPDATA','LOCALAPPDATA','SYSTEMROOT','SYSTEMDRIVE','WINDIR','COMSPEC','TEMP','TMP','TMPDIR','LANG','TZ','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY']);
+ for(const [key,value] of Object.entries(env))if(value&&allowed.has(key.toUpperCase()))result[key]=value;
  return result;
 }
 const exec=promisify(execFile);

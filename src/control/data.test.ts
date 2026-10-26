@@ -123,16 +123,30 @@ test("attachment access uses transcript references, safe metadata and an already
   await assert.rejects(data.attachment({ conversationKey: "telegram:123", messageIndex: 0, attachmentIndex: 1 }), (e: unknown) => e instanceof ControlDataError && e.status === 404);
 }));
 
-test("attachment access rejects external paths and symlinks even if stored in history", () => fixture(async (root, data, sessions) => {
+test("attachment access rejects external paths even if stored in history", () => fixture(async (root, data, sessions) => {
+  const outside = join(root, "outside.txt");
+  await writeFile(outside, "synthetic document");
+  await sessions.append("telegram", "123", "123", [{ role: "user", content: "不可用附件", at: "2026-10-25T00:00:00Z",
+    attachments: [{ kind: "file", path: outside }] }]);
+  await assert.rejects(data.attachment({ conversationKey: "telegram:123", messageIndex: 0, attachmentIndex: 0 }),
+    (e: unknown) => e instanceof ControlDataError && e.status === 404);
+}));
+
+test("attachment access rejects symbolic links when available", t => fixture(async (root, data, sessions) => {
   const directory = join(root, "media", "telegram");
   await mkdir(directory, { recursive: true });
-  const outside = join(root, "private.txt");
-  await writeFile(outside, "synthetic private file");
-  const link = join(directory, "linked.txt");
-  await symlink(outside, link);
+  const target = join(directory, "document.txt"), link = join(directory, "linked.txt");
+  await writeFile(target, "synthetic document");
+  try { await symlink(target, link); }
+  catch (error) {
+    if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") {
+      t.skip("Symbolic-link privilege unavailable; enable Windows Developer Mode to run this case."); return;
+    }
+    throw error;
+  }
   await sessions.append("telegram", "123", "123", [{ role: "user", content: "不可用附件", at: "2026-10-25T00:00:00Z",
-    attachments: [{ kind: "file", path: outside }, { kind: "file", path: link }] }]);
-  for (const attachmentIndex of [0, 1]) await assert.rejects(data.attachment({ conversationKey: "telegram:123", messageIndex: 0, attachmentIndex }),
+    attachments: [{ kind: "file", path: link }] }]);
+  await assert.rejects(data.attachment({ conversationKey: "telegram:123", messageIndex: 0, attachmentIndex: 0 }),
     (e: unknown) => e instanceof ControlDataError && e.status === 404);
 }));
 

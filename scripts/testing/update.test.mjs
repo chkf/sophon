@@ -82,3 +82,10 @@ test('real managed child readiness and graceful IPC shutdown',()=>fixture(async 
 test('linked updater state directory is refused',t=>fixture(async root=>{
  const other=join(root,'other');await mkdir(other);try{await symlink(other,join(root,'.sophon-updates'),'dir');}catch(error){if(process.platform==='win32'&&error.code==='EPERM'){t.skip('Symbolic-link privilege unavailable');return;}throw error;}await assert.rejects(stateDirectory(root),/symbolic/);
 }));
+
+test('build environment preserves Windows system key casing and command extensions',()=>{
+ const env=buildEnvironment({Path:'C:\\fixture\\bin',SystemRoot:'C:\\Windows',ComSpec:'C:\\Windows\\System32\\cmd.exe',PATHEXT:'.COM;.EXE;.BAT;.CMD',SystemDrive:'C:',NODE_OPTIONS:'--import=synthetic',GATEWAY_API_KEY:'synthetic-secret'});
+ assert.equal(env.Path,'C:\\fixture\\bin');assert.equal(env.SystemRoot,'C:\\Windows');
+ assert.equal(env.ComSpec,'C:\\Windows\\System32\\cmd.exe');assert.equal(env.PATHEXT,'.COM;.EXE;.BAT;.CMD');assert.equal(env.SystemDrive,'C:');
+ assert.equal(env.NODE_OPTIONS,undefined);assert.equal(env.GATEWAY_API_KEY,undefined);
+});
