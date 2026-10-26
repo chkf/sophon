@@ -24,6 +24,7 @@ export interface HeartbeatConfig {
 }
 
 export interface GatewayConfig {
+  mcpConfigFile?: string;
   memoryGraphEnabled?: boolean;
   memoryGraphState?: 'missing_owner' | 'preparation_failed';
   dataDir: string;
@@ -150,6 +151,7 @@ export function loadConfig(): GatewayConfig {
       webSearch: bool("OPENROUTER_WEB_SEARCH", false),
       heartbeat: bool("OPENROUTER_HEARTBEAT_ENABLED", false),
     },
+    ...(optional("GATEWAY_MCP_CONFIG") ? {mcpConfigFile: resolve(optional("GATEWAY_MCP_CONFIG")!)} : {}),
     memoryGraphEnabled: true,
     dataDir: resolve(process.env.GATEWAY_DATA_DIR ?? "./data"),
     files: {

@@ -1,3 +1,5 @@
+import { McpTools } from "./mcp/client.js";
+import { readMcpConfig } from "./mcp/config.js";
 import { requestHostUpdate } from "./commands/update.js";
 import { MemoryRecent } from "./memory/recent.js";
 import { MemoryWorker } from "./memory/worker.js";
@@ -98,6 +100,7 @@ export class GatewayService {
   private readonly diagnostics: DiagnosticRegistry;
   private readonly commands: GatewayCommandRouter;
   private readonly heartbeat?: HeartbeatRunner;
+  private readonly mcp: McpTools;
   private readonly recentReview?: RecentReview;
   private readonly control?: ControlCenter;
   private readonly taskTraces?: TaskTraceStore;
@@ -110,6 +113,7 @@ export class GatewayService {
     private readonly requestShutdown: (reason: GatewayShutdownReason) => void = () => undefined,
   ) {
     validateServeConfig(config);
+    const mcpServers=readMcpConfig(config.mcpConfigFile);
 
     const media = new MediaStore(join(config.dataDir, "media"));
     this.sessions = new SessionStore(config.dataDir);
@@ -134,6 +138,8 @@ export class GatewayService {
       }) : undefined;
     if (config.recentReview?.enabled && config.telegram) this.recentReview = new RecentReview(config.dataDir,
       config.telegram.ownerId, runtime, this.sessions, this.localKnowledge, this.gatewayContext, this.conversationQueue, () => !!memory && !!runtime.classifyMemory && !['MODEL_UNAVAILABLE','CLASSIFIER_UNAVAILABLE'].includes(this.memoryWorker?.status() ?? '') && new MemoryRecent(memory).enabled());
+    this.mcp=new McpTools(mcpServers,message => !!config.telegram && message.senderId===message.conversationId &&
+      this.sessions.sessionKey(message.channel,message.conversationId)==="telegram:"+config.telegram.ownerId);
     this.gateway = new Gateway(runtime, this.sessions, this.gatewayContext,
       config.maxToolRounds, config.heartbeat.timezone,
       undefined, this.expressions, this.localKnowledge, async message =>
@@ -146,7 +152,7 @@ export class GatewayService {
           ? "距离上次成功压缩已满 7 天" : "上下文达到容量阈值（120K token）";
         await this.telegram.notifyTemporary(
           "🧠 Gateway 上下文已压缩\n原因：" + reason + "\n历史检查点已保存，对话可以继续。", 60_000);
-      }, config.control ? observation => persistContextObservation(config.dataDir, observation) : undefined, files, memory);
+      }, config.control ? observation => persistContextObservation(config.dataDir, observation) : undefined, files, memory, this.mcp);
 
     if (config.telegram) {
       const telegramVoice=new TelegramVoiceTransport(this.voice,config.telegram.ownerId);
@@ -348,6 +354,7 @@ export class GatewayService {
     await attempt(() => this.ilink?.stop());
     await attempt(() => this.telegram?.stop());
     await attempt(() => this.memoryWorker?.stop());
+    await attempt(() => this.mcp.close());
     await attempt(() => this.runtime.close?.());
     await attempt(() => this.control?.close());
     await attempt(() => this.taskTraces?.close());

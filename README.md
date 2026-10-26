@@ -15,6 +15,7 @@ Self-hosted messaging gateway with local SQLite context, memory graph, durable d
 - 通用 OpenAI 兼容 API（自定义地址、密钥、模型）；可选 OpenRouter 专用模式与 ChatGPT 登录适配器。
 - 可选语音、图片生成和主动消息。
 - 内置 Core、Recent 和聊天历史工具。
+- 可选 [自定义 MCP 服务](docs/mcp.md)：接入远程 HTTP 或本地 stdio 工具，配置独立的工具允许列表。
 - 本地文件浏览、保存与发送、确认后修改或删除，以及独立的后台 Recent 整理。
 - [Sophon 控制中心](docs/control-center.md)：聊天历史与 Core/Recent 管理、上下文观察、主动任务调用轨迹和主机走势；与已有 slash 面板分工。`npm start` 自动生成临时手机访问网址，Telegram `/status` 获取入口（缺少 cloudflared 时自动下载并校验）。
 
