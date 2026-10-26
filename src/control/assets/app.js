@@ -422,10 +422,13 @@
   const graphKind = { turn: '对话记忆', rollup: '融合记忆', recent: '持续事项' };
   const graphStatus = { active: '活跃', archived: '已归档', stale: '来源已变化', covered: '已融合覆盖' };
   const activity = value => typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value * 100)}%` : '—';
+  function graphRuntimeText(code) {
+    return ({missing_owner:'需要配置 Telegram 管理员后重启，才能建立所属记忆图。',preparation_failed:'自动准备未完成，请检查磁盘空间和数据目录权限后重启；正常聊天仍可使用。',MODEL_UNAVAILABLE:'记忆模型未就绪。请完成 SIWC 登录并在 /model 中选择可用的记忆模型；正常聊天不受影响。',CLASSIFIER_UNAVAILABLE:'SIWC 记忆分类未就绪，任务会等待重试。',QUOTA_UNAVAILABLE:'模型额度暂不可用，后台任务等待重试。'})[code] || (code ? '部分后台任务等待重试，可查看下方状态。' : '');
+  }
   async function graphPage(epoch) {
     const result = await api('graph'); if (epoch !== state.epoch) return;
     if (!result.available) {
-      content.replaceChildren(el('div', { class: 'panel' }, empty('记忆图尚未准备好', result.version ? '需要完成记忆图升级并配置所有者，之后即可浏览。' : '完成首次迁移后，主题和记忆会显示在这里。'))); return;
+      content.replaceChildren(el('div', { class: 'panel' }, empty('记忆图尚未准备好', graphRuntimeText(result.runtimeStatus) || (result.enabled ? '启动时将自动准备记忆图，请检查服务日志。' : '记忆图已关闭；移除关闭设置并重启后会自动准备。')))); return;
     }
     content.replaceChildren(el('div', { id: 'graph-overview' }), el('div', { class: 'panel graph-workbench' },
       el('section', { id: 'graph-topics', class: 'graph-topics', 'aria-label': '主题目录' }, loading()),
@@ -448,9 +451,9 @@
     const target = $('#graph-overview'); if (!target) return;
     const p = result.progress, jobs = p.jobs, pending = (jobs.pending || 0) + (jobs.running || 0) + (jobs.retry || 0);
     const outstanding = pending + (jobs.failed || 0) + p.missingTurns + p.staleTurns;
-    const summary = !result.enabled ? '后台状态 · 未启用' : !p.initialized ? '后台状态 · 待初始建图' : outstanding ? `后台状态 · ${number(outstanding)} 项待处理` : '后台状态';
+    const summary = !result.enabled ? '后台状态 · 未启用' : result.runtimeStatus ? '后台状态 · 等待处理' : !p.initialized ? '后台状态 · 待初始建图' : outstanding ? `后台状态 · ${number(outstanding)} 项待处理` : '后台状态';
     const details = el('details', { class: 'panel graph-background', open: target.querySelector('details')?.open === true }, el('summary', {}, summary),
-      el('p', { class: 'muted small' }, result.enabled ? (p.ready ? '初始分类已就绪，整理任务仍可继续运行。' : '后台逐轮处理，正常聊天优先。入队不代表建图完成。') : '后台处理未启用，已保存的记忆仍可浏览。'),
+      el('p', { class: 'muted small' }, graphRuntimeText(result.runtimeStatus) || (result.enabled ? (p.ready ? '初始分类已就绪，整理任务仍可继续运行。' : '后台逐轮处理，正常聊天优先。入队不代表建图完成。') : '后台处理未启用，已保存的记忆仍可浏览。')),
       kv([['已处理分类', number(jobs.done || 0)], ['待处理 / 运行中', `${number(jobs.pending || 0)} / ${number(jobs.running || 0)}`],
         ['重试 / 失败', `${number(jobs.retry || 0)} / ${number(jobs.failed || 0)}`], ['待回灌 / 失效轮次', `${number(p.missingTurns)} / ${number(p.staleTurns)}`],
         ['初始建图登记', p.initialized ? date(p.startedAt) : '尚未登记'], ['上下文重建就绪', p.ready ? '是' : '否']]),

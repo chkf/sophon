@@ -275,7 +275,7 @@ async function main(): Promise<void> {
 
     let service: GatewayService | undefined;
     try {
-      service = new GatewayService(config, runtime, requestShutdown);
+      service = await GatewayService.create(config, runtime, requestShutdown);
       await service.start();
       if(process.env.SOPHON_MANAGED_HOST === "1" && process.send) process.send({type:"sophon:ready"});
       await shutdown;

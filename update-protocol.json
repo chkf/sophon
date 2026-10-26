@@ -1,4 +1,8 @@
 {
   "version": 1,
-  "stateChanges": "explicit-only"
+  "stateChanges": "explicit-only",
+  "host": 1,
+  "startupExtensions": [
+    "memory-v2"
+  ]
 }

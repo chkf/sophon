@@ -35,7 +35,7 @@ test("proactive photo acknowledgement cannot settle an ordinary Provider reply",
   const sdk = { async reply() { return { text: "尚未交付的文字" }; }, async commitSession() { commits++; } };
   const runtime = new ProviderRuntime(root, { siwc: sdk, openrouter: {} } as never);
   await runtime.reply({ sessionId: "telegram:42", text: "你好", purpose: "chat", deferAssistantCommit: true, deliveryId: "ordinary" } as never);
-  const config = loadConfig(); config.dataDir = root; config.ilink = undefined;
+  const config = loadConfig(); config.dataDir = root; config.ilink = undefined; config.memoryGraphEnabled = false;
   config.telegram = { token: "fixture", ownerId: "42" }; config.heartbeat.enabled = false;
   const service = new GatewayService(config, runtime);
   const adapter = (service as any).telegram;
@@ -56,7 +56,7 @@ test("standalone service is ready with initialized local Core",()=>temp(async ro
   config.telegram={token:"fixture",ownerId:"42"};config.heartbeat.enabled=false;
   let closed=false;
   const runtime={getSession:async()=>({status:"connected",sharing:true}),getProvider:async()=>"openrouter",close:async()=>{closed=true;}};
-  const service=new GatewayService(config,runtime as never);
+  const service=await GatewayService.create(config,runtime as never);
   try {
     const health=await (service as any).healthSnapshot();
     assert.equal(health.ok,true);assert.equal(health.localCore,true);
@@ -145,7 +145,7 @@ test("canonical reply outcomes reject retry and delivery mixed together", () => 
 });
 
 test("shutdown closes runtime and releases lock even if channel draining fails", () => temp(async root => {
-  const config = loadConfig(); config.dataDir = root; config.wechat = undefined;
+  const config = loadConfig(); config.dataDir = root; config.wechat = undefined; config.memoryGraphEnabled = false;
   config.telegram = { token: "fixture", ownerId: "42" }; config.heartbeat.enabled = false;
   const events: string[] = [];
   const service = new GatewayService(config, { async close() { events.push("runtime"); } } as never);

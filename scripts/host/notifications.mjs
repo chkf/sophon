@@ -1,15 +1,16 @@
+import {failureHint} from './update-journal.mjs';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {atomicJson,readJson,stateDirectory} from './releases.mjs';
 
 export function updateResultText(result){
- const title={prepared:'版本已准备，本次未重启；下次启动时验证生效。',unhealthy:'版本检查或切换已完成，但当前服务健康检查未通过。请检查 /logs。',completed:result.source==='rollback'?'代码回退完成，服务已启动。':'更新成功，新版本已启动并通过健康检查。',current:'已是所选上游的最新版本，无需更新。',interrupted:'上次更新中断，未能确认完成。请用 /update status 查看状态。',failed:'更新失败，请用 /update status 查看状态。',rolled_back:'新版本启动失败，已恢复原运行版本。'}[result.phase];
+ const title={prepared:'版本已准备，本次未重启；下次启动时验证生效。',unhealthy:'版本检查或切换已完成，但当前服务健康检查未通过。请检查 /logs。',completed:result.source==='rollback'?'代码回退完成，服务已启动。':result.plan?.restart===false?'更新成功，仅文档变化，服务无需重启。':'更新成功，新版本已启动并通过健康检查。',current:'已是所选上游的最新版本，无需更新。',interrupted:'上次更新中断，未能确认完成。请用 /update status 查看状态。',failed:'更新失败，请用 /update status 查看状态。',rolled_back:'新版本启动失败，已恢复原运行版本。'}[result.phase];
  if(!title)return null;
  const source=/^[a-z][a-z0-9_-]{0,31}$/.test(result.source??'')?'\n上游：'+result.source:'';
  const valid=value=>/^[a-f0-9]{40}$/.test(value??'');
  const version=!valid(result.sha)?'\n版本：未能核验':!valid(result.beforeSha)?'\n版本：'+result.sha.slice(0,12):result.beforeSha===result.sha?'\n版本：'+result.sha.slice(0,12)+'（未变化）':'\n版本：'+result.beforeSha.slice(0,12)+' → '+result.sha.slice(0,12);
  const stages={lock:'更新锁检查',fetch:'下载上游',protocol:'更新协议检查',dependencies:'依赖安装',build:'构建',tests:'测试',schema:'数据库兼容性检查',shutdown:'停止原进程',startup:'启动服务',activation:'保存版本指针',health:'健康检查'};
- const detail=['failed','rolled_back'].includes(result.phase)&&stages[result.stage]?'\n失败阶段：'+stages[result.stage]:'';
+ const detail=['failed','rolled_back'].includes(result.phase)?'\n失败阶段：'+(stages[result.stage]??'准备更新')+'\n'+failureHint(result.stage)+'\n本机日志：.sophon-updates/update.log':'';
  return 'Sophon 更新通知\n'+title+source+version+detail;
 }
 

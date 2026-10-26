@@ -9,6 +9,7 @@ import { ControlDataError } from './data.js';
 export interface ControlMemoryOptions {
   ownerId?: string;
   enabled?: boolean;
+  runtimeStatus?: () => string | undefined;
 }
 function invalid() { return new ControlDataError('invalid_request', 400, '无效的记忆图请求。'); }
 function text(value: unknown, max = 100): string {
@@ -38,7 +39,8 @@ export class ControlMemory {
   overview() {
     const marker = memoryMarker(this.db);
     const available = Boolean(this.scope && marker?.version === 2);
-    if (!available) return { available, enabled: this.options.enabled === true, version: marker?.version ?? 0 };
+    const runtimeStatus=this.options.runtimeStatus?.();
+    if (!available) return { available, enabled: this.options.enabled === true, version: marker?.version ?? 0, runtimeStatus };
     const store = this.graph(), progress = bootstrapStatus(store);
     const counts = Object.fromEntries(this.db.prepare('SELECT status,count(*) n FROM memory_nodes WHERE owner_scope=? GROUP BY status').all(this.scope!)
       .map(row => [String(row.status), Number(row.n)]));
@@ -48,7 +50,7 @@ export class ControlMemory {
     const problems = this.db.prepare(`SELECT status,error_code,attempts,run_after,updated_at FROM memory_jobs
       WHERE owner_scope=? AND status IN ('failed','retry') ORDER BY updated_at DESC,id LIMIT 5`).all(this.scope!);
     return { available, enabled: this.options.enabled === true, version: marker!.version, revision: marker!.revision,
-      counts, topics, progress, problems };
+      counts, topics, progress, problems, runtimeStatus };
   }
   private topic(id: string) {
     const row = this.db.prepare("SELECT id,parent_id,name,description FROM memory_topics WHERE id=? AND owner_scope=? AND status='active'").get(id, this.scope!);

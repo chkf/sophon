@@ -19,12 +19,13 @@
     "runtime:diagnose": "tsx src/main.ts runtime diagnose",
     "build": "node scripts/build.mjs",
     "start": "node scripts/host/run.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && npm run host:check",
     "test": "node scripts/run-tests.mjs",
     "test:control-ui": "node scripts/control-ui-smoke.mjs",
     "sessions": "node --import tsx scripts/session-storage.mjs",
     "memory": "node --import tsx scripts/memory-graph.mjs",
-    "update": "node scripts/update.mjs"
+    "update": "node scripts/update.mjs",
+    "host:check": "node scripts/check-host.mjs"
   },
   "engines": {
     "node": ">=22.16.0"
