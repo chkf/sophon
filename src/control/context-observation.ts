@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { RuntimeTraceObserver, TraceStepFinish, TraceStepStart, TraceUsage } from "../observability/types.js";
+import { safeTraceStart, safeTraceFinish } from "../observability/runtime-trace.js";
 import type { ChatResponse, ProviderId } from "../runtime/types.js";
 import { getState, mainPath, openDatabase, putState, schemaVersion } from "../state/database.js";
 
@@ -9,6 +10,7 @@ const usageKeys = ["inputTokens", "cachedInputTokens", "outputTokens", "reasonin
 export interface ContextObservation {
   version: 1;
   scope: "last_model_call";
+  traceId?: string;
   at: string;
   startedAt: string;
   durationMs: number;
@@ -42,22 +44,25 @@ function compaction(input: unknown): ContextObservation["compaction"] {
   return { id: cp.id, at: cp.at, reason: cp.reason as "capacity" | "seven_days", coveredThroughSeq: cp.coveredThroughSeq as number, model };
 }
 
-/** Records only the last actual model attempt. It never inspects prompt, output, tools or opaque reasoning fields. */
+/** Metadata remains allowlisted; an optional bounded recorder receives the complete visible flow. */
 export class ContextObservationCollector implements RuntimeTraceObserver {
-  readonly captureContent = false;
+  readonly captureContent: boolean;
   private sequence = 0;
   private latest?: { id: string; startedAt: string; startedMs: number; provider: ProviderId | null; model: string | null;
     finishedAt?: string; durationMs?: number; status?: "completed" | "failed"; usage?: TraceUsage | null };
-  constructor(private readonly clock: () => Date = () => new Date()) {}
+  constructor(private readonly clock: () => Date = () => new Date(), private readonly recorder?: RuntimeTraceObserver,
+    private readonly traceId?: string) { this.captureContent = Boolean(recorder && recorder.captureContent !== false); }
   start(event: TraceStepStart): string | undefined {
-    if (event.kind !== "model") return undefined;
-    const now = this.clock(), id = "context-observation-" + (++this.sequence);
+    const recorded = safeTraceStart(this.recorder, event);
+    if (event.kind !== "model") return recorded;
+    const now = this.clock(), id = recorded ?? "context-observation-" + (++this.sequence);
     this.latest = { id, startedAt: now.toISOString(), startedMs: now.getTime(),
       provider: ["api", "openrouter", "siwc"].includes(event.provider ?? "") ? event.provider as ProviderId : null,
       model: safeModel(event.model) };
     return id;
   }
   finish(id: string | undefined, event: TraceStepFinish): void {
+    safeTraceFinish(this.recorder, id, event);
     if (!id || id !== this.latest?.id || event.status === "skipped") return;
     const now = this.clock();
     this.latest.finishedAt = now.toISOString();
@@ -70,6 +75,7 @@ export class ContextObservationCollector implements RuntimeTraceObserver {
     const last = this.latest;
     if (!last?.finishedAt || !last.status) return null;
     return { version: 1, scope: "last_model_call", at: last.finishedAt, startedAt: last.startedAt,
+      ...(this.traceId ? {traceId:this.traceId} : {}),
       durationMs: last.durationMs ?? 0, provider: last.provider, model: last.model, status: last.status,
       usage: last.usage ?? null,
       contextEffect: ["none", "history_windowed", "checkpoint_compacted"].includes(response.contextEffect ?? "") ? response.contextEffect! : null,
@@ -96,6 +102,7 @@ function normalize(input: unknown): ContextObservation | null {
     !["completed", "failed"].includes(raw.status as string) || typeof raw.durationMs !== "number" ||
     !Number.isFinite(raw.durationMs) || raw.durationMs < 0) return null;
   return { version: 1, scope: "last_model_call", at: raw.at, startedAt: raw.startedAt, durationMs: raw.durationMs,
+    ...(typeof raw.traceId === "string" && /^tr_\d{13}_[a-f0-9-]{36}$/.test(raw.traceId) ? {traceId:raw.traceId} : {}),
     provider: ["api", "openrouter", "siwc"].includes(raw.provider as string) ? raw.provider as ProviderId : null,
     model: safeModel(raw.model), status: raw.status as "completed" | "failed", usage: safeUsage(raw.usage),
     contextEffect: ["none", "history_windowed", "checkpoint_compacted"].includes(raw.contextEffect as string) ? raw.contextEffect as ContextObservation["contextEffect"] : null,

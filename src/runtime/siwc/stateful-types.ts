@@ -113,6 +113,7 @@ export interface StatefulResponseOptions {
   memory?: import("../types.js").MemoryRuntimeContext;
   webSearchAllowed?: boolean;
   trace?: import("../../observability/types.js").RuntimeTraceObserver;
+  contextSources?: Array<Omit<import("../../observability/types.js").ContextSource,"content">>;
   history?: RuntimeHistory;
   deliveryId?: string;
   accessToken: string;

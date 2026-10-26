@@ -126,7 +126,7 @@ try {
   await page.getByRole('tab', { name: 'Recent', exact: true }).click(); await page.getByLabel('Recent 正文').fill('# 文档整理\n已核对目录。'); await page.getByRole('button', { name: '保存修改', exact: true }).click(); await page.getByText('修改已保存。', { exact: true }).waitFor(); assert.equal(saves, 2);
   await page.getByRole('button', { name: '归档', exact: true }).click(); await page.getByText('话题已归档。', { exact: true }).waitFor(); assert.equal(archived, true);
   await page.getByLabel('话题状态').selectOption('true'); await page.getByRole('button', { name: '删除', exact: true }).waitFor(); page.once('dialog', dialog => dialog.accept()); await page.getByRole('button', { name: '删除', exact: true }).click(); await page.getByText('Recent 已删除。', { exact: true }).waitFor(); assert.equal(recent, null);
-  await page.locator('[data-page="context"]').click(); await page.getByRole('heading', { name: '恢复检查点', exact: true }).waitFor(); await page.getByRole('heading', { name: '最近一次模型调用', exact: true }).waitFor(); await checkLayout('context');
+  await page.locator('[data-page="context"]').click(); await page.getByRole('heading', { name: '已保存的上下文', exact: true }).waitFor(); await page.getByRole('heading', { name: '最近一次模型调用', exact: true }).waitFor(); await checkLayout('context');
   await page.locator('[data-page="host"]').click(); await page.getByText('主机与进程', { exact: true }).waitFor(); assert.equal(await page.locator('.metric-chart').count(), 3); await checkLayout('host');
   for (const width of [1280, 390, 320]) {
     await page.setViewportSize({ width, height: 1100 });

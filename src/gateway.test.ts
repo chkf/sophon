@@ -411,3 +411,23 @@ test("manual retry permission never follows an unsafe tool or an uncertain paid 
     }
   }finally{sessions.close();await rm(root,{recursive:true,force:true});}
 });
+
+test('temporary chat reuses normal file tools, reads formal history and leaves no formal transcript or trace',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'sophon-temporary-fixture-'));const sessions=new SessionStore(root);
+ try{
+  await sessions.append('telegram','80001','80001',[{role:'user',content:'正式文档问题',at:'2026-01-01T00:00:00Z'}]);
+  let request:any,writes=0,traces=0;
+  const files={tools:()=>[{name:'fixture_write',description:'合成文件操作',parameters:{type:'object',properties:{}}}],execute:async()=>{writes++;return {ok:true};}};
+  const runtime={reply:async(r:any)=>{request=r;await r.executeTool('fixture_write',{});return {text:'临时操作完成'};}};
+  const gateway=new Gateway(runtime,sessions,readyContext as any,0,undefined,undefined,undefined,undefined,undefined,undefined,()=>{traces++;},files as any);
+  const message={channel:'telegram' as const,conversationId:'80001',senderId:'80001',messageId:'temp-fixture',text:'临时文档请求',attachments:[]};
+  const result=await gateway.handle(message,{id:'temporary:fixture',messages:[{role:'user',content:'内存前文'},{role:'assistant',content:'内存答复'}]});
+  assert.equal(result.kind,'model_reply');assert.equal(writes,1);assert.equal(traces,0);
+  assert.equal(request.ephemeral,true);assert.equal(request.temporaryMode,true);assert.equal(request.deferAssistantCommit,false);
+  assert.equal(request.history,undefined);assert.equal(request.trace,undefined);assert.equal(request.memory,undefined);
+  assert.match(JSON.stringify(request.messages),/内存前文/);assert.doesNotMatch(JSON.stringify(request.messages),/正式文档问题/);
+  assert.equal((await request.executeTool('gateway_read_history',{query:'正式文档'})).total,1);
+  assert.equal((await sessions.view('telegram','80001')).history.count,1);
+  await assert.rejects(request.executeTool('gateway_recent_create',{body:'临时记录'}),/未开放/);
+ }finally{sessions.close();await rm(root,{recursive:true,force:true});}
+});

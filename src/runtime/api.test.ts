@@ -269,3 +269,12 @@ test("ephemeral API spending gates cancel before transport and keep provider sel
   assert.equal(sent[0]!.body.tools, undefined);
   assert.equal(sent.length, 1);
 }));
+
+test('temporary API chat uses selected model and normal tools without a durable turn journal',()=>temp(async root=>{
+ const {runtime,sent}=fixture(root,[json('',[call('fixture-call','fixture_write',{})]),json('已完成合成操作')]);let invoked=0;
+ const response=await runtime.reply({...request('temp-fixture'),ephemeral:true,temporaryMode:true,
+  tools:[{name:'fixture_write',description:'合成写入',parameters:{type:'object',properties:{}}}],executeTool:async()=>{invoked++;return {ok:true};}});
+ assert.equal(response.text,'已完成合成操作');assert.equal(invoked,1);assert.equal(sent[0].body.model,model);
+ const {readdir}=await import('node:fs/promises');
+ assert.deepEqual(await readdir(join(root,'runtime','api-turns')).catch(()=>[]),[]);
+}));

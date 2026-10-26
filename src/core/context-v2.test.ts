@@ -17,7 +17,6 @@ import { LocalCoreContextProvider } from "./context.js";
 import { renderLocalPolicy } from "./render.js";
 import { LaneStore } from "../runtime/siwc/lane-store.js";
 import { checkpointFromItems } from "../runtime/siwc/compaction.js";
-import { CompactionNoticeLedger } from "../runtime/siwc/compaction-notice.js";
 
 async function fixture(run: (root: string) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), "gateway-context-v2-"));
@@ -45,7 +44,7 @@ async function fixture(run: (root: string) => Promise<void>) {
   } finally { await rm(root, { recursive: true, force: true }); }
 }
 
-test("schema v2 stores cumulative SIWC checkpoint and notice in existing gateway_state", () => fixture(async root => {
+test("schema v2 stores cumulative SIWC checkpoint in existing gateway_state", () => fixture(async root => {
   const sessionId = "telegram:owner";
   const items = [{ type: "compaction", encrypted_content: "synthetic-v2-opaque" }];
   const cp = checkpointFromItems(sessionId, "fixture-model", items, 8,
@@ -55,12 +54,10 @@ test("schema v2 stores cumulative SIWC checkpoint and notice in existing gateway
     contextItems: items, historyCursor: 8, coverageVerified: true,
     startedAt: "2026-10-01T00:00:00Z", lastCompactedAt: cp.at, checkpoint: cp });
   assert.equal((await store.read(sessionId))?.checkpoint?.id, cp.id);
-  assert.equal(await new CompactionNoticeLedger(root).claim(cp), true);
-  assert.equal(await new CompactionNoticeLedger(root).claim(cp), false);
   const db = openDatabase(mainPath(root), true);
   try {
     assert.ok((db.prepare("SELECT COUNT(*) AS n FROM gateway_state WHERE key LIKE 'runtime/context/%'")
-      .get() as { n: number }).n >= 2);
+      .get() as { n: number }).n >= 1);
     assert.equal(schemaVersion(db), 2);
   } finally { db.close(); }
 }));

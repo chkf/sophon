@@ -1261,3 +1261,22 @@ test("/retry resumes a failed turn during backoff but never duplicates an active
     assert.match(sent.at(-1)!,/没有可重试/);assert.equal(attempts,2);
   }finally{await adapter?.stop();await rm(root,{recursive:true,force:true});}
 });
+
+test('temporary Telegram input and replies bypass durable buffers and restart in formal mode',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'sophon-temp-channel-'));let adapter:TelegramAdapter|undefined;
+ try{
+  const seen:any[]=[];let commits=0;
+  const config={token:'fixture',ownerId:'80001',dataDir:root,mediaStore:{} as never,
+   api:{call:async()=>({message_id:42}),getFile:async()=>({}),downloadFile:async()=>new Uint8Array()} as TelegramApiClient,
+   onReplyDelivered:async()=>{commits++;},temporaryReply:async(message:any,session:any)=>{seen.push({message,session});return {kind:'model_reply' as const,text:'temporary-response-marker'};}};
+  adapter=new TelegramAdapter(config);const internal=adapter as any;internal.handler=async()=>{throw Error('formal handler must not run');};
+  const update=(id:number,text:string)=>({update_id:id,message:{message_id:id,date:1,from:{id:80001},chat:{id:80001,type:'private'},text}});
+  await internal.processUpdate(update(1,'/temp on'));await internal.processUpdate(update(2,'temporary-input-marker'));
+  assert.equal(seen.length,1);assert.equal(commits,0);assert.equal(internal.temporary.messages.length,2);
+  assert.equal(internal.state.buffer,undefined);assert.equal(internal.state.pendingReply,undefined);
+  const {readdir}=await import('node:fs/promises');
+  for(const file of await readdir(root,{recursive:true})){try{const content=await readFile(join(root,file),'utf8');assert.doesNotMatch(content,/temporary-input-marker|temporary-response-marker/);}catch(error){if((error as any).code!=='EISDIR')throw error;}}
+  await internal.processUpdate(update(3,'/temp off'));assert.equal(internal.temporary,undefined);
+  assert.equal((new TelegramAdapter(config) as any).temporary,undefined);
+ }finally{await adapter?.stop();await rm(root,{recursive:true,force:true});}
+});

@@ -1,3 +1,4 @@
+import { MEMORY_NARRATION } from "./narration.js";
 import type { ChatRequest } from '../runtime/types.js';
 import { MemoryError } from './validation.js';
 export type MemoryTask = 'digest'|'organize'|'assign'|'fuse'|'verify'|'reinforce';
@@ -13,7 +14,7 @@ const instructions:Record<MemoryTask,string>={
 export function memoryTaskRequest(task:MemoryTask,input:string):ChatRequest {
  if(!(task in instructions))throw new MemoryError('INVALID_MEMORY_TASK');
  if(input.length>48_000)throw new MemoryError('TASK_INPUT_LIMIT');
- return {purpose:'memory_classify',memoryTask:task,sessionId:'memory-'+task,text:input,instructions:common+instructions[task],ephemeral:true,stateful:true,maxToolRounds:0};
+ return {purpose:'memory_classify',memoryTask:task,sessionId:'memory-'+task,text:input,instructions:MEMORY_NARRATION+"\n"+common+instructions[task],ephemeral:true,stateful:true,maxToolRounds:0};
 }
 export function jsonObject(raw:string):Record<string,unknown> {
  let v:unknown;try{v=JSON.parse(raw);}catch{throw new MemoryError('INVALID_JSON');}

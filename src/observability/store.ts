@@ -1,10 +1,10 @@
+import { dateKey } from "../util/clock-window.js";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import { mainPath, openDatabase, putState, schemaVersion, transaction } from "../state/database.js";
 import type { RuntimeTraceObserver, TaskTraceKind, TaskTraceRun, TaskTraceStatus, TaskTraceSummary, TraceStepFinish, TraceStepStart, TraceUsage } from "./types.js";
 
-const PREFIX = "observability/tasks/";
 const MAX_STEPS = 80;
 const MAX_RUN_BYTES = 128 * 1024;
 const MAX_PAYLOAD_BYTES = 12 * 1024;
@@ -12,7 +12,7 @@ const ID = /^tr_\d{13}_[a-f0-9-]{36}$/;
 const sensitiveKey = /^(?:authorization|proxy.authorization|cookie|set.cookie|api.?key|access.?token|refresh.?token|id.?token|client.?secret|secret|password|credentials|encrypted_content|ciphertext|reasoning|reasoning_content|reasoning_details|accessToken|refreshToken|initData)$/i;
 const usageFields = ["inputTokens", "cachedInputTokens", "outputTokens", "reasoningTokens", "totalTokens", "costUsd"] as const;
 
-export interface TaskTraceOptions { secrets?: string[]; maxRuns?: number; retentionDays?: number }
+export interface TaskTraceOptions { secrets?: string[]; maxRuns?: number; retentionDays?: number; scope?: "tasks" | "calls"; todayOnly?: boolean; timezone?: string }
 export interface TaskTraceStart { kind: TaskTraceKind; trigger: string; channel?: string; at?: Date }
 export interface TaskTraceFinish { status: Exclude<TaskTraceStatus, "running">; reason?: string }
 
@@ -66,12 +66,14 @@ function summarize(run: TaskTraceRun): TaskTraceSummary {
 }
 
 export class TaskTraceStore {
+  private readonly prefix: string;
   private readonly db: DatabaseSync;
   private readonly secrets: string[];
   private readonly maxRuns: number;
   private readonly retentionDays: number;
   private closed = false;
-  constructor(rootDir: string, options: TaskTraceOptions = {}) {
+  constructor(rootDir: string, private readonly options: TaskTraceOptions = {}) {
+    this.prefix = options.scope === "calls" ? "observability/calls/" : "observability/tasks/";
     if (!existsSync(mainPath(rootDir))) throw new Error("任务轨迹需要已初始化的主数据库。");
     this.db = openDatabase(mainPath(rootDir));
     if (schemaVersion(this.db) !== 2) { this.db.close(); throw new Error("任务轨迹需要当前主数据库格式。"); }
@@ -83,7 +85,7 @@ export class TaskTraceStore {
   recoverInterrupted(): void {
     if (this.closed) return;
     transaction(this.db, () => {
-      for (const row of this.db.prepare("SELECT value FROM gateway_state WHERE key GLOB ?").all(PREFIX + "*") as {value:string}[]) {
+      for (const row of this.db.prepare("SELECT value FROM gateway_state WHERE key GLOB ?").all(this.prefix + "*") as {value:string}[]) {
         let run: TaskTraceRun; try { run = JSON.parse(row.value); } catch { continue; }
         if (run.status !== "running") continue;
         const deliveryStarted = run.steps.some(step => step.kind === "delivery" && step.status === "running");
@@ -106,12 +108,22 @@ export class TaskTraceStore {
         if (Buffer.byteLength(JSON.stringify(run)) <= MAX_RUN_BYTES) break;
       }
     }
-    putState(this.db, {key: PREFIX + run.id, category:"diagnostic", value:JSON.stringify(run)});
+    putState(this.db, {key: this.prefix + run.id, category:"diagnostic", value:JSON.stringify(run)});
+  }
+  retentionDay(): string | null {
+    return this.options.todayOnly && this.options.scope !== "calls" ? dateKey(new Date(Date.now()), this.options.timezone ?? "UTC") : null;
   }
   private prune(): void {
+    if (this.options.todayOnly && this.options.scope !== "calls") {
+      const timezone = this.options.timezone ?? "UTC", today = this.retentionDay();
+      for (const row of this.db.prepare("SELECT key,value FROM gateway_state WHERE key GLOB ?").all(this.prefix + "*") as {key:string;value:string}[]) {
+        const run = JSON.parse(row.value) as TaskTraceRun;
+        if (dateKey(new Date(run.startedAt), timezone) !== today) this.db.prepare("DELETE FROM gateway_state WHERE key=?").run(row.key);
+      }
+    }
     const cutoff = Date.now() - this.retentionDays * 86_400_000;
-    this.db.prepare("DELETE FROM gateway_state WHERE key GLOB ? AND key < ?").run(PREFIX + "*", PREFIX + "tr_" + String(cutoff).padStart(13,"0") + "_");
-    this.db.prepare("DELETE FROM gateway_state WHERE key IN (SELECT key FROM gateway_state WHERE key GLOB ? ORDER BY key DESC LIMIT -1 OFFSET ?)").run(PREFIX + "*", this.maxRuns);
+    this.db.prepare("DELETE FROM gateway_state WHERE key GLOB ? AND key < ?").run(this.prefix + "*", this.prefix + "tr_" + String(cutoff).padStart(13,"0") + "_");
+    this.db.prepare("DELETE FROM gateway_state WHERE key IN (SELECT key FROM gateway_state WHERE key GLOB ? ORDER BY key DESC LIMIT -1 OFFSET ?)").run(this.prefix + "*", this.maxRuns);
   }
   begin(input: TaskTraceStart): string {
     const at = (input.at ?? new Date()).toISOString();
@@ -127,16 +139,18 @@ export class TaskTraceStore {
   }
   get(id: string): TaskTraceRun | undefined {
     if (this.closed || !ID.test(id)) return undefined;
-    const row = this.db.prepare("SELECT value FROM gateway_state WHERE key=? AND category='diagnostic' AND encoding='json'").get(PREFIX + id) as {value:string}|undefined;
+    if (this.options.todayOnly) this.prune();
+    const row = this.db.prepare("SELECT value FROM gateway_state WHERE key=? AND category='diagnostic' AND encoding='json'").get(this.prefix + id) as {value:string}|undefined;
     if (!row) return undefined;
     const run = JSON.parse(row.value) as TaskTraceRun;
     return { ...run, ...summarize(run), steps:run.steps.map(step=>({...step,durationMs:step.finishedAt ? step.durationMs : Math.max(0,Date.now()-Date.parse(step.startedAt))})) };
   }
   list(options: {limit?:number;before?:string} = {}): { runs: TaskTraceSummary[]; nextBefore: string | null } {
+    this.prune();
     const limit = Number.isInteger(options.limit) ? Math.max(1, Math.min(100, options.limit!)) : 30;
     if (options.before && !ID.test(options.before)) throw new Error("无效的任务游标。");
     const rows = this.db.prepare("SELECT value FROM gateway_state WHERE key GLOB ? AND key < ? ORDER BY key DESC LIMIT ?")
-      .all(PREFIX + "*", options.before ? PREFIX + options.before : PREFIX + "~", limit + 1) as {value:string}[];
+      .all(this.prefix + "*", options.before ? this.prefix + options.before : this.prefix + "~", limit + 1) as {value:string}[];
     const runs = rows.slice(0,limit).map(row => summarize(JSON.parse(row.value)));
     return {runs,nextBefore:rows.length > limit ? runs.at(-1)!.id : null};
   }
@@ -148,6 +162,8 @@ export class TaskTraceStore {
       ...(event.parentId ? {parentId:this.cleanText(event.parentId,80)} : {}),
       ...(event.provider ? {provider:this.cleanText(event.provider,64)} : {}),
       ...(event.model ? {model:this.cleanText(event.model,200)} : {}),
+      ...(event.context ? {context:event.context.slice(0,32).map(item=>({source:this.cleanText(item.source,80),delivery:item.delivery,
+        ...(item.detail ? {detail:this.cleanText(item.detail,240)} : {})}))} : {}),
       startedAt:new Date().toISOString(), durationMs:0, status:"running" as const, input:input.value, ...(input.truncated ? {truncated:true} : {}) };
     run.steps.push(step); run.stepCount = run.steps.length; this.save(run); return id;
   }

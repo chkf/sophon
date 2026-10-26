@@ -1,5 +1,8 @@
+import { listMemoryPrompts, saveMemoryPrompt } from '../memory/prompts.js';
 import type { DatabaseSync } from 'node:sqlite';
-import { memoryMarker } from '../memory/schema.js';
+import { transaction } from '../state/database.js';
+import { normalizeName } from '../memory/validation.js';
+import { bumpMemoryRevision, memoryMarker } from '../memory/schema.js';
 import { MemoryStore } from '../memory/store.js';
 import { bootstrapStatus } from '../memory/bootstrap.js';
 import { activation } from '../memory/weights.js';
@@ -36,6 +39,8 @@ export class ControlMemory {
     }
     return this.store ??= new MemoryStore(this.db, this.scope);
   }
+  prompts() { return listMemoryPrompts(this.db); }
+  savePrompt(input: Record<string,unknown>) { return saveMemoryPrompt(this.db,input); }
   overview() {
     const marker = memoryMarker(this.db);
     const available = Boolean(this.scope && marker?.version === 2);
@@ -53,7 +58,7 @@ export class ControlMemory {
       counts, topics, progress, problems, runtimeStatus };
   }
   private topic(id: string) {
-    const row = this.db.prepare("SELECT id,parent_id,name,description FROM memory_topics WHERE id=? AND owner_scope=? AND status='active'").get(id, this.scope!);
+    const row = this.db.prepare("SELECT id,parent_id,name,description,revision FROM memory_topics WHERE id=? AND owner_scope=? AND status='active'").get(id, this.scope!);
     if (!row) throw new ControlDataError('not_found', 404, '主题不存在或已归档。');
     return row;
   }
@@ -74,7 +79,51 @@ export class ControlMemory {
     const related = parent ? this.db.prepare(`SELECT t.id,t.name,e.strength FROM memory_topic_edges e JOIN memory_topics t
       ON t.id=CASE WHEN e.topic_a=? THEN e.topic_b ELSE e.topic_a END WHERE (e.topic_a=? OR e.topic_b=?)
       AND t.owner_scope=? AND t.status='active' ORDER BY e.strength DESC,t.id LIMIT 12`).all(parent, parent, parent, this.scope!) : [];
-    return { items, path, related, total, nextOffset: offset + items.length < total ? offset + items.length : null };
+    return { items, path, related, selectedTopic: parent ? this.topic(parent) : null, total, nextOffset: offset + items.length < total ? offset + items.length : null };
+  }
+  private checkRevision(actual: unknown, expected: unknown) {
+    if (!Number.isSafeInteger(expected) || Number(expected) < 1) throw invalid();
+    if (actual !== expected) throw new ControlDataError('revision_conflict',409,'内容已在别处更新，请重新读取后合并。');
+  }
+  saveTopic(input: Record<string,unknown>) {
+    this.graph(); const id=text(input.id), name=text(input.name,60).trim(), description=text(input.description,240).trim();
+    const normalized=normalizeName(name); if(!normalized)throw invalid();
+    return transaction(this.db,()=>{
+      const current=this.topic(id);this.checkRevision(current.revision,input.expectedRevision);
+      const siblings=this.db.prepare("SELECT id,name,aliases FROM memory_topics WHERE owner_scope=? AND parent_id IS ? AND status='active' AND id<>?").all(this.scope!,current.parent_id!,id);
+      if(siblings.some(t=>[String(t.name),...JSON.parse(String(t.aliases)) as string[]].some(n=>normalizeName(n)===normalized)))
+        throw new ControlDataError('topic_conflict',409,'同级主题已有相同名称或别名，请使用已有主题。');
+      this.db.prepare('UPDATE memory_topics SET name=?,normalized_name=?,description=?,revision=revision+1,updated_at=? WHERE id=? AND owner_scope=?')
+        .run(name,normalized,description,new Date().toISOString(),id,this.scope!);
+      bumpMemoryRevision(this.db);return this.topic(id);
+    });
+  }
+  saveNode(input: Record<string,unknown>) {
+    this.graph(); const id=text(input.id),gist=text(input.gist,200).trim();
+    if(typeof input.summary!=='string'||input.summary.length>2400||input.summary.includes('\0'))throw invalid();
+    const summary=input.summary;
+    return transaction(this.db,()=>{
+      const current=this.db.prepare('SELECT revision,status,detail,token_estimate FROM memory_nodes WHERE id=? AND owner_scope=?').get(id,this.scope!);
+      if(!current)throw new ControlDataError('not_found',404,'记忆不存在。');
+      this.checkRevision(current.revision,input.expectedRevision);
+      if(current.status==='stale')throw new ControlDataError('revision_conflict',409,'来源已变化，请先完成重新分类。');
+      if(this.db.prepare('SELECT 1 FROM memory_recent_links WHERE node_id=? AND owner_scope=?').get(id,this.scope!))
+        throw new ControlDataError('recent_authoritative',409,'请在 Core / Recent 中修改此持续事项的正文。');
+      const at=new Date().toISOString();
+      // Invalidate derived rollups sharing evidence; expose covered source memories again.
+      const derived=this.db.prepare(`SELECT DISTINCT n.id FROM memory_nodes n JOIN memory_sources s ON s.node_id=n.id
+        WHERE n.owner_scope=? AND n.kind='rollup' AND n.status<>'stale' AND n.id<>?
+        AND s.message_rowid IN (SELECT message_rowid FROM memory_sources WHERE node_id=?)`).all(this.scope!,id,id);
+      for(const row of derived){
+        this.db.prepare(`UPDATE memory_topic_memberships SET status='active' WHERE status='covered' AND topic_id IN
+          (SELECT topic_id FROM memory_topic_memberships WHERE node_id=?) AND node_id IN
+          (SELECT id FROM memory_nodes WHERE owner_scope=? AND status='active')`).run(row.id!,this.scope!);
+        this.db.prepare("UPDATE memory_nodes SET status='stale',gist='',summary='',detail='',revision=revision+1,updated_at=? WHERE id=?").run(at,row.id!);
+      }
+      this.db.prepare('UPDATE memory_nodes SET gist=?,summary=?,token_estimate=?,revision=revision+1,updated_at=? WHERE id=? AND owner_scope=?')
+        .run(gist,summary,Math.max(Number(current.token_estimate),Math.ceil((gist.length+summary.length+String(current.detail).length)/2)),at,id,this.scope!);
+      bumpMemoryRevision(this.db);return {id,revision:Number(current.revision)+1};
+    });
   }
   nodes(input: Record<string, unknown>) {
     const store = this.graph(), { offset, limit } = page(input);

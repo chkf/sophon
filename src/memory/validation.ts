@@ -9,7 +9,7 @@ export function normalizeName(value: string): string { return value.normalize('N
 function object(v: unknown): v is Record<string,unknown> { return !!v && typeof v==='object' && !Array.isArray(v); }
 function text(v: unknown, max: number): v is string { return typeof v==='string' && !!v.trim() && v.length<=max && !/[\u0000-\u0008]/.test(v); }
 function score(v:unknown): v is number { return typeof v==='number' && Number.isFinite(v) && v>=0 && v<=1; }
-export function parseClassification(raw: string): Classification {
+export function parseClassification(raw: string, stage: 'roots'|'final'='final'): Classification {
   let v: unknown; try { v=JSON.parse(raw); } catch { throw new MemoryError('INVALID_JSON'); }
   const bad=()=>{throw new MemoryError('INVALID_CLASSIFICATION');};
   if (!object(v) || Object.keys(v).some(k=>!['schema_version','decision','kind','gist','importance','labels','proposed_topics','relation_hints'].includes(k)) ||
@@ -25,7 +25,10 @@ export function parseClassification(raw: string): Classification {
     if(labels.length||proposed.length||hints.length)return bad();
     return {schema_version:1,decision:'SKIP',labels:[],proposed_topics:[],relation_hints:[]};
   }
-  if (!labels.length || !text(v.gist,200) || !score(v.importance) || !['chat','event','plan','correction','preference'].includes(String(v.kind))) return bad();
+  const validKind=['chat','event','plan','correction','preference'].includes(String(v.kind));
+  if (!labels.length || (stage==='final' && (!text(v.gist,200) || !score(v.importance) || !validKind)) ||
+    (stage==='roots' && ((v.gist!==undefined && !text(v.gist,200)) ||
+      (v.importance!==undefined && !score(v.importance)) || (v.kind!==undefined && !validKind)))) return bad();
   return {...v,labels,proposed_topics:proposed,relation_hints:hints} as unknown as Classification;
 }
 

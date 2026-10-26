@@ -420,7 +420,7 @@ test("SIWC compaction restart syncs only new deliveries and persists the history
     const secondSocket = new FakeSocket([compact("opaque-second")]);
     const second = new StatefulResponsesBridge(directory, () => secondSocket); bridges.push(second);
     await second.reply({ ...request("续聊"), history }); await second.close();
-    assert.deepEqual(reads, [2, 2]); assert.match(JSON.stringify(secondSocket.sent[0]!.input), /opaque-first/);
+    assert.deepEqual(reads, [2]); assert.match(JSON.stringify(secondSocket.sent[0]!.input), /opaque-first/);
     assert.match(JSON.stringify(secondSocket.sent[0]!.input), /重启间已送达/);
     assert.doesNotMatch(JSON.stringify(secondSocket.sent[0]!.input), /旧问题|旧答复/);
     const thirdSocket = new FakeSocket([messageResponse("third", "继续")]);
@@ -524,7 +524,6 @@ test("SIWC missing historical assistant media keeps text and explicitly marks un
   assert.equal(input[0]?.content, "已送达的文字"); assert.match(JSON.stringify(input), /不可读取/); assert.doesNotMatch(JSON.stringify(input), /input_image/);
 });
 import {
-  compactThresholdForModel,
   hasUnresolvedToolEvidence,
   summarizeContextItems,
   StatefulResponsesBridge,
@@ -658,14 +657,14 @@ test("lazy persistent history is complete on SIWC recovery and unread during con
     await bridge.reply({ ...request("current"), history });
     const input = socket.sent[0]!.input as Record<string, unknown>[];
     assert.deepEqual(input.filter(item => item.role === "user" || item.role === "assistant").map(item => item.content), [...original.map(m => "[历史消息发送时间：2026-10-11 00:00（UTC）]\n" + m.content), "current"]);
-    assert.equal(reads, 3, "creation time, capacity assessment and transcript are read");
+    assert.equal(reads, 2, "creation time and transcript are read without capacity maintenance");
     await bridge.reply({ ...request("next"), history });
-    assert.equal(reads, 3); assert.ok(socket.sent[1]!.previous_response_id);
+    assert.equal(reads, 2); assert.ok(socket.sent[1]!.previous_response_id);
     bridge.close();
     const recoveredSocket = new FakeSocket([messageResponse("recovered", "done")]);
     bridge = new StatefulResponsesBridge(directory, () => recoveredSocket);
     await bridge.reply({ ...request("after restart"), history });
-    assert.equal(reads, 5); assert.match(JSON.stringify(recoveredSocket.sent[0]!.input), /original 0/);
+    assert.equal(reads, 3); assert.match(JSON.stringify(recoveredSocket.sent[0]!.input), /original 0/);
   } finally { bridge?.close(); sessions.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -1403,10 +1402,7 @@ test("stateful bridge sends full context once, then only incremental turns and t
     assert.deepEqual(firstRequest.include, ["reasoning.encrypted_content"]);
     assert.equal(firstRequest.stream_id, undefined);
     assert.equal(typeof firstRequest.prompt_cache_key, "string");
-    assert.deepEqual(firstRequest.context_management, [{
-      type: "compaction",
-      compact_threshold: 120_000,
-    }]);
+    assert.equal(firstRequest.context_management, undefined);
     const firstTools = firstRequest.tools as Record<string, unknown>[];
     assert.equal(firstTools[0]?.type, "web_search");
     assert.equal(firstTools[1]?.type, "namespace");
@@ -1486,7 +1482,7 @@ test("changed context revisions discard an old compacted snapshot and rebuild fr
       },
     });
     assert.equal(compacted.compacted, true);
-    assert.equal(compacted.compaction?.reason, "capacity");
+    assert.equal(compacted.compaction, undefined);
     assert.equal(compacted.text, "after compact");
 
     const socket2 = new FakeSocket([messageResponse("after-restart", "continued")]);
@@ -1523,13 +1519,6 @@ test("changed context revisions discard an old compacted snapshot and rebuild fr
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
-});
-
-test("working context uses the unified 120k compaction policy", () => {
-  assert.equal(compactThresholdForModel("gpt-6-astra"), 120_000);
-  assert.equal(compactThresholdForModel("gpt-5.6-sol"), 120_000);
-  assert.equal(compactThresholdForModel("gpt-5.6-luna"), 120_000);
-  assert.equal(compactThresholdForModel("unknown-model"), 120_000);
 });
 
 
@@ -2226,7 +2215,7 @@ test("SIWC >48K completed chat keeps previous_response_id without a proactive re
 });
 
 
-test("unsupported weekly compact never invents success; real automatic compaction resets the timer", async () => {
+test("no weekly or capacity requests are scheduled; legacy server checkpoints remain recoverable", async () => {
   const directory = await mkdtemp(join(tmpdir(), "gateway-weekly-fallback-"));
   let now = Date.parse("2026-10-01T00:00:00Z");
   const compacted = messageResponse("server-compact", "after server compaction");
@@ -2247,14 +2236,14 @@ test("unsupported weekly compact never invents success; real automatic compactio
     const failed = await bridge.reply(request("due"));
     assert.equal(failed.compaction, undefined);
     assert.equal(attempted, 0);
-    assert.equal((socket.sent[1]!.context_management as any)?.[0]?.compact_threshold, 1_000);
+    assert.equal(socket.sent[1]!.context_management, undefined);
     const actual = await bridge.reply(request("server auto compacted"));
-    assert.equal(actual.compaction?.reason, "seven_days");
+    assert.equal(actual.compaction, undefined);
     assert.equal(attempted, 0);
     now += 2 * 24 * 60 * 60_000;
     await bridge.reply(request("within new window"));
     assert.equal(attempted, 0);
-    assert.equal((socket.sent[3]!.context_management as any)?.[0]?.compact_threshold, 120_000);
+    assert.equal(socket.sent[3]!.context_management, undefined);
   } finally { await bridge.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

@@ -1,0 +1,46 @@
+/** Optional DOM acceptance, using only synthetic local API responses. No browser layout assertions. */
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+const {JSDOM}=await import(process.env.SOPHON_UI_DOM_MODULE || 'jsdom');
+const html=await readFile(new URL('../src/control/assets/index.html',import.meta.url),'utf8');
+const dom=new JSDOM(html,{url:'https://control.example/control/',runScripts:'outside-only'});
+const w=dom.window,doc=w.document,errors=[];
+w.matchMedia=()=>({matches:false,addEventListener(){}});w.confirm=()=>true;
+w.ResizeObserver=class{observe(){}disconnect(){}};
+w.HTMLElement.prototype.scrollIntoView=function(){};
+w.addEventListener('error',event=>errors.push(event.message));
+let prompt='输出带引用的 JSON。',revision=0,topicName='文档',nodeGist='你计划整理目录。',saves=0;
+const at='2026-01-01T10:00:00Z';
+const run={id:'fixture-call',kind:'chat',status:'completed',channel:'telegram',startedAt:at,durationMs:100,steps:[
+ {id:'source',kind:'context',name:'Core',status:'completed',startedAt:at,input:{source:'core',placement:'policy',content:'中性指导'}},
+ {id:'model',kind:'model',name:'模型调用',status:'completed',startedAt:at,context:[{source:'core',delivery:'sent'}],input:{message:'合成请求'},output:{message:'合成答复'}}]};
+w.fetch=async(url,init)=>{
+ const action=url.split('/').at(-1),body=JSON.parse(init.body);let data;
+ if(action==='session') data={authenticated:true,csrfToken:'fixture-csrf'};
+ else if(action==='tasks') data={runs:[],nextBefore:null,heartbeat:{enabled:false,timezone:'UTC'}};
+ else if(action==='context') data={calls:[run],checkpoints:[],usage:{note:'合成用量'}};
+ else if(action==='call') data=run;
+ else if(action==='graph') data={available:true,enabled:true,topics:1,counts:{active:1},progress:{jobs:{},operations:{},missingTurns:0,staleTurns:0,ready:true,initialized:true}};
+ else if(action==='graph-prompts')data={revision,items:[{id:'classify',label:'分类',model:'记忆模型',content:prompt,customized:revision>0}]};
+ else if(action==='graph-prompt-save'){assert.equal(body.expectedRevision,revision++);prompt=body.reset?'输出带引用的 JSON。':body.content;saves++;data={};}
+ else if(action==='graph-topics')data={items:body.parentId?[]:[{id:'topic',name:topicName,children:0,memories:1}],path:[],related:[],nextOffset:null,selectedTopic:body.parentId?{id:'topic',name:topicName,description:'文档处理',revision:1}:null};
+ else if(action==='graph-topic-save'){assert.equal(body.expectedRevision,1);topicName=body.name;saves++;data={};}
+ else if(action==='graph-nodes')data={items:[{id:'node',kind:'turn',gist:nodeGist,status:'active',activation:1}],nextOffset:null};
+ else if(action==='graph-node')data={id:'node',kind:'turn',status:'active',gist:nodeGist,summary:'我建议检查结构。',revision:1,memberships:[],sources:[],nextOffset:null};
+ else if(action==='graph-node-save'){assert.equal(body.expectedRevision,1);nodeGist=body.gist;saves++;data={};}
+ else throw Error('Unexpected synthetic action: '+action);
+ return new Response(JSON.stringify({ok:true,data}),{headers:{'content-type':'application/json'}});
+};
+const settle=async()=>{for(let i=0;i<12;i++)await new Promise(resolve=>setTimeout(resolve,0));};
+const click=async(selector)=>{assert.ok(doc.querySelector(selector),selector);doc.querySelector(selector).click();await settle();};
+const save=async(container)=>{const button=[...doc.querySelectorAll(container+' button')].find(b=>b.textContent==='保存修改');assert.ok(button);button.click();await settle();};
+try{
+ w.eval(await readFile(new URL('../src/control/assets/app.js',import.meta.url),'utf8'));await settle();
+ await click('[data-page="context"]');assert.match(doc.querySelector('#page-content').textContent,/完整调用流程/);assert.match(doc.querySelector('#call-detail').textContent,/本次传入/);
+ await click('[data-page="graph"]');assert.ok(doc.querySelector('#graph-prompts textarea'));
+ const editor=doc.querySelector('#graph-prompts textarea');editor.value='仅根据原文输出 JSON。';editor.dispatchEvent(new w.Event('input'));await save('#graph-prompts');assert.equal(prompt,'仅根据原文输出 JSON。');
+ await click('.graph-topic');const title=doc.querySelector('[aria-label="主题名称"]');title.value='资料';title.dispatchEvent(new w.Event('input'));await save('#graph-topics');assert.equal(topicName,'资料');
+ await click('.graph-node');const gist=doc.querySelector('[aria-label="检索线索"]');gist.value='你计划整理资料。';gist.dispatchEvent(new w.Event('input'));await save('#graph-detail');assert.equal(nodeGist,'你计划整理资料。');
+ assert.equal(saves,3);assert.deepEqual(errors,[]);assert.notEqual(doc.querySelector('#notice').className,'notice error');
+ console.log(JSON.stringify({passed:true,checks:['call attribution rendering','graph prompt save','topic save','node save','revision payloads'],layoutVerified:false}));
+}finally{w.close();}

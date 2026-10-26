@@ -1,15 +1,16 @@
 import type { ChatUsage } from "../runtime/types.js";
 
 export type TraceUsage = Partial<ChatUsage>;
-export type TaskTraceKind = "heartbeat_plan" | "heartbeat_decision" | "heartbeat_delivery" | "heartbeat_check";
+export type TaskTraceKind = "chat" | "heartbeat_plan" | "heartbeat_decision" | "heartbeat_delivery" | "heartbeat_check";
 export type TaskTraceStatus = "running" | "completed" | "silent" | "skipped" | "failed" | "delivered" | "delivery_unknown" | "interrupted";
 export interface TraceStepStart {
-  kind: "model" | "tool" | "condition" | "delivery" | "system";
+  kind: "model" | "tool" | "condition" | "delivery" | "system" | "context";
   name: string;
   parentId?: string;
   provider?: string;
   model?: string;
   input?: unknown;
+  context?: ContextInjection[];
 }
 export interface TraceStepFinish {
   status: "completed" | "failed" | "skipped";
@@ -55,3 +56,6 @@ export interface TaskTraceSummary {
   truncated?: boolean;
 }
 export interface TaskTraceRun extends TaskTraceSummary { steps: TaskTraceStep[] }
+
+export interface ContextSource { id:string; label:string; placement:"policy"|"turn"; content:string }
+export interface ContextInjection { source:string; delivery:"sent"|"inherited"|"replayed"|"omitted"; detail?:string }

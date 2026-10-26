@@ -1,17 +1,7 @@
 import { createHash } from "node:crypto";
 import type { CompactionCheckpoint, CompactionReason } from "./stateful-types.js";
 
-export const SIWC_AUTO_COMPACT_TOKENS = 120_000;
-export const SIWC_SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-/** The public Responses context_management API requires >= 1000. */
-export const SIWC_WEEKLY_COMPACT_TOKENS = 1_000;
-
-export function sevenDayCompactionDue(startedAt: string | undefined, lastCompactedAt: string | undefined,
-  now = Date.now()): boolean {
-  const anchor = Date.parse(lastCompactedAt ?? startedAt ?? "");
-  return Number.isFinite(anchor) && now >= anchor + SIWC_SEVEN_DAYS_MS;
-}
-
+/** Legacy checkpoint fixture/compatibility helper; no runtime compaction policy. */
 export function checkpointFromItems(sessionId: string, model: string, items: Record<string, unknown>[],
   coveredThroughSeq: number, reason: CompactionReason, at: string): CompactionCheckpoint {
   const latest = [...items].reverse().find(item => item.type === "compaction" &&

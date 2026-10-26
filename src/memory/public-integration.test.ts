@@ -14,7 +14,6 @@ import {MemoryRecent} from './recent.js';
 import {LocalKnowledgeStore} from '../knowledge/store.js';
 import {parseClassification} from './validation.js';
 import {memoryWindow,buildMemoryRebase,memoryWindowDue} from '../runtime/siwc/memory-rebase.js';
-import {compactChatHistory} from '../runtime/siwc/chat-compaction.js';
 import {historyFromMessages} from '../runtime/history.js';
 import {ControlMemory} from '../control/memory.js';
 const owner='70001',at='2026-10-26T08:00:00.000Z';
@@ -88,14 +87,6 @@ test('calendar window retains crossing-midnight exchanges and incomplete old tur
  assert.equal(memoryWindowDue(built.metadata,'UTC',new Date('2026-10-27T00:01:00Z')),true);
  assert.equal((await memoryWindow(historyFromMessages(rows.slice(0,1)),now,'UTC')).messages.length,1);
 });
-test('chat compaction uses only transcript and requires an actual opaque checkpoint',async()=>{
- const history=historyFromMessages([{role:'user',content:'目录问题',at},{role:'assistant',content:'目录答复',at}]);let request:any;
- const opts={sessionId:'synthetic',model:'fixture',history,items:[{role:'developer',content:'EXCLUDED_POLICY'}],reason:'seven_days' as const,now:()=>new Date(at),send:async(r:any)=>{request=r;return {id:'result',output:[{type:'compaction',encrypted_content:'fixture-opaque'}],status:'completed'} as any;}};
- const compacted=await compactChatHistory(opts);assert.equal(compacted?.checkpoint.source,'chat');
- assert.doesNotMatch(JSON.stringify(request),/EXCLUDED_POLICY/);assert.match(JSON.stringify(request),/目录问题/);
- assert.equal(await compactChatHistory({...opts,send:async()=>({id:'r',output:[],status:'completed'} as any)}),undefined);
-});
-
 test('deleting source text invalidates graph evidence and preserves remaining transcript',()=>fixture(async(_root,sessions,graph)=>{
  await exchange(sessions);beginBootstrap(graph);
  const job=graph.claim(new Date(Date.now()+1000))!,turn=graph.collect(job.assistant_rowid);

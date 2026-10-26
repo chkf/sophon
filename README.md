@@ -111,3 +111,5 @@ npm run build
 框架源码按 [MIT](LICENSE) 发布。依赖和可选组件的许可范围见 [第三方说明](THIRD_PARTY_NOTICES.md)。`package.json` 的 `private: true` 仅防止意外发布到 npm，不限制源码使用。
 
 [记忆图与三日上下文窗口](docs/memory-graph.md)默认启用，启动时自动备份并准备扩展与历史回填。分类需要 SIWC 并消耗所选模型额度；旧配置的 `GATEWAY_MEMORY_GRAPH_ENABLED=false` 不再关闭功能。
+
+临时会话使用 `/temp on` 和 `/temp off`，详见 [临时会话](docs/temporary-chat.md)。

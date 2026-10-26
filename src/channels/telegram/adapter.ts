@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { animationPreview } from "../../media/animation-preview.js";
 import { displayText, spokenText, visibleSegments } from "../../runtime/reply-segments.js";
 import { deliverReplySegments } from "./delivery.js";
@@ -28,6 +29,7 @@ export class TelegramAdapter implements ProactiveSender {
   private readonly panels: TelegramPanels;
   private readonly store: TelegramStateStore;
   private running = false;
+  private temporary?: import("../../runtime/types.js").TemporaryConversation;
   private pollAbort?: AbortController;
   private pollTask?: Promise<void>;
   private flushTimer?: ReturnType<typeof setTimeout>;
@@ -73,6 +75,7 @@ export class TelegramAdapter implements ProactiveSender {
 
   async stop(): Promise<void> {
     this.running = false;
+    this.temporary=undefined;
     this.clearFlushTimer();
     this.pollAbort?.abort();
     await this.pollTask?.catch(() => undefined);
@@ -320,6 +323,39 @@ export class TelegramAdapter implements ProactiveSender {
     const chatId = String(message.chat.id);
     const senderId = String(message.from?.id ?? "");
     const text = message.text ?? message.caption ?? "";
+    if (/^\/temp(?:@\w+)?(?:\s|$)/i.test(text)) {
+      await this.consumeUpdate(update.update_id,chatId);
+      const arg=text.trim().split(/\s+/).slice(1).join(' ').toLowerCase();
+      if(!this.config.temporaryReply) {await this.sendText(chatId,'临时会话不可用。');return;}
+      if(arg==='off'){this.temporary=undefined;await this.sendText(chatId,'已退出临时会话，内存聊天已清除。');return;}
+      if(arg && arg!=='on'){await this.sendText(chatId,'使用 /temp on 开启，/temp off 退出。');return;}
+      if(this.state.inFlight || this.state.buffer || this.state.queuedBuffers?.length || this.state.pendingReply){await this.sendText(chatId,'请先处理完正式会话中的待回复消息，再开启临时会话。');return;}
+      this.temporary ??= {id:'temporary:'+randomUUID(),messages:[]};
+      await this.sendText(chatId,'临时会话已开启。聊天不写入正式历史或记忆；文件、图片和贴纸操作仍可保存。使用 /temp off 退出。');return;
+    }
+    if(this.temporary && !immediateCommand(text)) {
+      const session=this.temporary;
+      await this.consumeUpdate(update.update_id,chatId);
+      if(session.messages.length>=100 || JSON.stringify(session.messages).length>200000){await this.sendText(chatId,'临时会话已达到内存上限，请退出后重新开启。');return;}
+      const attachments=await this.collectAttachments(message);
+      const replyTo=normalizeReplyTo(message,this.config.ownerId);
+      if(replyTo && message.reply_to_message) replyTo.attachments=await this.collectAttachments(message.reply_to_message);
+      const inbound:InboundMessage={channel:'telegram',conversationId:chatId,senderId,messageId:String(message.message_id),text,
+        receivedAt:new Date(message.date*1000).toISOString(),attachments,...(replyTo?{replyTo}:{}),
+        platformMessages:[{accountId:telegramAccountId(this.config.token)??"",conversationId:chatId,direction:'inbound',messageId:String(message.message_id),text,attachments}]};
+      const work=async()=>{
+        const result=await this.withTyping(chatId,()=>this.config.temporaryReply!(inbound,session));
+        if(result.kind==='retry'||result.kind==='pause'){await this.sendText(chatId,'临时调用未完成，请重新发送；不会自动重试。');return;}
+        let delivered=false;
+        await deliverPreparedReply(this.api,{...result,chatId,senderId},{sendVoice:this.config.sendVoice,showStageDirections:this.config.showStageDirections,
+          onReplyDelivered:event=>{delivered=event.complete!==false;}},(target,value,onSent,reply,strict)=>this.sendText(target,value,onSent,reply,strict),telegramAccountId(this.config.token));
+        if(delivered && result.kind==='model_reply')session.messages.push(session.pendingInput??{role:'user',content:text,at:inbound.receivedAt},{role:'assistant',content:result.text,at:new Date().toISOString(),
+          ...(result.images?.length?{attachments:result.images.map(image=>({kind:'image' as const,path:image.path,mimeType:image.mimeType}))}:{})});
+        delete session.pendingInput;
+      };
+      try{await (this.config.conversationQueue?.run(work)??work());}catch{await this.sendText(chatId,'临时调用或交付失败，结果可能不完整；请核对后再操作。');}
+      return;
+    }
     if (message.text && !immediateCommand(text) && message.reply_to_message) {
       if (await this.panels.input(message)) { await this.consumeUpdate(update.update_id, chatId); return; }
     }

@@ -52,7 +52,7 @@ export class MemoryWorker {
         const route=progress.classificationRoute as {version?:number;directoryHash?:string;result?:unknown;focus?:BranchFocus[]}|undefined;
         let classification;
         if(route?.version===1&&route.directoryHash===directoryHash){
-          const selection=selectRoots(parseClassification(JSON.stringify(route.result)),topics);
+          const selection=selectRoots(parseClassification(JSON.stringify(route.result),'roots'),topics);
           const step=branchClassificationInput(turn,topics,revision,prepared.digest,selection,route.focus);
           classification=parseClassification(await this.runtime.classifyMemory(step.input));
           this.runtimeState=undefined;
@@ -64,7 +64,7 @@ export class MemoryWorker {
           classification=finishClassification(classification,topics,selection,step.focus);
         }else{
           const input=classificationInput(turn,topics,revision,prepared.digest);
-          classification=parseClassification(await this.runtime.classifyMemory(input));
+          classification=parseClassification(await this.runtime.classifyMemory(input),'roots');
           this.runtimeState=undefined;
           if(classification.decision==='STORE'){
             selectRoots(classification,topics);
