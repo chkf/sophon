@@ -7,6 +7,7 @@ import type { ExpressionStore } from "../expression/store.js";
 import { API_UNSUPPORTED_IMAGES, isProvider, providerLabel } from "./providers.js";
 
 export const TELEGRAM_COMMANDS = [
+  { command: "update", description: "从已配置上游更新或查看状态" },
   { command: "retry", description: "重试失败的待回复消息" },
   { command: "expression", description: "开启或关闭心理和动作描写" },
   { command: "model", description: "Provider/聊天模型/生图设置" },
@@ -44,6 +45,7 @@ export class GatewayCommandRouter {
     private readonly testRunner?: HostTestRunner,
     _expressions?: ExpressionStore,
     private readonly controlEntry?: (message: InboundMessage) => string | Promise<string>,
+    private readonly updater?: (message: InboundMessage, args: string) => Promise<string>,
   ) {}
 
   async handle(message: InboundMessage): Promise<string | undefined> {
@@ -85,7 +87,7 @@ export class GatewayCommandRouter {
       case "logs":
         return this.logs(parsed.args);
       case "update":
-        return this.update(parsed.args);
+        return this.updater ? this.updater(message, parsed.args) : "当前未由更新管理进程启动，请在部署目录使用 npm start。";
       case "test":
         return message.channel === "telegram" ? this.hostTest(parsed.args) : "Host 测试仅在 Telegram 私聊可用。";
       default:
@@ -216,7 +218,6 @@ export class GatewayCommandRouter {
       return "暂时读不到 Host 日志。";
     }
   }
-  private async update(_args: string): Promise<string> { return "独立 Gateway 不提供远程自动更新。请在部署目录手动更新并重新启动。"; }
 
   private async setChannel(channel: ActiveProactiveChannel): Promise<string> {
     try {
