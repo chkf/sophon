@@ -3,6 +3,7 @@ import {spawn} from 'node:child_process';
 import {mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {safeComponentCode} from './cloudflared-install.mjs';
 import {buildEnvironment} from './releases.mjs';
 
 export function tunnelUrl(value){
@@ -47,18 +48,25 @@ export async function controlProxy({host,port,getUrl}){
 
 /** Stable across Gateway restarts. A new tunnel invalidates the old browser session. */
 export class ControlTunnel {
- constructor({host,port,binary='cloudflared',onUrl=()=>{},spawnImpl=spawn,retryMs=30_000,startupMs=45_000}){
-  Object.assign(this,{host,port,binary,onUrl,spawnImpl,retryMs,startupMs});this.url=null;this.stopped=false;
+ constructor({host,port,binary='cloudflared',resolveBinary,onUrl=()=>{},spawnImpl=spawn,retryMs=30_000,startupMs=45_000}){
+  Object.assign(this,{host,port,binary,resolveBinary,onUrl,spawnImpl,retryMs,startupMs});this.url=null;this.stopped=false;this.abort=new AbortController();
  }
- publish(url){this.url=url;this.onUrl(url);}
+ publish(url,reason){this.url=url;this.onUrl(url,reason);}
  async start(){
   this.directory=await mkdtemp(join(tmpdir(),'sophon-tunnel-'));
   this.config=join(this.directory,'config.yml');await writeFile(this.config,'{}\n',{mode:0o600});
   this.proxy=await controlProxy({host:this.host,port:this.port,getUrl:()=>this.url});
-  this.launch();
+  void this.launch();
  }
- launch(){
+ launch(){this.launching=this.launchOnce();return this.launching;}
+ async launchOnce(){
   if(this.stopped)return;
+  if(this.resolveBinary){
+   this.publish(null,'preparing');
+   try{this.binary=await this.resolveBinary(this.abort.signal);}
+   catch(error){if(!this.stopped)this.retry(safeComponentCode(error));return;}
+   if(this.stopped)return;
+  }
   // Never inherit tunnel tokens or application secrets. Use an isolated empty config.
   let child;
   try{child=this.spawnImpl(this.binary,['tunnel','--config',this.config,'--no-autoupdate','--url',this.proxy.url],{env:buildEnvironment(),stdio:['ignore','pipe','pipe'],windowsHide:true});}
@@ -80,12 +88,12 @@ export class ControlTunnel {
   }
   this.deadline=setTimeout(()=>{if(this.child===child){this.publish(null);child.kill();}},this.startupMs);
  }
- retry(){
-  this.publish(null);console.error('[host] control tunnel unavailable; install/check cloudflared and network. Retrying.');
-  this.retryTimer=setTimeout(()=>this.launch(),this.retryMs);
+ retry(reason='connection_failed'){
+  this.publish(null,reason);console.error('[host] control tunnel unavailable ('+reason+'); retrying.');
+  this.retryTimer=setTimeout(()=>{void this.launch();},this.retryMs);
  }
  async stop(){
-  this.stopped=true;clearTimeout(this.retryTimer);clearTimeout(this.deadline);this.publish(null);
+  this.stopped=true;this.abort.abort();await this.launching;clearTimeout(this.retryTimer);clearTimeout(this.deadline);this.publish(null);
   const child=this.child;
   if(child)await new Promise(resolve=>{
    const force=setTimeout(()=>child.kill('SIGKILL'),3000);

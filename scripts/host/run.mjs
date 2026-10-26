@@ -1,3 +1,4 @@
+import {ensureCloudflared,prepareControlDependency} from './cloudflared-install.mjs';
 import {ControlTunnel} from './control-tunnel.mjs';
 import {fileURLToPath} from 'node:url';
 import {resolve,join} from 'node:path';
@@ -48,6 +49,7 @@ async function queue(name,id=randomUUID()){
    const prior=rollback?await readJson(join(dir,'previous.json'),undefined):undefined;
    if(rollback&&prior===undefined)throw Error('No previous release.');
    const candidate=rollback?{...await releaseFromPointer(root,prior),unchanged:false}:await prepareRelease(root,source,runCommand,progress);
+   await prepareControlDependency(root);
    if(closing){await status({id,phase:'interrupted',source:source.name});return;}
    if(candidate.unchanged){
     const healthy=await checkGatewayHealth(root,gateway.child);
@@ -78,7 +80,7 @@ try{
  const {loadConfig,validateServeConfig}=await import('../../dist/config/index.js');
  const hostConfig=loadConfig();validateServeConfig(hostConfig);
  if(hostConfig.control?.tunnel==='cloudflare'){
-  tunnel=new ControlTunnel({...hostConfig.server,binary:process.env.GATEWAY_CLOUDFLARED_BIN?.trim()||'cloudflared',onUrl:url=>gateway.setControlUrl(url)});
+  tunnel=new ControlTunnel({...hostConfig.server,resolveBinary:signal=>ensureCloudflared(root,{binary:process.env.GATEWAY_CLOUDFLARED_BIN?.trim()||undefined,signal}),onUrl:(url,reason)=>gateway.setControlUrl(url,reason)});
   try{await tunnel.start();}catch{await tunnel.stop();tunnel=undefined;console.error('[host] control tunnel could not start; Gateway will continue without a mobile URL.');}
  }
  active=await currentRelease(root);

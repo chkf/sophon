@@ -216,7 +216,10 @@ test("temporary URL changes revoke sessions and codes and enforce the new Host a
   });
   assert.equal(await send("https://next-example.trycloudflare.com"), 200);
   assert.equal(await send("https://first-example.trycloudflare.com"), 403);
-  control.setTunnelUrl(null);
+  control.setTunnelUrl(null, "download_failed");
   assert.match(control.loginMessage(), /尚未就绪/);
+  assert.match(control.loginMessage(), /组件下载失败/);
+  control.setTunnelUrl(null, "synthetic-internal-detail");
+  assert.doesNotMatch(control.loginMessage(), /synthetic-internal-detail/);
   assert.equal((await post("session")).status, 503);
 }, undefined, true));

@@ -1,3 +1,4 @@
+import {prepareControlDependency} from './host/cloudflared-install.mjs';
 import {fileURLToPath} from 'node:url';
 import {resolve,join} from 'node:path';
 import {writeFile} from 'node:fs/promises';
@@ -24,6 +25,7 @@ else{
    const prior=action==='rollback'?await readJson(join(dir,'previous.json'),undefined):undefined;
    if(action==='rollback'&&prior===undefined)throw Error('No previous release available.');
    const candidate=action==='rollback'?{...await releaseFromPointer(root,prior),unchanged:false}:await prepareRelease(root,source);
+   await prepareControlDependency(root);
    if(candidate.unchanged)console.log('Already running this upstream commit.');
    else{
     await runCommand(process.execPath,[fileURLToPath(new URL('./host/check-release.mjs',import.meta.url)),candidate.path],root,process.env);

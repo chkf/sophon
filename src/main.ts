@@ -266,9 +266,9 @@ async function main(): Promise<void> {
     process.once("SIGTERM", onSignal);
     const onHostMessage = (message: unknown) => {
       if(process.env.SOPHON_MANAGED_HOST !== "1") return;
-      const input = message as {type?:string; url?:unknown};
+      const input = message as {type?:string; url?:unknown; reason?:unknown};
       if(input?.type === "sophon:shutdown") onSignal();
-      if(input?.type === "sophon:control-url") service?.setControlTunnelUrl(input.url);
+      if(input?.type === "sophon:control-url") service?.setControlTunnelUrl(input.url,input.reason);
     };
     process.on("message", onHostMessage);
     if(process.env.SOPHON_MANAGED_HOST === "1") process.once("disconnect", onSignal);

@@ -71,3 +71,15 @@ test('managed Gateway restarts retain the tunnel URL and later rotations reach t
   const next='https://next-example.trycloudflare.com/control/';gateway.setControlUrl(next);await wait(m=>m.url===next);
  }finally{await gateway.stop();await rm(root,{recursive:true,force:true});}
 });
+
+test('component acquisition is asynchronous and shutdown prevents a late tunnel launch',async()=>{
+ let release;const waiting=new Promise(resolve=>{release=resolve;});
+ const events=[],tunnel=new ControlTunnel({host:'127.0.0.1',port:8790,resolveBinary:async signal=>{assert.equal(signal.aborted,false);await waiting;return 'synthetic-binary';},onUrl:(url,reason)=>events.push({url,reason}),spawnImpl:()=>assert.fail('shutdown must cancel launch')});
+ await tunnel.start();assert.equal(events[0].reason,'preparing');
+ const stopped=tunnel.stop();release();await stopped;assert.equal(tunnel.url,null);
+});
+
+test('component failures expose a fixed diagnostic and do not stop the caller',async()=>{
+ const events=[],tunnel=new ControlTunnel({host:'127.0.0.1',port:8790,retryMs:60_000,resolveBinary:async()=>{throw Object.assign(Error('synthetic internal detail'),{code:'download_failed'});},onUrl:(url,reason)=>events.push({url,reason}),spawnImpl:()=>assert.fail('unverified component must not start')});
+ try{await tunnel.start();await tunnel.launching;assert.equal(events.at(-1).reason,'download_failed');assert.equal(tunnel.url,null);}finally{await tunnel.stop();}
+});

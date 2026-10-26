@@ -8,9 +8,9 @@ export class GatewayProcess {
  constructor(root,{onRequest=()=>{},onUnexpectedExit=()=>{},startupMs=120_000,stopMs=120_000}={}){
   Object.assign(this,{root,onRequest,onUnexpectedExit,startupMs,stopMs});
  }
- setControlUrl(url){
-  this.controlUrl=url;
-  if(this.child?.connected)this.child.send({type:'sophon:control-url',url},()=>{});
+ setControlUrl(url,reason){
+  this.controlUrl=url;this.controlReason=reason;
+  if(this.child?.connected)this.child.send({type:'sophon:control-url',url,reason},()=>{});
  }
  async start(release){
   if(this.child)throw Error('A Gateway process is already running.');
@@ -21,7 +21,7 @@ export class GatewayProcess {
   child.on('exit',code=>{if(this.child===child)this.child=undefined;if(!this.expectedExit)this.onUnexpectedExit(code);});
   await new Promise((resolve,reject)=>{
    const cleanup=()=>{clearTimeout(timer);child.off('message',ready);child.off('exit',exit);child.off('error',error);};
-   const ready=message=>{if(message?.type==='sophon:ready'){this.setControlUrl(this.controlUrl);cleanup();resolve();}};
+   const ready=message=>{if(message?.type==='sophon:ready'){this.setControlUrl(this.controlUrl,this.controlReason);cleanup();resolve();}};
    const exit=()=>{cleanup();reject(Error('Gateway exited before readiness.'));};
    const error=()=>{cleanup();reject(Error('Gateway process could not start.'));};
    const timer=setTimeout(()=>{cleanup();reject(Error('Gateway readiness timed out.'));},this.startupMs);

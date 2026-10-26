@@ -4,13 +4,13 @@
 
 ## 手机访问：Cloudflare 临时网址
 
-无需 Cloudflare 账号、域名、公网 IP 或手机端客户端。部署主机安装 [cloudflared](https://developers.cloudflare.com/tunnel/downloads/) 并确认下面的命令可用：
+无需 Cloudflare 账号、域名、公网 IP 或手机端客户端。启用后，管理进程自动检查 `cloudflared`：优先使用 `GATEWAY_CLOUDFLARED_BIN` 指定的路径，其次使用 PATH 中已有的程序，均不存在时从 [Cloudflare 官方发布](https://github.com/cloudflare/cloudflared/releases)下载适配当前系统的文件。
 
-```sh
-cloudflared --version
-```
+自动下载使用仓库内固定版本和 SHA-256 清单，验证完整性并检查可执行性后才使用；失败或未完成文件不会成为有效组件。组件保存在原部署目录的 `.sophon-updates/bin/`，不修改系统 PATH、不需要管理员权限，也不会覆盖用户手动安装的版本。重复启动复用已校验的缓存。支持 Windows x64/32 位、Linux x64/32 位/ARM/ARM64、macOS Intel/Apple Silicon；其他平台需自行提供可运行的程序。
 
-Windows 可从官方下载页下载安装程序或可执行文件；若没有加入 PATH，在 `.env` 中填写可执行文件的完整路径，例如 `GATEWAY_CLOUDFLARED_BIN=C:/Tools/cloudflared.exe`。安装后重新打开终端。不要把额外启动参数写进这个路径。
+启动检查在后台运行，聊天无需等待下载。启用临时模式时，运行中的 `/update` 和停机命令 `npm run update` 都会补查组件，即使代码已经是最新版本也会检查。下载失败不会阻止代码更新；管理进程会重试，`/status` 显示对应提示。首次下载需要主机访问 GitHub 官方发布文件，自动下载超时为 120 秒。
+
+需要使用自行安装的版本时，在 `.env` 填写完整路径，例如 `GATEWAY_CLOUDFLARED_BIN=C:/Tools/cloudflared.exe`。显式路径不可用时会报告配置错误，不擅自改用其他程序。不要把额外参数写入这个路径。组件缓存校验失败时，停机后删除 `.sophon-updates/bin/` 中对应的组件版本目录，再启动重新下载；不要删除 Gateway 发布目录或数据目录。
 
 在 `.env` 中设置：
 
@@ -34,9 +34,9 @@ Gateway 更新重启时，管理进程会保留同一个隧道。隧道退出后
 
 控制中心仍默认关闭，需显式设置上述开关。临时网址属于公网入口，所有数据仍需管理员一次性登录码；不要分享带登录凭据的链接。代理只允许 `/control` 和 `/control/` 下的 GET/POST 请求，拒绝内部健康和进程管理接口。保留精确 Host、Origin、CSRF 校验及 HTTPS Secure Cookie。隧道启用时仍要求 Gateway 绑定回环地址。
 
-`cloudflared` 未安装、启动超时或网络失败时，聊天继续运行；`/status` 提示入口未就绪，不返回本机地址或失效网址。隧道管理仅支持 `npm start`，直接使用 `npm run serve` 不会启动隧道。管理进程使用独立空配置启动 cloudflared，不修改已有 Cloudflare 配置，也不传入应用密钥或隧道 Token。
+组件准备失败、启动超时或网络失败时，聊天继续运行；`/status` 提示入口未就绪，不返回本机地址或失效网址。隧道管理仅支持 `npm start`，直接使用 `npm run serve` 不会启动隧道。管理进程使用独立空配置启动 cloudflared，不修改已有 Cloudflare 配置，也不传入应用密钥或隧道 Token。
 
-[Quick Tunnel 官方说明](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)：无可用性保证，每个隧道最多 200 个进行中请求，不支持 SSE。当前控制中心使用 HTTP 请求与轮询。链接刚生成时可能需要等候 DNS 与隧道连接建立；仍打不开时先确认主机在线、cloudflared 可执行和出站网络畅通，再重新请求 `/status`。本项目不会自动安装或更新 cloudflared。
+[Quick Tunnel 官方说明](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)：无可用性保证，每个隧道最多 200 个进行中请求，不支持 SSE。当前控制中心使用 HTTP 请求与轮询。链接刚生成时可能需要等候 DNS 与隧道连接建立；仍打不开时先确认主机在线、cloudflared 可执行和出站网络畅通，再重新请求 `/status`。自动下载仅在显式启用临时访问后进行；不会自动开启公网访问，也不会调用系统安装器。
 
 ## 登录与兼容配置
 

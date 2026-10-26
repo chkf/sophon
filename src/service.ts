@@ -381,7 +381,7 @@ export class GatewayService {
     }
   }
 
-  setControlTunnelUrl(value: unknown): void { this.control?.setTunnelUrl(value); }
+  setControlTunnelUrl(value: unknown, reason?: unknown): void { this.control?.setTunnelUrl(value,reason); }
 
   private async startHttpServer(): Promise<void> {
     this.server = createServer(async (req, res) => {

@@ -63,6 +63,7 @@ export class ControlCenter {
   readonly auth: ControlAuth;
   private url: URL;
   private tunnelReady = true;
+  private tunnelReason = "";
   private readonly rate = new ControlRateLimiter();
   private readonly assets = new Map<string, Buffer>();
   private readonly pending = new Set<Promise<boolean>>();
@@ -85,8 +86,17 @@ export class ControlCenter {
     return { url: url.href, text: "Sophon 控制中心\n打开以下链接即可自动登录（5 分钟内有效）。" + accessHint + "\n\n备用登录码：\n" + code };
   }
 
-  setTunnelUrl(value: unknown): void {
+  setTunnelUrl(value: unknown, reason?: unknown): void {
     if(!this.options.temporary) return;
+    const reasons: Record<string,string> = {
+      preparing:"正在自动检查或下载连接组件。", download_failed:"组件下载失败，请检查主机到 GitHub 的网络，稍后会自动重试。",
+      checksum_failed:"组件校验失败，已停止使用；请在停机后清理本地组件缓存再重试。",
+      unsupported_platform:"此系统暂不支持自动下载，请通过 GATEWAY_CLOUDFLARED_BIN 指定兼容的可执行文件。",
+      configured_binary_unavailable:"指定的组件路径不可用，请检查 GATEWAY_CLOUDFLARED_BIN。",
+      binary_unavailable:"组件无法执行，请检查系统兼容性与执行权限。",
+      connection_failed:"隧道连接失败，正在重试，请检查出站网络。",
+    };
+    this.tunnelReason = typeof reason === "string" ? reasons[reason] ?? "连接组件暂不可用，正在重试。" : "";
     const valid = controlTunnelUrl(value);
     if(valid === this.url.href && this.tunnelReady) return;
     this.auth.revokeAll();
@@ -95,7 +105,7 @@ export class ControlCenter {
   }
 
   loginMessage(): string {
-    if(!this.tunnelReady) return "控制中心临时网址尚未就绪。请使用 npm start 启动，并确认 cloudflared 已安装且网络可用；稍后重新发送 /status。";
+    if(!this.tunnelReady) return "控制中心临时网址尚未就绪。" + this.tunnelReason + "请使用 npm start 启动，稍后重新发送 /status。";
     const entry = this.loginEntry(); return entry.text + "\n" + entry.url; }
 
   start(): void { this.options.host.start(); }
