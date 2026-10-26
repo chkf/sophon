@@ -1,6 +1,6 @@
 # Recent 后台整理
 
-设置 `GATEWAY_RECENT_REVIEW_ENABLED=true` 后重启。此功能默认关闭，独立于主动消息、静默时间、发送次数和主动渠道开关；不会发送聊天消息。通用 API 还需 `GATEWAY_API_HEARTBEAT_ENABLED=true`，OpenRouter 还需 `OPENROUTER_HEARTBEAT_ENABLED=true`，沿用现有后台调用授权。使用当前 Provider，不自动切换。
+服务启动后自动运行，旧配置的 `GATEWAY_RECENT_REVIEW_ENABLED=false` 不再生效。此功能独立于主动消息、静默时间、发送次数和主动渠道开关；不会发送聊天消息。Recent 整理独立使用当前 Provider 的额度，不受主动消息的后台调用开关限制；主动消息本身仍需单独启用。使用当前 Provider，不自动切换。
 
 后台任务每分钟检查一次，存在尚未审阅的消息时才请求模型。一次成功审阅后至少等待 5 分钟；失败或 Provider 禁止后台调用时至少等待 15 分钟。等待时间持久化，重启不会绕过。API 调用会使用对应服务额度。
 
@@ -12,4 +12,4 @@
 
 遇到结果不明的 Provider 错误，保留原操作标识，避免绕过付费调用去重。同一批资料最多尝试三份已收到但无效的模型建议，然后等待资料变化或人工检查。故障日志只写固定原因提示，不打印聊天内容、模型正文或文件路径。`gateway_state` 中的 `runtime/recent-review` 保存最近状态和下次可尝试时间；可在停止服务后使用 SQLite 工具查看。
 
-使用 `npm run init` 创建的当前六表数据库可直接启用，无需新增表或迁移聊天。旧数据库仍可正常聊天，后台整理返回 `unsupported_schema`，需先由操作者完成已有数据库迁移流程。关闭本开关后重启即可停止自动整理，已整理的 Recent 和审阅进度保留。
+使用 `npm run init` 创建的当前六表数据库可直接启用，无需新增表或迁移聊天。旧数据库仍可正常聊天，后台整理返回 `unsupported_schema`，需先由操作者完成已有数据库迁移流程。记忆图分类能力可用且已接管 Recent 时，由记忆图统一维护，普通整理不重复运行；当前 Provider 不支持图分类时，普通整理仍运行。

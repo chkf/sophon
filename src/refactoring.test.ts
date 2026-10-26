@@ -35,7 +35,7 @@ test("proactive photo acknowledgement cannot settle an ordinary Provider reply",
   const sdk = { async reply() { return { text: "尚未交付的文字" }; }, async commitSession() { commits++; } };
   const runtime = new ProviderRuntime(root, { siwc: sdk, openrouter: {} } as never);
   await runtime.reply({ sessionId: "telegram:42", text: "你好", purpose: "chat", deferAssistantCommit: true, deliveryId: "ordinary" } as never);
-  const config = loadConfig(); config.dataDir = root; config.ilink = undefined; config.memoryGraphEnabled = false;
+  const config = loadConfig(); config.dataDir = root; config.ilink = undefined; config.memoryGraphEnabled = false; config.control = undefined;
   config.telegram = { token: "fixture", ownerId: "42" }; config.heartbeat.enabled = false;
   const service = new GatewayService(config, runtime);
   const adapter = (service as any).telegram;
@@ -145,7 +145,7 @@ test("canonical reply outcomes reject retry and delivery mixed together", () => 
 });
 
 test("shutdown closes runtime and releases lock even if channel draining fails", () => temp(async root => {
-  const config = loadConfig(); config.dataDir = root; config.wechat = undefined; config.memoryGraphEnabled = false;
+  const config = loadConfig(); config.dataDir = root; config.wechat = undefined; config.memoryGraphEnabled = false; config.control = undefined;
   config.telegram = { token: "fixture", ownerId: "42" }; config.heartbeat.enabled = false;
   const events: string[] = [];
   const service = new GatewayService(config, { async close() { events.push("runtime"); } } as never);

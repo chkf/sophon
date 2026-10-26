@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { controlPublicUrl, loadConfig, validateServeConfig } from "./index.js";
+import { writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { createTestSandbox } from "../../scripts/testing/environment.mjs";
 
@@ -10,14 +11,34 @@ async function isolatedConfig(run: () => void) {
   finally { process.chdir(savedCwd); process.env = savedEnv; await rm(sandbox.root, { recursive: true, force: true }); }
 }
 
-test('memory graph defaults on and respects an explicit off setting',()=>isolatedConfig(()=>{
+test('bundled features stay enabled for fresh and legacy configurations',()=>isolatedConfig(()=>{
   assert.equal(loadConfig().memoryGraphEnabled,true);
-  process.env.GATEWAY_MEMORY_GRAPH_ENABLED='false';assert.equal(loadConfig().memoryGraphEnabled,false);
+  process.env.GATEWAY_MEMORY_GRAPH_ENABLED='false';
+  process.env.GATEWAY_FILES_ENABLED='false';
+  process.env.GATEWAY_RECENT_REVIEW_ENABLED='false';
+  process.env.GATEWAY_CONTROL_TUNNEL='off';
+  const legacy=loadConfig();
+  assert.equal(legacy.memoryGraphEnabled,true);
+  assert.equal(legacy.files?.enabled,true);
+  assert.equal(legacy.recentReview?.enabled,true);
+  assert.equal(legacy.control?.tunnel,'cloudflare');
+  assert.equal(legacy.heartbeat.enabled,false);
   process.env.GATEWAY_MEMORY_GRAPH_ENABLED='true';assert.equal(loadConfig().memoryGraphEnabled,true);
 }));
 
-test("control center is opt-in and accepts HTTPS or explicit local HTTP only", () => isolatedConfig(() => {
-  assert.equal(loadConfig().control, undefined);
+test("legacy dotenv does not disable bundled features on either config load", () => isolatedConfig(() => {
+  writeFileSync(".env", "GATEWAY_FILES_ENABLED=false\nGATEWAY_RECENT_REVIEW_ENABLED=false\nGATEWAY_MEMORY_GRAPH_ENABLED=false\nGATEWAY_CONTROL_TUNNEL=off\n");
+  for (let i=0;i<2;i++) {
+    const config=loadConfig();
+    assert.equal(config.files?.enabled,true);
+    assert.equal(config.recentReview?.enabled,true);
+    assert.equal(config.memoryGraphEnabled,true);
+    assert.equal(config.control?.tunnel,"cloudflare");
+  }
+}));
+
+test("control center is automatic and preserves URL and administrator validation", () => isolatedConfig(() => {
+  assert.equal(loadConfig().control?.tunnel, "cloudflare");
   for (const value of ["https://gateway.example/control/", "http://127.0.0.1:8790/control/", "http://localhost:8790/control/", "http://[::1]:8790/control/"]) {
     assert.equal(controlPublicUrl(value), value);
   }
@@ -27,7 +48,7 @@ test("control center is opt-in and accepts HTTPS or explicit local HTTP only", (
   process.env.TELEGRAM_BOT_TOKEN = "fixture-token";
   process.env.TELEGRAM_OWNER_ID = "100";
   process.env.GATEWAY_CONTROL_PUBLIC_URL = "https://gateway.example/control/";
-  assert.deepEqual(loadConfig().control, { publicUrl: "https://gateway.example/control/" });
+  assert.deepEqual(loadConfig().control, {tunnel: "cloudflare", publicUrl: "https://pending.trycloudflare.com/control/"});
   assert.doesNotThrow(() => validateServeConfig(loadConfig()));
   for (const host of ["0.0.0.0", "::", "192.0.2.1"]) {
     process.env.GATEWAY_HOST = host;
@@ -145,7 +166,7 @@ test("proactive defaults adopt quiet 01:00–07:00, 60-minute cooldown and 8 att
   }
 }));
 
-test("temporary control access needs no fixed URL and rejects unknown modes", () => isolatedConfig(() => {
+test("temporary control access ignores obsolete settings and rejects untrusted tunnel URLs", () => isolatedConfig(() => {
   process.env.GATEWAY_CONTROL_TUNNEL = "cloudflare";
   process.env.GATEWAY_CONTROL_PUBLIC_URL = "invalid-obsolete-address";
   process.env.TELEGRAM_BOT_TOKEN = "synthetic-token";
@@ -159,5 +180,5 @@ test("temporary control access needs no fixed URL and rejects unknown modes", ()
   process.env.SOPHON_CONTROL_TUNNEL_URL = "https://neutral-example.trycloudflare.com.external.example/control/";
   assert.equal(loadConfig().control?.publicUrl, "https://pending.trycloudflare.com/control/");
   process.env.GATEWAY_CONTROL_TUNNEL = "unknown";
-  assert.throws(() => loadConfig(), /GATEWAY_CONTROL_TUNNEL/);
+  assert.equal(loadConfig().control?.tunnel, "cloudflare");
 }));

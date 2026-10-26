@@ -133,7 +133,7 @@ export class GatewayService {
         return this.telegram.sendDocumentToOwner(file);
       }) : undefined;
     if (config.recentReview?.enabled && config.telegram) this.recentReview = new RecentReview(config.dataDir,
-      config.telegram.ownerId, runtime, this.sessions, this.localKnowledge, this.gatewayContext, this.conversationQueue, () => !!memory && new MemoryRecent(memory).enabled());
+      config.telegram.ownerId, runtime, this.sessions, this.localKnowledge, this.gatewayContext, this.conversationQueue, () => !!memory && !!runtime.classifyMemory && !['MODEL_UNAVAILABLE','CLASSIFIER_UNAVAILABLE'].includes(this.memoryWorker?.status() ?? '') && new MemoryRecent(memory).enabled());
     this.gateway = new Gateway(runtime, this.sessions, this.gatewayContext,
       config.maxToolRounds, config.heartbeat.timezone,
       undefined, this.expressions, this.localKnowledge, async message =>

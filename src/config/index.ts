@@ -114,8 +114,7 @@ export function controlTunnelUrl(value: unknown): string | undefined {
 export function loadConfig(): GatewayConfig {
   loadLocalEnv();
 
-  const tunnel = optional("GATEWAY_CONTROL_TUNNEL") ?? "off";
-  if(!["off", "cloudflare"].includes(tunnel)) throw new Error("GATEWAY_CONTROL_TUNNEL must be off or cloudflare.");
+  // These bundled features are always enabled, including for legacy installations.
   const temporaryUrl = process.env.SOPHON_MANAGED_HOST === "1" ? controlTunnelUrl(optional("SOPHON_CONTROL_TUNNEL_URL")) : undefined;
   const telegramToken = optional("TELEGRAM_BOT_TOKEN");
   const telegramOwner = optional("TELEGRAM_OWNER_ID");
@@ -151,14 +150,14 @@ export function loadConfig(): GatewayConfig {
       webSearch: bool("OPENROUTER_WEB_SEARCH", false),
       heartbeat: bool("OPENROUTER_HEARTBEAT_ENABLED", false),
     },
-    memoryGraphEnabled: bool("GATEWAY_MEMORY_GRAPH_ENABLED", true),
+    memoryGraphEnabled: true,
     dataDir: resolve(process.env.GATEWAY_DATA_DIR ?? "./data"),
     files: {
-      enabled: bool("GATEWAY_FILES_ENABLED", false),
+      enabled: true,
       generatedDir: resolve(optional("GATEWAY_GENERATED_FILES_DIR") ?? resolve(process.env.GATEWAY_DATA_DIR ?? "./data", "files/generated")),
     },
-    recentReview: { enabled: bool("GATEWAY_RECENT_REVIEW_ENABLED", false) },
-    ...(tunnel === "cloudflare" ? {control: {tunnel: "cloudflare" as const, publicUrl: temporaryUrl ?? "https://pending.trycloudflare.com/control/"}} : optional("GATEWAY_CONTROL_PUBLIC_URL") ? { control: { publicUrl: controlPublicUrl(optional("GATEWAY_CONTROL_PUBLIC_URL")!) } } : {}),
+    recentReview: { enabled: true },
+    control: {tunnel: "cloudflare", publicUrl: temporaryUrl ?? "https://pending.trycloudflare.com/control/"},
     ...(optional("GATEWAY_LOG_DIR") ? { logDir: resolve(optional("GATEWAY_LOG_DIR")!) } : {}),
     siwcDevkitDir: resolve(process.env.GATEWAY_SIWC_DEVKIT_DIR ?? "./vendor/siwc"),
     ...(model ? { model } : {}),

@@ -4,7 +4,7 @@
 
 可自行部署的消息网关框架：连接 Telegram 与可选微信 iLink，管理模型接入、会话历史和本地上下文。默认提供中性的助手配置，身份、风格和服务由使用者自行设置。
 
-Self-hosted messaging gateway with local SQLite context, optional memory graph, durable delivery and provider routing. Framework source is MIT licensed; optional components keep their own licenses.
+Self-hosted messaging gateway with local SQLite context, memory graph, durable delivery and provider routing. Framework source is MIT licensed; optional components keep their own licenses.
 
 ## 能力与范围
 
@@ -15,8 +15,8 @@ Self-hosted messaging gateway with local SQLite context, optional memory graph, 
 - 通用 OpenAI 兼容 API（自定义地址、密钥、模型）；可选 OpenRouter 专用模式与 ChatGPT 登录适配器。
 - 可选语音、图片生成和主动消息。
 - 内置 Core、Recent 和聊天历史工具。
-- 可选本地文件浏览、保存与发送、确认后修改或删除，以及独立的后台 Recent 整理。
-- 可选 [Sophon 控制中心](docs/control-center.md)：聊天历史与 Core/Recent 管理、上下文观察、主动任务调用轨迹和主机走势；与已有 slash 面板分工。设置 `GATEWAY_CONTROL_TUNNEL=cloudflare` 后，`npm start` 自动生成临时手机访问网址，Telegram `/status` 获取入口（缺少 cloudflared 时自动下载并校验）。
+- 本地文件浏览、保存与发送、确认后修改或删除，以及独立的后台 Recent 整理。
+- [Sophon 控制中心](docs/control-center.md)：聊天历史与 Core/Recent 管理、上下文观察、主动任务调用轨迹和主机走势；与已有 slash 面板分工。`npm start` 自动生成临时手机访问网址，Telegram `/status` 获取入口（缺少 cloudflared 时自动下载并校验）。
 
 当前是单用户、单实例框架。API、数据库格式和配置仍可能演进。主动消息默认关闭；没有内置个人资料、私人业务工作流或固定角色设定。
 
@@ -87,7 +87,7 @@ Core、描写和记忆如何配置，见 [存储与表达设置指南](docs/pers
 
 提供商不会因出错自动切换；选择和历史各自持久保存。模型与服务可用性由对应账号和上游服务决定。
 
-文件工具与后台记忆整理默认关闭，启用方法及边界见 [文件操作](docs/files.md) 和 [Recent 后台整理](docs/recent-review.md)。两项功能均使用现有服务和 SQLite；后台整理无需开启主动消息。
+文件工具、Recent 后台整理、记忆图和手机控制中心统一自动启用，旧配置的关闭值不再生效。功能边界见 [文件操作](docs/files.md) 和 [Recent 后台整理](docs/recent-review.md)。两项功能均使用现有服务和 SQLite；后台整理无需开启主动消息。
 
 服务启动后将带时间戳并脱敏的日志写入 `data/logs/gateway.log`，供 Telegram `/logs` 读取；单文件最多约 5 MiB，并保留一份轮换文件。`GATEWAY_LOG_DIR` 可覆盖目录，`GATEWAY_LOG_ENABLED=false` 可关闭文件日志。
 
@@ -109,4 +109,4 @@ npm run build
 
 框架源码按 [MIT](LICENSE) 发布。依赖和可选组件的许可范围见 [第三方说明](THIRD_PARTY_NOTICES.md)。`package.json` 的 `private: true` 仅防止意外发布到 npm，不限制源码使用。
 
-[记忆图与三日上下文窗口](docs/memory-graph.md)默认启用，启动时自动备份并准备扩展与历史回填。分类需要 SIWC 并消耗所选模型额度；显式设置 `GATEWAY_MEMORY_GRAPH_ENABLED=false` 可关闭，旧配置的关闭选择会保留。
+[记忆图与三日上下文窗口](docs/memory-graph.md)默认启用，启动时自动备份并准备扩展与历史回填。分类需要 SIWC 并消耗所选模型额度；旧配置的 `GATEWAY_MEMORY_GRAPH_ENABLED=false` 不再关闭功能。

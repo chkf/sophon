@@ -64,7 +64,7 @@ npm run core -- import ./private/assistant-core.md
 
 ## 记忆与历史
 
-Recent 初始为空，可以用工具保存和核对有持续价值的事项。修改或删除 Recent 不删除聊天原文。可选的[记忆图](memory-graph.md)建立来源引用；回填完成前保留原有上下文策略。
+Recent 初始为空，可以用工具保存和核对有持续价值的事项。修改或删除 Recent 不删除聊天原文。自动启用的[记忆图](memory-graph.md)建立来源引用；回填完成前保留原有上下文策略。
 
 ## 保存与备份
 

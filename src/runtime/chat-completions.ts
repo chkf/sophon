@@ -222,9 +222,9 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
     const imageSettings = request.ephemeral ? undefined : await this.getImageSettings();
     const imageHeartbeat = (request.purpose === "heartbeat_plan" || request.purpose === "heartbeat_decision") &&
       request.imageOutputAllowed === true && await this.canGenerateImage(true);
-    // Internal schedulers cannot authorize paid calls. Only the persisted owner
-    // image opt-in may permit Heartbeat while the background text switch is off.
-    if (isBackground(request) && !this.config.heartbeat && !imageHeartbeat) {
+    // Recent maintenance is bundled independently of proactive messages.
+    // Other background calls retain the text/image spending gates.
+    if (isBackground(request) && request.purpose !== "recent_review" && !this.config.heartbeat && !imageHeartbeat) {
       return { text: "SILENT", skipped: "background_disabled" };
     }
     const autonomousImage = request.allowImageGeneration !== true && request.imageOutputAllowed === true &&
