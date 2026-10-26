@@ -9,14 +9,15 @@
   const content = $('#page-content');
   let hostResize;
   const state = { authenticated: false, csrf: '', page: 'tasks', epoch: 0, dirty: false, saving: false, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    call: { selected: null, open: new Set() },
     task: { runs: [], nextBefore: null, selected: null, open: new Set(), filter: 'all', heartbeat: null },
     history: { conversations: [], nextConversations: null, key: '', query: '', from: '', to: '', offset: 0, around: null },
     graph: { topic: null, topicOffset: 0, offset: 0, query: "", status: "active", selected: null },
     memory: { tab: 'core', selected: null, entries: [], nextOffset: null, query: '', archived: false }, pollBusy: false };
-  const pages = { graph: ["记忆图", "按主题浏览记忆与原始记录。"], tasks: ['主动任务', '从触发到交付，查看每一步真实执行。'], history: ['聊天历史', '最新消息在前，翻阅对话、搜索原文与关联附件。'], memory: ['Core / Recent', '管理稳定指令与持续话题。'], context: ['上下文', '查看本地上下文的组成与可恢复检查点。'], host: ['主机监控', '资源走势与当前进程，来自真实采样。'] };
+  const pages = { graph: ["记忆图", "按主题浏览记忆与原始记录。"], tasks: ['主动任务', '按配置时区显示当天任务，查看每一步真实执行。'], history: ['聊天历史', '最新消息在前，翻阅对话、搜索原文与关联附件。'], memory: ['Core / Recent', '管理稳定指令与持续话题。'], context: ['上下文', '查看本地上下文的组成与可恢复检查点。'], host: ['主机监控', '资源走势与当前进程，来自真实采样。'] };
   const statusNames = { running: '运行中', completed: '已完成', silent: '保持静默', skipped: '已跳过', failed: '失败', delivered: '确认送达', delivery_unknown: '交付不确定', interrupted: '已中断', acknowledged: '已确认', started: '进行中', pending: '待处理', unknown: '未知' };
-  const taskNames = { heartbeat_plan: 'Heartbeat · 计划生成', heartbeat_decision: 'Heartbeat · 主动判断', heartbeat_delivery: 'Heartbeat · 消息交付', heartbeat_check: 'Heartbeat · 条件检查' };
-  const triggerNames = { scheduler_gate: '调度条件检查', pending_delivery: '待交付消息', context_changed: '上下文变化', daily_plan: '每日计划', planned_wake: '计划唤醒', scheduled_check: '定时检查' };
+  const taskNames = { chat: "正式会话 · 调用流程", heartbeat_plan: 'Heartbeat · 计划生成', heartbeat_decision: 'Heartbeat · 主动判断', heartbeat_delivery: 'Heartbeat · 消息交付', heartbeat_check: 'Heartbeat · 条件检查' };
+  const triggerNames = { inbound_message: "收到聊天消息", scheduler_gate: '调度条件检查', pending_delivery: '待交付消息', context_changed: '上下文变化', daily_plan: '每日计划', planned_wake: '计划唤醒', scheduled_check: '定时检查' };
   const reasonNames = {
     'quiet-hours': '处于免打扰时段', quiet_hours: '处于免打扰时段', cooldown: '处于冷却时间', 'daily-cap': '达到当天尝试上限', daily_cap: '达到当天尝试上限',
     'daily-cap-disabled': '每日尝试上限为零', background_disabled: '当前 Provider 未启用后台调用', SILENT: '模型返回 SILENT', model_returned_silent: '模型返回 SILENT，保持静默',
@@ -120,10 +121,23 @@
       content.replaceChildren(el('div', { class: 'panel' }, empty('数据暂时无法读取', error.message), el('div', { class: 'list-more' }, button('重新读取', () => navigate(state.page, true))))); showError(error);
     }
   }
+  function retainTaskDay(result) {
+    if(!result.retentionDay)return;
+    const formatter=new Intl.DateTimeFormat('en-CA',{timeZone:result.heartbeat?.timezone||state.timezone,year:'numeric',month:'2-digit',day:'2-digit'});
+    state.task.runs=state.task.runs.filter(run=>{
+      const parts=Object.fromEntries(formatter.formatToParts(new Date(run.startedAt)).map(p=>[p.type,p.value]));
+      return `${parts.year}-${parts.month}-${parts.day}`===result.retentionDay;
+    });
+    if(!state.task.runs.some(run=>run.id===state.task.selected)) {
+      state.task.selected=null;state.task.open.clear();
+      $('#task-detail')?.replaceChildren(empty('选择一次执行','仅显示当天的任务记录。'));
+    }
+  }
   async function loadTasks(append, epoch = state.epoch) {
     const result = await api('tasks', { limit: 30, ...(append && state.task.nextBefore ? { before: state.task.nextBefore } : {}) });
     if (epoch !== state.epoch) return;
     state.task.runs = append ? [...state.task.runs, ...result.runs.filter(run => !state.task.runs.some(existing => existing.id === run.id))] : result.runs;
+    retainTaskDay(result);
     state.task.nextBefore = result.nextBefore; state.task.heartbeat = result.heartbeat;
     if (result.heartbeat?.timezone) state.timezone = result.heartbeat.timezone;
     if (!state.task.selected && result.runs.length) state.task.selected = result.runs[0].id;
@@ -156,7 +170,7 @@
     const list = $('#task-runs'); if (!list) return;
     const matches = run => state.task.filter === 'all' || (state.task.filter === 'silent' ? ['silent', 'skipped'].includes(run.status) : state.task.filter === 'failed' ? ['failed', 'delivery_unknown', 'interrupted'].includes(run.status) : run.status === state.task.filter);
     const runs = state.task.runs.filter(matches);
-    if (!runs.length) list.replaceChildren(empty(state.task.runs.length ? '没有匹配的执行' : '还没有执行记录', state.task.runs.length ? '可以切换筛选或加载更早记录。' : '启用记录后的主动任务会出现在这里，已有历史不会被猜测补全。'));
+    if (!runs.length) list.replaceChildren(empty(state.task.runs.length ? '没有匹配的执行' : '今天暂无执行记录', state.task.runs.length ? '可以切换筛选或加载更早记录。' : '启用记录后的主动任务会出现在这里，已有历史不会被猜测补全。'));
     else {
       let lastDay;
       list.replaceChildren(...runs.flatMap(run => {
@@ -176,7 +190,12 @@
     const run = await api('task', { id });
     if (epoch !== state.epoch || id !== state.task.selected || !$('#task-detail')) return;
     if (!run) { replace(target, empty('记录已不可用', '这条执行记录可能已超过保留范围。')); return; }
-    const steps = Array.isArray(run.steps) ? run.steps : [];
+    renderTraceRun(target, run, state.task.open);
+  }
+  function renderTraceRun(target, run, openedSteps) {
+    const allSteps = Array.isArray(run.steps) ? run.steps : [];
+    const sources = allSteps.filter(step => step.kind === 'context');
+    const steps = allSteps.filter(step => step.kind !== 'context');
     const models = run.modelStepCount ?? steps.filter(step => step.kind === 'model').length, tools = steps.filter(step => step.kind === 'tool').length;
     const usage = run.usage;
     const partialUsage = typeof run.usageReportedModelSteps === 'number' && run.usageReportedModelSteps < models;
@@ -184,13 +203,14 @@
     const total = Math.max(typeof run.durationMs === 'number' ? run.durationMs : 0, ...steps.map(step => Math.max(0, new Date(step.finishedAt || step.startedAt).getTime() - new Date(run.startedAt).getTime())).filter(Number.isFinite), 1);
     const timeline = el('div', { class: 'trace-steps' });
     for (const step of steps) {
-      const opened = state.task.open.has(step.id);
+      const opened = openedSteps.has(step.id);
       const detail = el('details', { class: `trace-step ${step.kind}`, open: opened, 'data-step-id': step.id });
       const spanStart = Math.max(0, Math.min(100, (new Date(step.startedAt).getTime() - new Date(run.startedAt).getTime()) / total * 100));
       const spanWidth = Math.max(.3, Math.min(100 - spanStart, (step.durationMs || 0) / total * 100));
       const bar = el('span', { class: 'waterfall-bar' }); bar.style.left = `${Number.isFinite(spanStart) ? spanStart : 0}%`; bar.style.width = `${Number.isFinite(spanWidth) ? spanWidth : .3}%`;
       const metadata = [step.provider, step.model].filter(Boolean).join(' · ');
       const stepContent = el('div', { class: 'step-content' });
+      if (Array.isArray(step.context)) stepContent.append(injectionTable(step.context, sources));
       if (step.input !== undefined) stepContent.append(el('div', { class: 'detail-section' }, el('div', { class: 'detail-label' }, step.kind === 'tool' ? '输入 / 参数' : '输入'), el('pre', {}, stringify(step.input))));
       if (step.output !== undefined) stepContent.append(el('div', { class: 'detail-section' }, el('div', { class: 'detail-label' }, '输出 / 结果'), el('pre', {}, stringify(step.output))));
       if (step.error !== undefined) stepContent.append(el('div', { class: 'detail-section error' }, el('div', { class: 'detail-label' }, '错误'), el('pre', {}, stringify(step.error))));
@@ -199,18 +219,61 @@
       if (step.truncated) stepContent.append(el('p', { class: 'trace-note' }, '该步骤内容超出记录上限，已截断。'));
       if (step.parentId) { const parent = steps.find(item => item.id === step.parentId); if (parent) stepContent.prepend(el('p', { class: 'trace-note' }, `关联调用：${parent.name}`)); }
       detail.append(el('summary', {}, el('span', { class: 'trace-node', 'aria-hidden': 'true' }), el('span', { class: 'step-line' }, el('span', { class: 'step-name' }, step.name), el('span', { class: 'step-time' }, duration(step.durationMs)), el('span', { class: 'step-chevron', 'aria-hidden': 'true' }, '›')), el('span', { class: 'step-meta' }, metadata ? el('span', {}, metadata) : null, status(step.status)), el('div', { class: 'waterfall-track', 'aria-hidden': 'true' }, bar)), stepContent);
-      detail.addEventListener('toggle', () => { if (detail.open) state.task.open.add(step.id); else state.task.open.delete(step.id); });
+      detail.addEventListener('toggle', () => { if (detail.open) openedSteps.add(step.id); else openedSteps.delete(step.id); });
       timeline.append(detail);
     }
     const reason = reasonNames[run.reason] || run.reason;
     const descriptions = { delivered: '交付已收到明确确认。', silent: '本次模型选择保持静默，未创建发送任务。', skipped: '本次在条件检查或策略判断后结束。', failed: '本次执行失败，可展开步骤查看已记录的错误。', delivery_unknown: '发送已尝试，但没有可靠的送达确认。', interrupted: '执行未正常结束，保留已记录的步骤。', running: '任务尚在执行，后续步骤会随记录刷新。', completed: '本次任务已完成。' };
     replace(target, el('div', { class: 'run-heading' }, el('h2', {}, taskNames[run.kind] || run.kind), status(run.status)), el('p', { class: 'record-id' }, run.id), el('p', { class: 'run-trigger' }, `触发：${triggerNames[run.trigger] || run.trigger || '未记录'}${run.channel ? ` · ${run.channel === 'wechat' ? '微信' : run.channel === 'telegram' ? 'Telegram' : run.channel}` : ''}`),
       el('div', { class: 'facts' }, fact('开始时间', time(run.startedAt)), fact('总耗时', duration(run.durationMs)), fact('调用次数', `${models} / ${tools}`, '模型 / 工具'), fact('输入 token', number(usage?.inputTokens), partialInput ? '部分回报' : undefined)),
+      sources.length ? sourceSnapshots(sources, openedSteps) : null,
+      run.kind === 'chat' && !models && run.status !== 'running' ? el('p', { class: 'trace-note' }, '本轮没有记录到新的模型请求；可能复用了已有结果，或在请求前结束。') : null,
       el('div', { class: 'trace-head' }, el('h3', {}, '调用轨迹'), el('div', { class: 'trace-legend' }, ...[['model', '模型'], ['tool', '工具'], ['system', '系统']].map(([kind, label]) => el('span', {}, el('i', { class: kind, 'aria-hidden': 'true' }), label)))),
       steps.length ? el('div', { class: 'trace-scale' }, el('span', {}, '0'), el('span', {}, duration(total))) : null,
       steps.length ? timeline : empty('尚无步骤', '运行开始后，实际步骤会逐条记录。'),
       el('div', { class: `outcome ${run.status}` }, el('span', { class: 'outcome-mark', 'aria-hidden': 'true' }, run.status === 'delivered' ? '✓' : run.status === 'failed' || run.status === 'delivery_unknown' ? '!' : '·'), el('div', {}, el('strong', {}, statusNames[run.status] || run.status), el('p', {}, reason || descriptions[run.status] || '查看上方已记录的执行步骤。'), run.reason ? el('p', { class: 'trace-note' }, `原因代码：${run.reason}`) : null)),
       usage ? usageRow(usage, run.usageCompleteFields) : null, partialUsage ? el('p', { class: 'trace-note' }, `${run.usageReportedModelSteps} / ${models} 次模型尝试回报了用量，以上为已回报部分。`) : null, run.truncated || run.droppedSteps ? el('p', { class: 'trace-note' }, `记录达到存储上限，部分内容已截断${run.droppedSteps ? `，另有 ${number(run.droppedSteps)} 个步骤未保留` : ''}。`) : null, el('p', { class: 'trace-note' }, '用量仅展示 Provider 实际回报；空缺表示未知。输入 token 为各次调用累计，包含缓存输入。'));
+  }
+  const sourceNames = { core: 'Core', local_guidance: '本地指导 / 表达规则', memory_hints: '记忆图线索', recent: 'Recent 活跃目录', time: '时间与消息间隔', history: '聊天历史 / 恢复条目', history_index: '较早历史摘录', memory_seed: '记忆图重建摘要', checkpoint: '已有会话 / 检查点', current_user: '本轮消息与引用', tool_results: '工具返回', tools: '工具定义', live_context: '额外实时数据', runtime_guidance: 'Provider 运行指导' };
+  const injectionNames = { sent: '本次传入', inherited: '沿用会话', replayed: '恢复重放', omitted: '本次未传入' };
+  function injectionTable(items, sources) {
+    const labels = new Map(sources.map(step => [step.input?.source, step.name]));
+    return el('div', { class: 'detail-section' }, el('div', { class: 'detail-label' }, '上下文注入来源'),
+      el('div', { class: 'injection-table' }, el('table', {}, el('thead', {}, el('tr', {}, ...['来源', '本次处理', '说明'].map(label => el('th', {}, label)))),
+        el('tbody', {}, ...items.map(item => el('tr', {}, el('td', {}, labels.get(item.source) || sourceNames[item.source] || item.source), el('td', {}, injectionNames[item.delivery] || '未记录'), el('td', {}, item.detail || '—')))))));
+  }
+  function sourceSnapshots(sources, opened) {
+    return el('section', { class: 'source-snapshots' }, el('h3', {}, '本轮上下文来源'),
+      el('p', { class: 'trace-note' }, '下方是本轮准备的内容快照。每次模型调用内会分别标出实际传入、沿用或恢复重放；准备完成不等于已发给模型。'),
+      ...sources.map(step => {
+        const detail = el('details', { open: opened.has(step.id), 'data-step-id': step.id }, el('summary', {}, step.name),
+          el('p', { class: 'trace-note' }, step.input?.placement === 'policy' ? '基础指令：可能沿用已有会话。' : step.input?.placement === 'recovery' ? '重建时准备的历史数据；传入状态见下方模型调用。' : '本轮指导：随请求传入。'),
+          el('pre', {}, step.input?.content ?? '快照未保留或已达到记录上限。'),
+          step.truncated || step.input?.contentTruncated ? el('p', { class: 'trace-note' }, '内容已截断，仅显示预览。') : null);
+        detail.addEventListener('toggle', () => { if (detail.open) opened.add(step.id); else opened.delete(step.id); });
+        return detail;
+      }));
+  }
+  async function loadCallDetail(id, epoch = state.epoch) {
+    const run = await api('call', { id });
+    const target = $('#call-detail');
+    if (epoch !== state.epoch || state.page !== 'context' || id !== state.call.selected || !target) return;
+    renderTraceRun(target, run, state.call.open);
+  }
+  async function refreshCallFlow(result, epoch) {
+    const target = $('#call-flow'); if (!target || epoch !== state.epoch) return;
+    const runs = Array.isArray(result.calls) ? result.calls : [];
+    if (!runs.some(run => run.id === state.call.selected)) { state.call.selected = runs[0]?.id || null; state.call.open.clear(); }
+    const picker = el('select', { 'aria-label': '选择会话调用', onchange: event => {
+      state.call.selected = event.target.value; state.call.open.clear();
+      replace($('#call-detail'), loading('正在读取调用流程')); loadCallDetail(state.call.selected).catch(showError);
+    } }, ...runs.map(run => el('option', { value: run.id }, `${date(run.startedAt)} · ${statusNames[run.status] || run.status} · ${run.channel || ''}`)));
+    picker.value = state.call.selected || '';
+    const selectedDetail = $('#call-detail') || el('div', { id: 'call-detail' });
+    replace(target, el('div', { class: 'section-heading' }, el('h3', {}, '完整调用流程'), runs.length ? picker : null),
+      el('p', { class: 'trace-note' }, '展示正式会话进入模型运行器后的上下文准备、模型请求（含重试）、工具调用和结果。保留最近 20 轮、最长 7 天；临时测试不记录。每 10 秒刷新。'),
+      runs.length ? selectedDetail : empty('还没有调用流程', '更新后的下一轮正式对话开始记录，旧调用无法补回完整轨迹。'));
+    if (state.call.selected) await loadCallDetail(state.call.selected, epoch);
   }
   function usageRow(usage, completeFields) {
     const partial = key => Array.isArray(completeFields) && typeof usage[key] === 'number' && !completeFields.includes(key) ? '（部分回报）' : '';
@@ -284,7 +347,7 @@
         el('div', { class: 'message-content' }, message.content), attachments.length ? el('div', { class: 'attachment-list' }, attachments) : null,
         el('div', { class: 'message-context' }, button('删除记录', async () => {
           if (state.saving || sequence !== hs.sequence) return;
-          if (!window.confirm('删除这条本地聊天记录？\n\n' + message.content.slice(0, 160) + '\n\n这条记录会从聊天数据库中删除，不留占位；保留现有压缩上下文，等下次重建时更新近期记录，不立即重建或重新压缩。不会撤回 Telegram／微信消息，也不会清理 Recent、附件文件或备份。此操作不能在页面内撤销。')) return;
+          if (!window.confirm('删除这条本地聊天记录？\n\n' + message.content.slice(0, 160) + '\n\n这条记录会从聊天数据库中删除，不留占位；保留现有会话上下文，等下次重建时更新近期记录。不会撤回 Telegram／微信消息，也不会清理 Recent、附件文件或备份。此操作不能在页面内撤销。')) return;
           const conversationKey = hs.key, position = historyPosition(message.revision);
           state.saving = true;
           try {
@@ -428,24 +491,54 @@
   async function graphPage(epoch) {
     const result = await api('graph'); if (epoch !== state.epoch) return;
     if (!result.available) {
-      content.replaceChildren(el('div', { class: 'panel' }, empty('记忆图尚未准备好', graphRuntimeText(result.runtimeStatus) || (result.enabled ? '启动时将自动准备记忆图，请检查服务日志。' : '记忆图已关闭；移除关闭设置并重启后会自动准备。')))); return;
+      content.replaceChildren(el('div', { class: 'panel' }, empty('记忆图尚未准备好', graphRuntimeText(result.runtimeStatus) || (result.enabled ? '启动时将自动准备记忆图，请检查服务日志。' : '请完成管理员配置后重启。'))),el('section',{id:'graph-prompts',class:'panel panel-pad'})); await loadGraphPrompts(epoch); return;
     }
-    content.replaceChildren(el('div', { id: 'graph-overview' }), el('div', { class: 'panel graph-workbench' },
+    content.replaceChildren(el('div', { id: 'graph-overview' }), el('section', { id: 'graph-prompts', class: 'panel panel-pad' }), el('div', { class: 'panel graph-workbench' },
       el('section', { id: 'graph-topics', class: 'graph-topics', 'aria-label': '主题目录' }, loading()),
       el('section', { class: 'graph-memories', 'aria-label': '主题记忆' }, el('div', { id: 'graph-filters' }), el('div', { id: 'graph-nodes' }, loading()))),
       el('section', { id: 'graph-detail', class: 'panel panel-pad graph-detail', 'aria-label': '记忆详情' }, empty('选择一条记忆', '查看内容、主题关联和原文来源。')));
     renderGraphOverview(result);
+    await loadGraphPrompts(epoch);
     const gs = state.graph;
     const query = el('input', { type: 'search', maxlength: '500', value: gs.query, placeholder: '搜索全图记忆', 'aria-label': '搜索记忆图' });
     const filter = el('select', { 'aria-label': '记忆状态' }, el('option', { value: 'active' }, '活跃记忆'), el('option', { value: 'archived' }, '已归档 / 已融合'), el('option', { value: 'stale' }, '来源已变化'));
     filter.value = gs.status; filter.disabled = Boolean(gs.query);
-    const apply = () => { gs.query = query.value.trim(); gs.offset = 0; gs.selected = null; filter.disabled = Boolean(gs.query); loadGraphNodes(epoch).catch(showError); };
+    const apply = () => { if(!canLeave())return;state.dirty=false; gs.query = query.value.trim(); gs.offset = 0; gs.selected = null; filter.disabled = Boolean(gs.query); loadGraphNodes(epoch).catch(showError); };
     query.addEventListener('search', apply);
-    filter.addEventListener('change', () => { gs.status = filter.value; gs.offset = 0; gs.selected = null; loadGraphNodes(epoch).catch(showError); });
+    filter.addEventListener('change', () => { if(!canLeave())return;state.dirty=false; gs.status = filter.value; gs.offset = 0; gs.selected = null; loadGraphNodes(epoch).catch(showError); });
     $('#graph-filters').append(el('form', { class: 'filter-form', onsubmit: event => { event.preventDefault(); apply(); } },
       el('label', { class: 'grow' }, '全图搜索', query), el('label', {}, '浏览状态', filter), el('button', { type: 'submit', class: 'button' }, '搜索')));
     await Promise.all([loadGraphTopics(epoch), loadGraphNodes(epoch)]);
     if (gs.selected) await loadGraphNode(gs.selected, 0, epoch);
+  }
+  function graphEditor(fields, save, reload) {
+    const wrapper=el('div',{class:'editor'}), inputs={};
+    for(const [key,label,value,max] of fields) {
+      const input=el('textarea',{rows:key==='content'?18:4,maxlength:String(max),value,'aria-label':label});
+      input.addEventListener('input',()=>{wrapper.dataset.dirty='true';state.dirty=true;}); inputs[key]=input;
+      wrapper.append(el('label',{},label,input));
+    }
+    wrapper.append(el('div',{class:'editor-actions'},button('保存修改',async()=>{
+      if(state.saving)return;state.saving=true;
+      try{await save(Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,v.value])));delete wrapper.dataset.dirty;state.dirty=Boolean(document.querySelector('[data-dirty="true"]'));showNotice('修改已保存，下次读取或调用时生效。','success');}
+      finally{state.saving=false;}
+      await reload();
+    },'primary'),button('重新读取',async()=>{if(!canLeave())return;state.dirty=false;await reload();},'small')));
+    return wrapper;
+  }
+  async function loadGraphPrompts(epoch=state.epoch) {
+    const result=await api('graph-prompts');if(epoch!==state.epoch||!$('#graph-prompts'))return;
+    const selector=el('select',{'aria-label':'记忆任务提示词'},...result.items.map(item=>el('option',{value:item.id},item.label+' · '+item.model)));
+    selector.value=state.graph.promptId||'classify';
+    const editor=el('div',{}),render=()=>{
+      const item=result.items.find(item=>item.id===selector.value);
+      editor.replaceChildren(el('p',{class:'muted small'},(item.customized?'已自定义':'使用默认提示词')+'。这是该任务发送的完整指令，任务数据另行传入。修改不会重建已有记忆；请保留 JSON 格式和引用要求。'),
+        graphEditor([['content','完整提示词',item.content,24000]],values=>api('graph-prompt-save',{id:item.id,expectedRevision:result.revision,...values}),()=>loadGraphPrompts()),
+        button('恢复默认',async()=>{if(!canLeave())return;if(!window.confirm('恢复此任务的默认提示词？'))return;
+          await api('graph-prompt-save',{id:item.id,expectedRevision:result.revision,reset:true});state.dirty=false;await loadGraphPrompts();},'small'));
+    };
+    selector.addEventListener('change',()=>{if(!canLeave()){selector.value=state.graph.promptId||'classify';return;}state.dirty=false;state.graph.promptId=selector.value;render();});render();
+    $('#graph-prompts').replaceChildren(el('details',{},el('summary',{},'记忆模型提示词'),selector,editor));
   }
   function renderGraphOverview(result) {
     const target = $('#graph-overview'); if (!target) return;
@@ -464,6 +557,7 @@
       fact('来源已变化', number(result.counts.stale || 0)), el('p', { class: 'muted small' }, '活跃度随时间变化，不代表事实可信度。原始聊天仍可查阅。')), details);
   }
   async function chooseGraphTopic(id) {
+    if(!canLeave())return;state.dirty=false;
     const gs = state.graph; gs.topic = id; gs.topicOffset = 0; gs.offset = 0; gs.query = ''; gs.selected = null;
     const search = $('#graph-filters input'); if (search) search.value = '';
     const select = $('#graph-filters select'); if (select) select.disabled = false;
@@ -476,6 +570,9 @@
     const crumbs = el('div', { class: 'graph-breadcrumbs' }, button('全部主题', () => chooseGraphTopic(null), 'small subtle'),
       ...result.path.map(item => button(item.name, () => chooseGraphTopic(item.id), 'small subtle')));
     $('#graph-topics').replaceChildren(el('h3', {}, '主题目录'), crumbs,
+      result.selectedTopic ? el('details',{},el('summary',{},'编辑当前主题'),graphEditor([
+        ['name','主题名称',result.selectedTopic.name,60],['description','主题说明',result.selectedTopic.description,240]],
+        values=>api('graph-topic-save',{id:result.selectedTopic.id,expectedRevision:result.selectedTopic.revision,...values}),()=>loadGraphTopics())) : null,
       ...(result.items.length ? result.items.map(item => button([el('strong', {}, item.name), el('span', {}, `${number(item.memories)} 条直属记忆 · ${number(item.children)} 个子主题`)], () => chooseGraphTopic(item.id), 'graph-topic')) : [el('p', { class: 'muted small' }, gs.topic ? '这是叶主题，没有子主题。' : '尚无主题，后台处理后会逐步出现。')]),
       el('div', { class: 'graph-pager' }, gs.topicOffset ? button('上一页主题', () => { gs.topicOffset = Math.max(0, gs.topicOffset - 20); return loadGraphTopics(); }, 'small') : null,
         result.nextOffset !== null ? button('下一页主题', () => { gs.topicOffset = result.nextOffset; return loadGraphTopics(); }, 'small') : null),
@@ -495,6 +592,7 @@
         result.nextOffset !== null ? button('下一页记忆', () => { gs.offset = result.nextOffset; return loadGraphNodes(); }, 'small') : null));
   }
   async function loadGraphNode(id, offset = 0, epoch = state.epoch) {
+    if(!canLeave())return;state.dirty=false;
     const gs = state.graph; gs.selected = id;
     const sequence = gs.detailSequence = (gs.detailSequence || 0) + 1;
     const row = await api('graph-node', { id, offset, limit: 8 });
@@ -506,6 +604,10 @@
       row.status === 'stale' ? el('p', { class: 'notice' }, '原文已被编辑或删除，派生内容已经失效。') : el('div', {},
         row.recent ? el('div', {}, el('p', { class: 'muted small' }, row.recent.state === 'Done' ? '事项已结束。' : '事项尚未结束，受保护，不参与普通衰减归档。'), el('pre', {}, row.recent.body + (row.recent.truncated ? '\n（节选）' : ''))) : el('div', {}, el('p', { class: 'message-content' }, row.gist), row.summary ? el('pre', {}, row.summary) : null, row.detail ? el('pre', {}, formatGraphDetail(row.detail)) : null)),
       el('div', { class: 'graph-related' }, ...row.memberships.map(item => button(`${item.name} · ${graphStatus[item.status] || item.status}`, () => chooseGraphTopic(item.id), 'small subtle'))),
+      row.recent ? button('编辑持续事项',async()=>{state.memory.tab='recent';state.memory.selected=row.recent.id;state.memory.archived='all';state.memory.query='';await navigate('memory');},'small') : row.status!=='stale' ? el('details',{},el('summary',{},'编辑记忆'),
+        el('p',{class:'muted small'},'修改检索线索和摘要；原文与引用证据保留。重新建图会重新从原文提取。'),
+        graphEditor([['gist','检索线索',row.gist,200],['summary','摘要',row.summary,2400]],
+          values=>api('graph-node-save',{id:row.id,expectedRevision:row.revision,...values}),async()=>{await loadGraphNodes();await loadGraphNode(row.id);})):null,
       el('h3', { class: 'graph-source-title' }, '原文来源'),
       ...(row.sources.length ? row.sources.map(source => el('article', { class: 'graph-source' }, el('p', { class: 'muted small' }, `${source.role === 'user' ? '用户' : '助手'} · ${date(source.at)}`),
         el('p', { class: 'message-content' }, source.content), source.truncated ? el('p', { class: 'muted small' }, '这里显示原文节选。') : null,
@@ -520,31 +622,25 @@
 
   async function contextPage(epoch) {
     const result = await api('context'); if (epoch !== state.epoch) return;
-    const local = result.local;
     const panels = [];
-    panels.push(el('p', { class: 'context-intro' }, result.note || '本页展示可观察的本地上下文与恢复元数据。'));
     const grid = el('div', { class: 'context-grid' });
-    if (local) {
-      const section = (title, entries, body, bodyLabel = '查看内容') => el('section', { class: 'panel context-section' }, el('h3', {}, title), kv(entries), el('details', {}, el('summary', {}, bodyLabel), el('pre', {}, body || '内容为空')));
-      grid.append(section('Core', [['来源', '最近一次组装'], ['修订', local.revisions?.core], ['组装时间', date(result.loadedAt)]], local.core),
-        section('Recent 目录', [['活跃话题', number(result.recent?.activeCount)], ['全部话题', number(result.recent?.totalCount)], ['修订', local.revisions?.recent]], local.recentDirectory),
-        section('心理和动作描写', [['状态', local.expression?.showStageDirections ? '开启' : '关闭'], ['修订', local.revisions?.expression]], local.expression?.instruction),
-        section('本地指导', [['来源', '本地上下文组装'], ['组装时间', date(result.loadedAt)]], local.guidance));
-    } else grid.append(el('div', { class: 'panel context-section full' }, empty('尚无已组装的上下文快照', '首次请求或内容变更后的下一次请求会生成新的本地快照。')));
     const checkpointPanel = el('section', { class: 'panel context-section full' }, el('div', { class: 'section-heading' }, el('h3', {}, '已保存的上下文'), el('span', { class: 'small' }, `${number(result.checkpoints?.length || 0)} 条记录`)));
     if (!result.checkpoints?.length) checkpointPanel.append(empty('没有已保存的上下文', '会话尚未保存可恢复的上下文状态。'));
     else for (const checkpoint of result.checkpoints) checkpointPanel.append(el('article', { class: 'checkpoint' }, el('div', { class: 'checkpoint-top' }, el('strong', {}, checkpoint.model || '模型未记录'), el('span', {}, checkpoint.archived ? '历史归档' : '会话存档（不代表正在使用）')),
-      kv([['存储更新于', date(checkpoint.updatedAt)], ['最近压缩', date(checkpoint.checkpoint?.at || checkpoint.lastCompactedAt)], ['压缩原因', checkpoint.checkpoint?.reason === 'seven_days' ? '7 天触发' : checkpoint.checkpoint?.reason === 'capacity' ? '容量触发' : '未记录'], ['历史游标', number(checkpoint.historyCursor)], ['覆盖校验', checkpoint.coverageVerified === true ? '已验证' : checkpoint.coverageVerified === false ? '未验证' : '未记录'], ['待交付', checkpoint.pendingDelivery ? '有待结算交付' : '无'], ['记录标识', checkpoint.id]])));
+      kv([['存储更新于', date(checkpoint.updatedAt)], ['最近记忆图重建', date(checkpoint.memoryRebase?.at)], ['窗口日期', checkpoint.memoryRebase?.windowDate || '未记录'], ['历史游标', number(checkpoint.historyCursor)], ['覆盖校验', checkpoint.coverageVerified === true ? '已验证' : checkpoint.coverageVerified === false ? '未验证' : '未记录'], ['待交付', checkpoint.pendingDelivery ? '有待结算交付' : '无'], ['记录标识', checkpoint.id]])));
     grid.append(checkpointPanel);
     if (result.lastRequest) {
       const request = result.lastRequest;
       grid.append(el('section', { class: 'panel context-section full' }, el('div', { class: 'section-heading' }, el('h3', {}, '最近一次模型调用'), status(request.status)),
-        kv([['时间', date(request.at)], ['Provider / 模型', [request.provider, request.model].filter(Boolean).join(' / ') || '未记录'], ['耗时', duration(request.durationMs)], ['上下文变化', request.contextEffect === 'checkpoint_compacted' ? '生成压缩检查点' : request.contextEffect === 'history_windowed' ? '历史窗口调整' : request.contextEffect === 'none' ? '无' : '未回报']]),
+        kv([['时间', date(request.at)], ['Provider / 模型', [request.provider, request.model].filter(Boolean).join(' / ') || '未记录'], ['耗时', duration(request.durationMs)], ['上下文变化', request.contextEffect === 'checkpoint_compacted' ? '旧版维护记录' : request.contextEffect === 'history_windowed' ? '历史窗口调整' : request.contextEffect === 'none' ? '无' : '未回报']]),
         request.usage ? usageRow(request.usage) : el('p', { class: 'trace-note' }, '本次调用未回报用量。'),
-        el('p', { class: 'trace-note' }, '正式会话内最近一次实际模型请求；这些数值不是完整上下文大小，也不是整轮调用总量。')));
+        el('p', { class: 'trace-note' }, '正式会话内最近一次实际模型请求；这些数值不是完整上下文大小，也不是整轮调用总量。'),
+        result.calls?.some(run => run.id === request.traceId) ? button('查看所属完整流程', async () => { state.call.selected = request.traceId; state.call.open.clear(); await refreshCallFlow(result, epoch); $('#call-flow')?.scrollIntoView({ block: 'start' }); }, 'small') : null));
     }
     grid.append(el('section', { class: 'panel context-section full' }, el('h3', {}, '用量可见性'), el('p', { class: 'small muted' }, result.usage?.note || '当前没有可用的正式会话用量。')));
+    panels.unshift(el('section', { id: 'call-flow', class: 'panel context-section full' }));
     panels.push(grid); content.replaceChildren(...panels);
+    await refreshCallFlow(result, epoch);
   }
   async function hostPage(epoch) {
     const result = await api('host'); if (epoch !== state.epoch) return;
@@ -614,10 +710,11 @@
   $('#login-form').addEventListener('submit', event => { event.preventDefault(); if (!$('#login-form button').disabled) void login(); });
   window.addEventListener('beforeunload', event => { if (!state.dirty) return; event.preventDefault(); event.returnValue = ''; });
   setInterval(async () => {
-    if (!state.authenticated || document.hidden || state.pollBusy || state.dirty || document.activeElement?.tagName === 'SELECT' || !['tasks', 'host'].includes(state.page)) return;
+    if (!state.authenticated || document.hidden || state.pollBusy || state.dirty || document.activeElement?.tagName === 'SELECT' || !['tasks', 'host', 'context'].includes(state.page)) return;
     state.pollBusy = true; const epoch = state.epoch;
     try {
-      if (state.page === 'host') await hostPage(epoch);
+      if (state.page === 'context') await refreshCallFlow(await api('context'), epoch);
+      else if (state.page === 'host') await hostPage(epoch);
       else {
         const result = await api('tasks', { limit: 30 });
         if (epoch !== state.epoch) return;
@@ -626,6 +723,7 @@
         const fresh = new Set(result.runs.map(run => run.id));
         state.task.runs = [...result.runs, ...state.task.runs.filter(run => !fresh.has(run.id))]
           .sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id)).slice(0, 1000);
+        retainTaskDay(result);
         if (!keepOlder) state.task.nextBefore = result.nextBefore;
         state.task.heartbeat = result.heartbeat;
         if (result.heartbeat?.timezone) state.timezone = result.heartbeat.timezone;

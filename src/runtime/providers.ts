@@ -265,7 +265,7 @@ export class ProviderRuntime implements ManagedChatRuntime {
       if (deferred) await this.deliveryStore.write(request.sessionId, ticket);
       const turn = { ...request, sessionId: id, ...(deferred ? { deliveryId } : {}) };
       try {
-        const response = state.provider === "siwc" && !request.ephemeral ? await replyWithPaidImages(runtime, this.providers.openrouter, turn) : await runtime.reply(turn);
+        const response = state.provider === "siwc" && (!request.ephemeral || request.temporaryMode) ? await replyWithPaidImages(runtime, this.providers.openrouter, turn) : await runtime.reply(turn);
         return deferred ? { ...response, deliveryId } : response;
       } catch (error) {
         if (deferred) {

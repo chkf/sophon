@@ -1,6 +1,6 @@
 # 文件操作
 
-设置 `GATEWAY_FILES_ENABLED=true` 后重启，文件工具只对已配置的 Telegram 管理员私聊开放。可访问服务进程有权限访问的本地路径；不执行 shell。默认关闭。
+文件工具随服务自动启用，只对已配置的 Telegram 管理员私聊开放。旧配置的 `GATEWAY_FILES_ENABLED=false` 不再生效。可访问服务进程有权限访问的本地路径；不执行 shell。
 
 | 工具 | 功能 |
 | --- | --- |

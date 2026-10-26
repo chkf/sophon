@@ -11,13 +11,13 @@ import { LocalKnowledgeStore } from "../knowledge/store.js";
 import type { InboundMessage } from "../channels/types.js";
 import type { ChatRequest, ManagedChatRuntime } from "../runtime/types.js";
 
-test("configured service exposes files and runs silent review while proactive messages are disabled", async t => {
+test("legacy disabled settings automatically prepare memory, expose files and run silent review", async t => {
   const root = await mkdtemp(join(tmpdir(), "sophon-features-"));
   const data = join(root, "state");
   await initializeGateway(data);
   const settings = { GATEWAY_DATA_DIR: data, TELEGRAM_BOT_TOKEN: "70001:synthetic", TELEGRAM_OWNER_ID: "70001",
-    GATEWAY_FILES_ENABLED: "true", GATEWAY_GENERATED_FILES_DIR: join(root, "documents"),
-    GATEWAY_RECENT_REVIEW_ENABLED: "true", GATEWAY_HEARTBEAT_ENABLED: "false", GATEWAY_MEMORY_GRAPH_ENABLED: "false" };
+    GATEWAY_FILES_ENABLED: "false", GATEWAY_GENERATED_FILES_DIR: join(root, "documents"),
+    GATEWAY_RECENT_REVIEW_ENABLED: "false", GATEWAY_CONTROL_TUNNEL: "off", GATEWAY_HEARTBEAT_ENABLED: "false", GATEWAY_MEMORY_GRAPH_ENABLED: "false" };
   const previous = { ...process.env };
   Object.assign(process.env, settings);
   t.after(() => { for (const key of Object.keys(settings)) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; } });
@@ -34,7 +34,9 @@ test("configured service exposes files and runs silent review while proactive me
       return { text: "文件已保存。" };
     }, async close() {},
   } as ManagedChatRuntime;
-  const service = new GatewayService(config, runtime);
+  const service = await GatewayService.create(config, runtime);
+  assert.equal(config.memoryGraphEnabled, true);
+  assert.equal(config.control?.tunnel, "cloudflare");
   // Replace external transports only; exercise production startup, tool dispatch, timer and shutdown.
   Object.assign(service, { startHttpServer: async () => {}, telegram: {
     async start(value: typeof handler) { handler = value; }, async stop() {},

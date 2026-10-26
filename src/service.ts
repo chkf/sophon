@@ -1,3 +1,5 @@
+import { McpTools } from "./mcp/client.js";
+import { readMcpConfig } from "./mcp/config.js";
 import { requestHostUpdate } from "./commands/update.js";
 import { MemoryRecent } from "./memory/recent.js";
 import { MemoryWorker } from "./memory/worker.js";
@@ -43,7 +45,6 @@ import type { ManagedChatRuntime } from "./runtime/types.js";
 import { SessionStore } from "./sessions/store.js";
 import { LocalCoreContextProvider, renderRecentSummary } from "./core/context.js";
 import { LocalKnowledgeStore } from "./knowledge/store.js";
-import { CompactionNoticeLedger } from "./runtime/siwc/compaction-notice.js";
 import { ControlCenter } from "./control/server.js";
 import { ControlData } from "./control/data.js";
 import { HostMonitor } from "./control/host.js";
@@ -91,16 +92,17 @@ export class GatewayService {
   private readonly gateway: Gateway;
   private readonly memoryWorker?: MemoryWorker;
   private chatInFlight=0;
-  private readonly compactionNotices: CompactionNoticeLedger;
   private readonly telegram?: TelegramAdapter;
   private readonly activeChannels: ActiveChannelRouter;
   private readonly panels: CommandPanels;
   private readonly diagnostics: DiagnosticRegistry;
   private readonly commands: GatewayCommandRouter;
   private readonly heartbeat?: HeartbeatRunner;
+  private readonly mcp: McpTools;
   private readonly recentReview?: RecentReview;
   private readonly control?: ControlCenter;
   private readonly taskTraces?: TaskTraceStore;
+  private readonly callTraces?: TaskTraceStore;
   private server?: Server;
   private instanceLock?: InstanceLock;
 
@@ -110,6 +112,7 @@ export class GatewayService {
     private readonly requestShutdown: (reason: GatewayShutdownReason) => void = () => undefined,
   ) {
     validateServeConfig(config);
+    const mcpServers=readMcpConfig(config.mcpConfigFile);
 
     const media = new MediaStore(join(config.dataDir, "media"));
     this.sessions = new SessionStore(config.dataDir);
@@ -123,7 +126,6 @@ export class GatewayService {
     const speechQueue=new SerialQueue();
     this.voice = new VoiceService(speechSettings, new VoiceStore(config.dataDir),speechClient,undefined,speechQueue);
     this.localKnowledge = new LocalKnowledgeStore(config.dataDir, "formal");
-    this.compactionNotices = new CompactionNoticeLedger(config.dataDir);
     this.gatewayContext = new LocalCoreContextProvider(config.dataDir,
       () => renderRecentSummary(memory?new MemoryRecent(memory).remainingDirectory(this.localKnowledge!.listRecent()):this.localKnowledge!.listRecent()),
       () => this.expressions.snapshot(), () => this.localKnowledge!.getRecentRevision());
@@ -133,20 +135,15 @@ export class GatewayService {
         return this.telegram.sendDocumentToOwner(file);
       }) : undefined;
     if (config.recentReview?.enabled && config.telegram) this.recentReview = new RecentReview(config.dataDir,
-      config.telegram.ownerId, runtime, this.sessions, this.localKnowledge, this.gatewayContext, this.conversationQueue, () => !!memory && new MemoryRecent(memory).enabled());
+      config.telegram.ownerId, runtime, this.sessions, this.localKnowledge, this.gatewayContext, this.conversationQueue, () => !!memory && !!runtime.classifyMemory && !['MODEL_UNAVAILABLE','CLASSIFIER_UNAVAILABLE'].includes(this.memoryWorker?.status() ?? '') && new MemoryRecent(memory).enabled());
+    this.mcp=new McpTools(mcpServers,message => !!config.telegram && message.senderId===message.conversationId &&
+      this.sessions.sessionKey(message.channel,message.conversationId)==="telegram:"+config.telegram.ownerId);
     this.gateway = new Gateway(runtime, this.sessions, this.gatewayContext,
       config.maxToolRounds, config.heartbeat.timezone,
       undefined, this.expressions, this.localKnowledge, async message =>
         message.senderId===config.telegram?.ownerId && message.conversationId===config.telegram?.ownerId &&
         this.voice.configured() && (await this.voice.settings.get()).tts,
-      async checkpoint => {
-        if (!this.telegram) return;
-        if (!(await this.compactionNotices.claim(checkpoint))) return;
-        const reason = checkpoint.reason === "seven_days"
-          ? "距离上次成功压缩已满 7 天" : "上下文达到容量阈值（120K token）";
-        await this.telegram.notifyTemporary(
-          "🧠 Gateway 上下文已压缩\n原因：" + reason + "\n历史检查点已保存，对话可以继续。", 60_000);
-      }, config.control ? observation => persistContextObservation(config.dataDir, observation) : undefined, files, memory);
+      undefined, config.control ? observation => persistContextObservation(config.dataDir, observation) : undefined, files, memory, this.mcp, sessionId=>sessionId==="telegram:"+config.telegram?.ownerId?this.callTraces:undefined);
 
     if (config.telegram) {
       const telegramVoice=new TelegramVoiceTransport(this.voice,config.telegram.ownerId);
@@ -155,7 +152,8 @@ export class GatewayService {
         ...config.telegram,
         dataDir: config.dataDir,
         mediaStore: media,
-        commands: TELEGRAM_COMMANDS,
+        commands: [...TELEGRAM_COMMANDS,{command:"temp",description:"开启或退出临时会话"}],
+        temporaryReply:async(message,session)=>{const prepared=await this.voice.preprocess(message);this.chatInFlight++;try{return await this.gateway.handle(prepared,session);}finally{this.chatInFlight--; }},
         conversationQueue: this.conversationQueue,
         onCallback: (query, api) => telegramVoice.callback(query, api),
         sendVoice: (api, target, text, id, nativeReply, onSent, instruction, preview) => telegramVoice.send(api, target, text, id, preview === true, nativeReply, onSent, instruction),
@@ -202,8 +200,10 @@ export class GatewayService {
     );
     const logDir = config.logDir ?? join(config.dataDir, "logs");
     if (config.control) {
-      this.taskTraces = new TaskTraceStore(config.dataDir, { secrets: [config.telegram?.token,
+      this.taskTraces = new TaskTraceStore(config.dataDir, {todayOnly:true,timezone:config.heartbeat.timezone, secrets: [config.telegram?.token,
         config.api?.apiKey, config.openrouter?.apiKey, config.voice?.apiKey].filter((value): value is string => Boolean(value)) });
+      this.callTraces = new TaskTraceStore(config.dataDir,{scope:'calls',maxRuns:20,retentionDays:7,
+        secrets:[config.telegram?.token,config.api?.apiKey,config.openrouter?.apiKey,config.voice?.apiKey,...mcpServers.flatMap(server=>Object.values({...server.env,...server.headers}))].filter((value):value is string=>!!value)});
       this.control = new ControlCenter({
         publicUrl: config.control.publicUrl,
         temporary: config.control.tunnel === "cloudflare",
@@ -213,7 +213,7 @@ export class GatewayService {
           memory: {ownerId: config.telegram?.ownerId, enabled: config.memoryGraphEnabled,
             runtimeStatus:()=>config.memoryGraphState??this.memoryWorker?.status()},
           editHistory: async (id, work) => { if(!runtime.editHistory)throw Error("历史编辑不可用。");await runtime.editHistory(id,work); } }),
-        traces: this.taskTraces, host: new HostMonitor(config.dataDir),
+        traces: this.taskTraces, calls: this.callTraces, host: new HostMonitor(config.dataDir),
         mutate: work => this.conversationQueue.run(async () => work()),
         heartbeat: async () => {
           const now = new Date();
@@ -297,6 +297,7 @@ export class GatewayService {
       await cleanupBackgroundArchives(this.config.dataDir);
       await cleanupConfirmedArchivesOnStartup(this.config.dataDir);
       this.taskTraces?.recoverInterrupted();
+      this.callTraces?.recoverInterrupted();
       const session = await this.runtime.getSession();
       if (session.status !== "connected" || !session.sharing) {
         throw new Error("Selected runtime is not ready. For API providers check the configured endpoint, model and credentials; for SIWC run auth:login / auth:reconsent.");
@@ -348,9 +349,11 @@ export class GatewayService {
     await attempt(() => this.ilink?.stop());
     await attempt(() => this.telegram?.stop());
     await attempt(() => this.memoryWorker?.stop());
+    await attempt(() => this.mcp.close());
     await attempt(() => this.runtime.close?.());
     await attempt(() => this.control?.close());
     await attempt(() => this.taskTraces?.close());
+    await attempt(() => this.callTraces?.close());
     await attempt(() => this.voice.close());
     await attempt(() => this.localKnowledge?.close());
     await attempt(() => this.sessions.close());

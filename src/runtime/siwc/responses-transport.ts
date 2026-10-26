@@ -181,10 +181,12 @@ export class ResponsesTransport {
     socket: StatefulResponsesSocket,
     event: Record<string, unknown>,
     trace?: RuntimeTraceObserver,
+    context?: import("../../observability/types.js").ContextInjection[],
   ): Promise<{ response: ResponseSnapshot; retries: number; traceStepId?: string }> {
     const captureTraceContent = Boolean(trace && trace.captureContent !== false);
     for (let attempt = 0; ; attempt += 1) {
       const traceStepId = safeTraceStart(trace, { kind: "model", name: "responses.create", provider: "siwc",
+        ...(captureTraceContent && context ? {context} : {}),
         ...(typeof event.model === "string" ? { model: event.model } : {}),
         input: captureTraceContent ? { input: traceContent(event.input), instructions: event.instructions,
           tools: Array.isArray(event.tools) ? event.tools.map(tool => tool?.name ?? tool?.type) : [],

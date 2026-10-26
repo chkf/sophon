@@ -1,7 +1,7 @@
+import { siwcContextAttribution } from "../../observability/context-injection.js";
 import { buildMemoryRebase, memoryWindowDue } from "./memory-rebase.js";
 import { createHash } from "node:crypto";
 import type { ContextMaintenanceRequest, RuntimeHistory } from "../types.js";
-import { chatTailAtCapacity, compactChatHistory } from "./chat-compaction.js";
 import { safeToolOutput } from "../tool-output.js";
 import { safeTraceStart, safeTraceFinish } from "../../observability/runtime-trace.js";
 import { tracedToolStatus } from "../trace-content.js";
@@ -14,8 +14,6 @@ import { cleanupSupersededArchives, cleanupInactiveModelContexts } from "./backg
 import { planRecovery } from "./recovery.js";
 import { hasUnresolvedToolEvidence } from "./responses-codec.js";
 import { readRecoveryHistoryWindow } from "./history-window.js";
-import { checkpointFromItems, sevenDayCompactionDue, SIWC_AUTO_COMPACT_TOKENS,
-  SIWC_WEEKLY_COMPACT_TOKENS } from "./compaction.js";
 import { withHistoryTool } from "../history-tool.js";
 import { blockTextualToolCall } from "../tool-call-integrity.js";
 import { logRecoveryBreakdown } from "./context-diagnostics.js";
@@ -24,9 +22,6 @@ export type { StatefulResponsesSocket, StatefulResponsesSocketFactory, StatefulR
 export { summarizeContextItems } from "./context-diagnostics.js";
 export type { ContextPayloadSummary } from "./context-diagnostics.js";
 export { hasUnresolvedToolEvidence, pruneToLatestCompaction } from "./responses-codec.js";
-export function compactThresholdForModel(_model: string): number {
-  return SIWC_AUTO_COMPACT_TOKENS;
-}
 
 /** Old releases embedded per-turn Persona as developer input items. Those items
  * persist through previous_response_id and must be removed by replaying the
@@ -204,71 +199,43 @@ export class StatefulResponsesBridge {
 
   /** Heartbeat calls this under the same provider/conversation queues as formal chat. */
   maintainContext(request: ContextMaintenanceRequest,
-    credentials: () => Promise<{ model: string; accessToken: string }>): Promise<{ compacted: boolean; skipped?: string }> {
+    credentials: () => Promise<{ model: string; accessToken: string }>): Promise<{ compacted: boolean; rebuilt?: boolean; skipped?: string }> {
     return this.enqueue(async () => {
       const saved = this.lanes.get(request.sessionId) ?? await this.store.read(request.sessionId);
       const skip = (skipped: string) => ({ compacted: false, skipped });
       if (!saved || !request.history.count) return skip("no_history");
       if (saved.pendingDeliveryItems || saved.pendingDeliveryId || hasUnresolvedToolEvidence(saved.contextItems)) return skip("unsettled");
-      if (request.memory) {
-        if (request.memory.ready === false) return skip("memory_not_ready");
-        if (!memoryWindowDue(saved.memoryRebase, request.timezone, this.now())) return skip("not_due");
-      } else {
-        const first = saved.startedAt ? undefined : (await request.history.readRange(0, 1))[0];
-        if (!sevenDayCompactionDue(saved.startedAt ?? first?.at, saved.lastCompactedAt, this.now().getTime())) return skip("not_due");
-        if (saved.checkpoint?.replayFromSeq === request.history.count) return skip("no_new_chat");
-      }
+      if (!request.memory) return skip("memory_disabled");
+      if (request.memory.ready === false) return skip("memory_not_ready");
+      if (!memoryWindowDue(saved.memoryRebase, request.timezone, this.now())) return skip("not_due");
       const auth = await credentials();
       if (auth.model !== saved.model) return skip("model_changed");
       const lane = await this.loadLane(request.sessionId, auth.model);
-      const compacted = request.memory && request.memory.ready!==false ? await this.rebaseMemory(lane,request.history,request.memory,request.timezone) : await this.compactLaneHistory(lane, request.history, request.timezone, auth.accessToken, "seven_days");
-      return { compacted, ...(!compacted ? { skipped: "no_compaction" } : {}) };
+      const rebuilt = await this.rebaseMemory(lane,request.history,request.memory,request.timezone);
+      return { compacted:false, rebuilt, ...(!rebuilt ? {skipped:"no_rebuild"} : {}) };
     });
   }
 
-  private async rebaseMemory(lane:LaneState,history:RuntimeHistory,memory:NonNullable<StatefulResponseOptions['memory']>,timezone?:string):Promise<boolean> {
+  private async rebaseMemory(lane:LaneState,history:RuntimeHistory,memory:NonNullable<StatefulResponseOptions['memory']>,timezone?:string, trace?: StatefulResponseOptions['trace']):Promise<boolean> {
     if(lane.ephemeral||lane.pendingDeliveryItems||lane.pendingDeliveryId||hasUnresolvedToolEvidence(lane.contextItems))return false;
     memory=memory.refresh?.()??memory;
     if(memory.ready===false)return false;
     const candidate=await buildMemoryRebase(history,memory,timezone,this.now());
+    if (trace && trace.captureContent !== false) {
+      const content = String(candidate.items[0]?.content ?? "");
+      const step = safeTraceStart(trace,{kind:"context",name:"记忆图重建摘要",
+        input:{source:"memory_seed",placement:"recovery",content:content.slice(0,3000),contentTruncated:content.length>3000}});
+      safeTraceFinish(trace,step,{status:"completed"});
+    }
     // Archive before publishing. Failure at either step leaves the live checkpoint untouched.
     await this.store.archive(lane.sessionId,{version:2,sessionId:lane.sessionId,model:lane.model,contextItems:lane.contextItems,
       historyCursor:lane.historyCursor,attachmentCursor:lane.attachmentCursor,controlRevision:lane.controlRevision,
       contextRevision:lane.contextRevision,startedAt:lane.startedAt,lastCompactedAt:lane.lastCompactedAt,
       checkpoint:lane.checkpoint,memoryRebase:lane.memoryRebase},'memory-rebase:'+candidate.metadata.at);
     const replacement:LaneState={...lane,contextItems:candidate.items,memoryRebase:candidate.metadata,checkpoint:undefined,
-      lastCompactedAt:candidate.metadata.at,historyCursor:history.count,attachmentCursor:history.count,coverageVerified:true,
+      lastCompactedAt:undefined,historyCursor:history.count,attachmentCursor:history.count,coverageVerified:true,
       historyRebuildPending:undefined,workingTokens:undefined,previousResponseId:undefined,socket:undefined,socketToken:undefined,needsBootstrap:true};
     await this.persistLane(replacement);lane.socket?.close();this.invalidateLaneConnection(lane);Object.assign(lane,replacement);return true;
-  }
-
-  private async compactLaneHistory(lane: LaneState, history: RuntimeHistory, timezone: string | undefined,
-    accessToken: string, reason: "seven_days" | "capacity"): Promise<boolean> {
-    if (lane.ephemeral || lane.pendingDeliveryItems || lane.pendingDeliveryId || hasUnresolvedToolEvidence(lane.contextItems)) return false;
-    const started = this.now().getTime();
-    const candidate = await compactChatHistory({ sessionId: lane.sessionId, model: lane.model,
-      history, timezone, items: lane.contextItems, checkpoint: lane.checkpoint, reason, now: this.now,
-      send: async request => {
-        // No previous_response_id, tools, Core, Recent or working context enters this connection.
-        const socket = this.socketFactory(accessToken);
-        try { return (await this.transport.completedResponseWithRetry(socket, request)).response; }
-        finally { socket.close(); }
-      },
-    });
-    if (!candidate) return false;
-    const replacement: LaneState = { ...lane, contextItems: candidate.items, checkpoint: candidate.checkpoint, memoryRebase:undefined,
-      lastCompactedAt: candidate.checkpoint.at, historyCursor: history.count, attachmentCursor: history.count,
-      coverageVerified: true, historyRebuildPending: undefined, needsWindowRebase: false,
-      workingTokens: undefined, previousResponseId: undefined, socket: undefined, socketToken: undefined, needsBootstrap: true };
-    // Publish atomically before touching the live chain. Failed requests/saves leave it usable.
-    await this.persistLane(replacement);
-    lane.socket?.close();
-    this.invalidateLaneConnection(lane);
-    Object.assign(lane, replacement);
-    console.error("[runtime-chat-compaction] " + JSON.stringify({ session: lane.sessionId, model: lane.model,
-      reason, coveredThroughSeq: history.count, replayFromSeq: candidate.checkpoint.replayFromSeq,
-      durationMs: this.now().getTime() - started, checkpoint: candidate.checkpoint.id }));
-    return true;
   }
 
   private clearRotationTimer(socket: StatefulResponsesSocket): void {
@@ -337,7 +304,7 @@ export class StatefulResponsesBridge {
     const controlChanged = Boolean(options.context?.controlRevision && lane.controlRevision &&
       options.context.controlRevision !== lane.controlRevision);
     if (controlChanged && options.memory && options.memory.ready!==false && options.history && !hasUnresolvedToolEvidence(lane.contextItems)) {
-      if(!await this.rebaseMemory(lane,options.history,options.memory,options.timezone))throw new Error("Memory graph is no longer ready; original context preserved.");
+      if(!await this.rebaseMemory(lane,options.history,options.memory,options.timezone,options.trace))throw new Error("Memory graph is no longer ready; original context preserved.");
       lane.controlRevision=options.context!.controlRevision;lane.contextRevision=options.context!.contextRevision;
     } else if (controlChanged) {
       // A previous_response_id or opaque compaction may still contain deleted
@@ -404,28 +371,13 @@ export class StatefulResponsesBridge {
     }
     // A ready graph keeps three local dates, refreshed once per date at a settled boundary.
     // Neither a changing graph revision nor elapsed hours reset the live chain.
-    let capacityCompacted = false;
     if (!lane.previousResponseId && lane.historyRebuildPending) await this.rebuildEditedHistory(lane, options);
     if (options.memory && options.memory.ready !== false && options.history && !lane.ephemeral &&
         memoryWindowDue(lane.memoryRebase, options.timezone, this.now())) {
-      await this.rebaseMemory(lane, options.history, options.memory, options.timezone);
-    }
-    if (!lane.ephemeral && options.history && !lane.historyRebuildPending && !hasUnresolvedToolEvidence(lane.contextItems)) {
-      if ((lane.workingTokens ?? 0) >= SIWC_AUTO_COMPACT_TOKENS ||
-          (lane.workingTokens === undefined &&
-            await chatTailAtCapacity(options.history, lane.memoryRebase?.throughSeq ?? lane.checkpoint?.replayFromSeq ?? 0))) {
-        if (options.memory?.ready === false) throw new Error("Memory graph is not ready for a capacity rebuild; preserve the current context until classification completes.");
-        const maintained = options.memory ? await this.rebaseMemory(lane,options.history,options.memory,options.timezone) : await this.compactLaneHistory(lane, options.history, options.timezone, options.accessToken, "capacity");
-        if (!maintained) throw new Error("Chat capacity maintenance did not complete; original history is preserved.");
-        capacityCompacted = !options.memory;
-      }
+      await this.rebaseMemory(lane, options.history, options.memory, options.timezone, options.trace);
     }
     if (!lane.previousResponseId) await this.rebuildEditedHistory(lane, options);
     let socket = this.ensureSocket(lane, options.accessToken);
-    const weeklyDue = !options.history && !lane.ephemeral &&
-      sevenDayCompactionDue(lane.startedAt, lane.lastCompactedAt, this.now().getTime());
-    // Use the existing authenticated response stream for both capacity and weekly
-    // compaction. Never send subscription credentials to a standalone API endpoint.
     const preTurnState = {
       model: lane.model,
       startedAt: lane.startedAt,
@@ -509,15 +461,18 @@ export class StatefulResponsesBridge {
     const historyInputItemCount = input.length;
     const recoveryInputItemCount = recoveryItems.length;
 
+    let policyItem: Record<string, unknown> | undefined;
+    let liveItem: Record<string, unknown> | undefined;
     if ((recovering || lane.needsBootstrap || controlChanged) && options.instructions) {
       const resetVoicePreference = recovering && options.resetVoicePreferenceOnReconnect
         ? "\nTelegram 回复形式已重置为默认偏好；历史消息中的临时文字回复要求不再延续。"
         : "";
-      input.push(bootstrapPolicyItem(options.instructions + resetVoicePreference));
+      policyItem = bootstrapPolicyItem(options.instructions + resetVoicePreference);
+      input.push(policyItem);
     }
     if (options.context && (recovering || lane.needsBootstrap || controlChanged)) {
-      const live = liveContextItem(options.context);
-      if (live) input.push(live);
+      liveItem = liveContextItem(options.context);
+      if (liveItem) input.push(liveItem);
     }
     // Per-response instructions are not inherited through previous_response_id.
     // Never append Persona or temporal instructions to replayable chat input.
@@ -537,7 +492,7 @@ export class StatefulResponsesBridge {
     }
 
     const usage = emptyUsage();
-    let compacted = capacityCompacted;
+    let compacted = false;
     let toolRounds = 0;
     let previousResponseId = lane.previousResponseId;
     let nextInput = input;
@@ -568,8 +523,6 @@ export class StatefulResponsesBridge {
         stepIndex += 1;
         const usedPreviousResponseId = Boolean(previousResponseId);
         const stepInputItems = nextInput.length;
-        const compactThreshold = weeklyDue && !compacted
-          ? SIWC_WEEKLY_COMPACT_TOKENS : compactThresholdForModel(options.model);
         let completed: { response: ResponseSnapshot; retries: number; traceStepId?: string };
         try {
           completed = await this.transport.completedResponseWithRetry(socket, {
@@ -582,11 +535,15 @@ export class StatefulResponsesBridge {
             prompt_cache_key: createHash("sha256").update(options.sessionId).digest("hex").slice(0, 32),
             ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
             ...(tools.length ? { tools, parallel_tool_calls: false } : {}),
-            ...(!options.history || lane.ephemeral ? { context_management: [{
-              type: "compaction",
-              compact_threshold: compactThreshold,
-            }] } : {}),
-          }, options.trace);
+          }, options.trace, captureTraceContent ? siwcContextAttribution({
+            sources:options.contextSources, policySent:Boolean(policyItem && nextInput.includes(policyItem)),
+            continues:Boolean(previousResponseId), replay:!previousResponseId && (continuationRecoveryUsed || recoverySource === "checkpoint"),
+            historyItems:nextInput === input ? historyInputItemCount : 0,
+            historyTruncated:window?.truncated === true, currentUserSent:nextInput.includes(currentUser),
+            toolResults:nextInput.filter(item=>item.type === "function_call_output").length,
+            memoryRevision:lane.memoryRebase?.revision,
+            tools:tools.length, liveContextSent:Boolean(liveItem && nextInput.includes(liveItem)),
+          }) : undefined);
         } catch (error) {
           if (
             previousResponseId &&
@@ -651,8 +608,7 @@ export class StatefulResponsesBridge {
           " request_items=" + stepInputItems +
           " context_items=" + lane.contextItems.length +
           " retries=" + retries +
-          " compacted=" + stepCompacted +
-          " threshold=" + compactThreshold,
+          " compacted=" + stepCompacted,
         );
 
         const calls = callsFrom(output);
@@ -669,10 +625,10 @@ export class StatefulResponsesBridge {
         lane.contextItems.push(...output);
         if (stepCompacted) {
           lane.contextItems = pruneToLatestCompaction(lane.contextItems);
-          const at = this.now().toISOString();
-          lane.checkpoint = checkpointFromItems(lane.sessionId, options.model, lane.contextItems,
-            lane.historyCursor ?? 0, compactThreshold === SIWC_WEEKLY_COMPACT_TOKENS ? "seven_days" : "capacity", at);
-          lane.lastCompactedAt = at;
+          // Preserve unexpected provider-owned opaque output for recovery only.
+          // The Gateway never requests compaction and cannot infer its trigger.
+          lane.checkpoint = undefined;
+          lane.lastCompactedAt = undefined;
           compacted = true;
           lane.needsBootstrap = true;
         }
@@ -719,8 +675,7 @@ export class StatefulResponsesBridge {
             " recovery_source=" + recoverySource +
             " recovery_items=" + recoveryInputItemCount +
             " compacted=" + compacted +
-            " max_working_tokens=" + maxWorkingTokens +
-            " threshold=" + compactThresholdForModel(options.model),
+            " max_working_tokens=" + maxWorkingTokens,
           );
           return { text, usage, compacted,
             ...(lane.memoryRebase && lane.memoryRebase !== memoryRebaseBefore ? { historyWindowed: true } : {}),
@@ -947,7 +902,7 @@ export class StatefulResponsesBridge {
       throw new Error("History edit recovery requires unsettled tool evidence to be reconciled first.");
     }
     if(options.memory&&options.memory.ready!==false){
-      if(!await this.rebaseMemory(lane,options.history,options.memory,options.timezone))throw new Error("Memory graph is no longer ready; original context preserved.");
+      if(!await this.rebaseMemory(lane,options.history,options.memory,options.timezone,options.trace))throw new Error("Memory graph is no longer ready; original context preserved.");
       return;
     }
     if(lane.memoryRebase&&!options.memory)throw new Error("Memory history rebuild requires the current graph.");

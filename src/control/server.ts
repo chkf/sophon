@@ -14,6 +14,7 @@ interface ControlOptions {
   tunnelReady?: boolean;
   data: ControlData;
   traces: TaskTraceStore;
+  calls?: TaskTraceStore;
   host: HostMonitor;
   heartbeat: () => Promise<Record<string, unknown>>;
   mutate: <T>(work: () => Promise<T> | T) => Promise<T>;
@@ -204,11 +205,25 @@ export class ControlCenter {
         case "recent-save": data = await mutate(() => this.options.data.saveRecent(input as never)); break;
         case "recent-archive": data = await mutate(() => this.options.data.archiveRecent(input as never)); break;
         case "recent-delete": data = await mutate(() => this.options.data.deleteRecent(input as never)); break;
+        case "graph-prompts": data = this.options.data.memory.prompts(); break;
+        case "graph-prompt-save": data = await mutate(() => this.options.data.memory.savePrompt(input)); break;
+        case "graph-topic-save": data = await mutate(() => this.options.data.memory.saveTopic(input)); break;
+        case "graph-node-save": data = await mutate(() => this.options.data.memory.saveNode(input)); break;
         case "graph": data = this.options.data.memory.overview(); break;
         case "graph-topics": data = this.options.data.memory.topics(input); break;
         case "graph-nodes": data = this.options.data.memory.nodes(input); break;
         case "graph-node": data = await this.options.data.memory.node(input); break;
-        case "context": data = await this.options.data.context(); break;
+        case "context": {
+          const snapshot = this.options.data.context();
+          const calls = this.options.calls?.list({limit:20}).runs ?? [];
+          data = {...snapshot,calls}; break;
+        }
+        case "call": {
+          if (typeof input.id !== "string" || !/^tr_\d{13}_[a-f0-9-]{36}$/.test(input.id)) throw new HttpError(400,"invalid_call","调用标识无效。");
+          data = this.options.calls?.get(input.id);
+          if (!data) throw new HttpError(404,"call_not_found","调用记录不存在或已超过保留期限。");
+          break;
+        }
         case "tasks": {
           if (input.limit !== undefined && (typeof input.limit !== "number" || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100)) {
             throw new HttpError(400, "invalid_page", "任务分页数量必须为 1–100。");
@@ -216,7 +231,7 @@ export class ControlCenter {
           if (input.before !== undefined && (typeof input.before !== "string" || !/^tr_\d{13}_[a-f0-9-]{36}$/.test(input.before))) {
             throw new HttpError(400, "invalid_cursor", "任务分页游标无效。");
           }
-          data = { ...this.options.traces.list(input as never), heartbeat: await this.options.heartbeat() }; break;
+          data = { ...this.options.traces.list(input as never), retentionDay:this.options.traces.retentionDay(), heartbeat: await this.options.heartbeat() }; break;
         }
         case "task": {
           if (typeof input.id !== "string" || input.id.length > 160) throw new HttpError(400, "invalid_task", "任务标识无效。");

@@ -131,6 +131,8 @@ export class ControlData {
     this.db = openDatabase(mainPath(rootDir), true);
     try {
       if (schemaVersion(this.db) !== 2) throw new ControlDataError("unsupported_schema", 409, "控制中心需要现有六表数据库，不会自动迁移。");
+      this.db.close();
+      this.db = openDatabase(mainPath(rootDir));
       this.sessions = options.sessions ?? new SessionStore(rootDir);
       this.knowledge = options.knowledge ?? new LocalKnowledgeStore(rootDir, "formal");
     } catch (error) { this.db.close(); throw error; }
@@ -388,6 +390,9 @@ export class ControlData {
       'sessionId',json_extract(value,'$.sessionId'),'startedAt',json_extract(value,'$.startedAt'),
       'lastCompactedAt',json_extract(value,'$.lastCompactedAt'),'historyCursor',json_extract(value,'$.historyCursor'),
       'coverageVerified',json_extract(value,'$.coverageVerified'),
+      'memoryRebase',json_object('version',json_extract(value,'$.memoryRebase.version'),'at',json_extract(value,'$.memoryRebase.at'),
+        'fromSeq',json_extract(value,'$.memoryRebase.fromSeq'),'throughSeq',json_extract(value,'$.memoryRebase.throughSeq'),
+        'windowDate',json_extract(value,'$.memoryRebase.windowDate'),'timezone',json_extract(value,'$.memoryRebase.timezone')),
       'hasContextItems',json_type(value,'$.contextItems')='array',
       'pendingDelivery',json_type(value,'$.pendingDeliveryId')='text' OR json_type(value,'$.pendingDeliveryItems')='array',
       'checkpoint',json_object('id',json_extract(value,'$.checkpoint.id'),'at',json_extract(value,'$.checkpoint.at'),
@@ -404,13 +409,21 @@ export class ControlData {
       const sessionId = typeof raw.sessionId === "string" && raw.sessionId.length <= 512 ? raw.sessionId : null;
       const canonical = sessionId ? "runtime/context/" + createHash("sha256").update(sessionId).digest("hex") + ".json" : null;
       const cp = record(raw.checkpoint) ? raw.checkpoint : null;
+      const checkpoint = cp && typeof cp.id === "string" && /^[a-f0-9]{64}$/.test(cp.id) && optionalInstant(cp.at) &&
+        ["capacity", "seven_days"].includes(cp.reason as string) && safeInteger(cp.coveredThroughSeq) !== null
+        ? { id: cp.id, at: cp.at as string, reason: cp.reason as string, coveredThroughSeq: cp.coveredThroughSeq as number } : null;
+      const mr = record(raw.memoryRebase) ? raw.memoryRebase : null;
+      const memoryRebase = mr?.version === 1 && optionalInstant(mr.at) && safeInteger(mr.fromSeq) !== null &&
+        safeInteger(mr.throughSeq) !== null && Number(mr.throughSeq) >= Number(mr.fromSeq)
+        ? {at:mr.at as string,fromSeq:mr.fromSeq as number,throughSeq:mr.throughSeq as number,
+          windowDate:typeof mr.windowDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(mr.windowDate) ? mr.windowDate : null,
+          timezone:typeof mr.timezone === "string" ? mr.timezone.slice(0,100) : null} : null;
       return [{ id: row.key.slice("runtime/context/".length, -5), sessionId, model: raw.model.slice(0, 200),
-        updatedAt: row.updated_at, startedAt: optionalInstant(raw.startedAt), lastCompactedAt: optionalInstant(raw.lastCompactedAt),
+        updatedAt: row.updated_at, startedAt: optionalInstant(raw.startedAt), lastCompactedAt: checkpoint?.at ?? null,
+        memoryRebase, legacyMaintenanceAt: !checkpoint && !memoryRebase ? optionalInstant(raw.lastCompactedAt) : null,
         historyCursor: safeInteger(raw.historyCursor), coverageVerified: raw.coverageVerified === 1 ? true : raw.coverageVerified === 0 ? false : null,
         pendingDelivery: raw.pendingDelivery === 1, archived: canonical !== null && canonical !== row.key,
-        checkpoint: cp && typeof cp.id === "string" && /^[a-f0-9]{64}$/.test(cp.id) && optionalInstant(cp.at) &&
-          ["capacity", "seven_days"].includes(cp.reason as string) && safeInteger(cp.coveredThroughSeq) !== null
-          ? { id: cp.id, at: cp.at as string, reason: cp.reason as string, coveredThroughSeq: cp.coveredThroughSeq as number } : null }];
+        checkpoint }];
     });
     const lastRequest = readContextObservation(this.db);
     return { available: snapshot?.available === true, loadedAt: snapshot?.loadedAt ?? null,
@@ -423,6 +436,6 @@ export class ControlData {
       lastRequest,
       usage: { supported: lastRequest?.usage !== null && lastRequest?.usage !== undefined,
         note: "数值来自正式会话中最近一次真实模型调用；未回报字段保持未知，不代表当前窗口总量或整轮累计。" },
-      note: "本地内容是最近一次组装的快照，修改后会在后续请求使用。检查点只展示已保存的恢复元数据，不代表完整模型上下文；压缩内容不可直接阅读。" };
+      note: "提示词与各来源注入内容在完整调用流程中查看。会话存档显示记忆图重建时间与三日窗口；系统不再发起上下文压缩。" };
   }
 }

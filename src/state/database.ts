@@ -27,7 +27,7 @@ export class StateError extends Error {
 export const CORE_KEY = "core/core.md";
 export const MAIN_DATABASE = "sessions/gateway.sqlite";
 export const DOCUMENTS = [CORE_KEY, "runtime/persona.json", "runtime/expression.json", "runtime/provider.json", "runtime/model.json",
-  "runtime/api-model.json", "runtime/memory-model.json", "runtime/openrouter-model.json", "runtime/openrouter-images.json", "voice/settings.json",
+  "runtime/api-model.json", "runtime/memory-model.json", "runtime/memory-prompts.json", "runtime/openrouter-model.json", "runtime/openrouter-images.json", "voice/settings.json",
   "channels/active.json", "channels/telegram.json", "heartbeat/state.json",
   "runtime/media-exploration-v3-state.json"];
 const dynamicDocument = /^(?:runtime\/(?:context|provider\.json\.deliveries|api-turns|openrouter-turns|openrouter-image-turns)|media\/exploration-drafts)\/[a-f0-9]{64}\.json(?:\.[a-f0-9-]+\.legacy-recovery)?$/;
@@ -95,7 +95,7 @@ export function stateCategory(key: string): StateCategory {
   if (key.startsWith("system/") || key === RECENT_DELETED_KEY || key === ILINK_RECEIPT_KEY) return "metadata";
   if (key === VOICE_STATUS_KEY) return "diagnostic";
   if (key.startsWith("channels/")) return "channel";
-  if (["runtime/expression.json", "runtime/provider.json", "runtime/model.json", "runtime/api-model.json", "runtime/memory-model.json", "runtime/openrouter-model.json", "runtime/openrouter-images.json", "voice/settings.json"].includes(key)) return "settings";
+  if (["runtime/expression.json", "runtime/provider.json", "runtime/model.json", "runtime/api-model.json", "runtime/memory-model.json", "runtime/memory-prompts.json", "runtime/openrouter-model.json", "runtime/openrouter-images.json", "voice/settings.json"].includes(key)) return "settings";
   return "runtime";
 }
 export function getState(db: DatabaseSync, key: string): StateRow | undefined {

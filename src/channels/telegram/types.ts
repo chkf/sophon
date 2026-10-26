@@ -74,6 +74,7 @@ export interface TelegramApiClient {
 }
 
 export interface TelegramAdapterConfig {
+  temporaryReply?: (message:InboundMessage, session:import("../../runtime/types.js").TemporaryConversation)=>Promise<import("../reply.js").ReplyOutcome>;
   token: string;
   ownerId: string;
   stickerIds?: string[];

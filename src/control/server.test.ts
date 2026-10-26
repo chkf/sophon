@@ -223,3 +223,15 @@ test("temporary URL changes revoke sessions and codes and enforce the new Host a
   assert.doesNotMatch(control.loginMessage(), /synthetic-internal-detail/);
   assert.equal((await post("session")).status, 503);
 }, undefined, true));
+
+test('graph prompt writes require owner session and CSRF and enforce revision conflicts',()=>fixture(async({control,post})=>{
+ assert.equal((await post('graph-prompt-save',{id:'digest',expectedRevision:0,content:'合成提示词'})).status,401);
+ const login=await post('login',{code:control.auth.issueCode()});const cookie=login.headers.get('set-cookie')!.split(';')[0];
+ const csrf=(await login.json()).data.csrfToken;
+ assert.equal((await post('graph-prompt-save',{id:'digest',expectedRevision:0,content:'合成提示词'},{cookie})).status,403);
+ const headers={cookie,'x-control-csrf':csrf};const read=await post('graph-prompts',{},headers);assert.equal(read.status,200);
+ const revision=(await read.json()).data.revision;
+ assert.equal((await post('graph-prompt-save',{id:'digest',expectedRevision:revision,content:'输出带引用的合成摘要。'},headers)).status,200);
+ assert.equal((await post('graph-prompt-save',{id:'digest',expectedRevision:revision,reset:true},headers)).status,409);
+ assert.equal((await post('graph-prompt-save',{id:'digest',expectedRevision:revision+1,reset:true},headers)).status,200);
+}));

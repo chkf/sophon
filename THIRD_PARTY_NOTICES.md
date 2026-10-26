@@ -4,6 +4,7 @@ The MIT license in this repository covers its framework source. Dependencies and
 
 | Direct dependency | Locked version | License |
 | --- | --- | --- |
+| @modelcontextprotocol/sdk | 1.32.2 | MIT |
 | openai | 7.31.0 | Apache-2.0 |
 | qrcode | 1.5.4 | MIT |
 | silk-wasm | 3.7.1 | MIT |

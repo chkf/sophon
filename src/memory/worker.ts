@@ -4,7 +4,7 @@ import { MemoryRecent } from './recent.js';
 import { prepareLongTurn } from './long-turn.js';
 import { jsonObject } from './tasks.js';
 import type { ChatRuntime } from '../runtime/types.js';
-import { classificationInput } from './classifier.js';
+import { advanceBranches, branchClassificationInput, classificationInput, finishClassification, selectRoots, topicDirectoryHash, type BranchFocus } from './classifier.js';
 import { MemoryStore } from './store.js';
 import { MemoryError, parseClassification } from './validation.js';
 import { isSubscriptionUsageLimitError } from '../runtime/retry-policy.js';
@@ -47,10 +47,31 @@ export class MemoryWorker {
         const turn=this.store.collect(job.assistant_rowid),revision=this.store.revision();
         const prepared=await prepareLongTurn(this.store,job,turn,this.runtime);
         if(!prepared.ready){this.store.yield(job);return;}
-        const input=classificationInput(turn,this.store.topics(),revision,prepared.digest);
-        const output=await this.runtime.classifyMemory(input);
-        this.runtimeState=undefined;
-        const classification=parseClassification(output);
+        const topics=this.store.topics(),directoryHash=topicDirectoryHash(topics);
+        const progress=(this.store.progress(job,turn.fingerprint)??{}) as Record<string,unknown>;
+        const route=progress.classificationRoute as {version?:number;directoryHash?:string;result?:unknown;focus?:BranchFocus[]}|undefined;
+        let classification;
+        if(route?.version===1&&route.directoryHash===directoryHash){
+          const selection=selectRoots(parseClassification(JSON.stringify(route.result),'roots'),topics);
+          const step=branchClassificationInput(turn,topics,revision,prepared.digest,selection,route.focus);
+          classification=parseClassification(await this.runtime.classifyMemory(step.input));
+          this.runtimeState=undefined;
+          if(step.descend&&classification.decision==='STORE'){
+            const focus=advanceBranches(classification,topics,selection,step.focus);
+            this.store.saveProgress(job,turn.fingerprint,{...progress,classificationRoute:{...route,focus}});
+            this.store.yield(job);return;
+          }
+          classification=finishClassification(classification,topics,selection,step.focus);
+        }else{
+          const input=classificationInput(turn,topics,revision,prepared.digest);
+          classification=parseClassification(await this.runtime.classifyMemory(input),'roots');
+          this.runtimeState=undefined;
+          if(classification.decision==='STORE'){
+            selectRoots(classification,topics);
+            this.store.saveProgress(job,turn.fingerprint,{...progress,classificationRoute:{version:1,directoryHash,result:classification}});
+            this.store.yield(job);return;
+          }
+        }
         // Optional reinforcement never blocks recording a delivered turn when unavailable.
         let evidence:unknown;
         if(!isBackfillJob(this.store,job)&&this.canStart()&&this.runtime.runMemoryTask){

@@ -7,7 +7,6 @@ import { GatewayService, type GatewayShutdownReason } from "./service.js";
 import { LocalCoreContextProvider } from "./core/context.js";
 import { SessionStore } from "./sessions/store.js";
 import { renderLocalPolicy, renderLocalData } from "./core/render.js";
-import { LOCAL_CONTEXT_TOOLS } from "./core/tools.js";
 import { LOCAL_KNOWLEDGE_TOOLS } from "./knowledge/tools.js";
 import { initializeGateway } from "./setup.js";
 import { exportCore, importCore } from "./state/migration.js";
@@ -132,7 +131,7 @@ async function main(): Promise<void> {
     let original;
     try { original = config.telegram ? await sessions!.get("telegram", config.telegram.ownerId) : undefined; }
     finally { sessions?.close(); }
-    const tools = [...LOCAL_CONTEXT_TOOLS, ...LOCAL_KNOWLEDGE_TOOLS];
+    const tools = [...LOCAL_KNOWLEDGE_TOOLS];
     const diagnosticPrompt = "仅做连通性诊断：请精确回复 diagnostic-ready，不调用工具。";
     const contextual = {
       instructions: renderLocalPolicy(snapshot),

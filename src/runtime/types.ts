@@ -88,6 +88,7 @@ export type ChatInput = { text: string; messages?: ChatMessage[] } | { text?: st
 export type ChatRequest = ChatInput & {
   /** Optional local observability; never serialized to providers. */
   trace?: import("../observability/types.js").RuntimeTraceObserver;
+  contextSources?: Array<Omit<import("../observability/types.js").ContextSource, "content">>;
   purpose: RequestPurpose;
   memory?: MemoryRuntimeContext;
   memoryTask?: import("../memory/tasks.js").MemoryTask;
@@ -107,6 +108,8 @@ export type ChatRequest = ChatInput & {
   stateful?: boolean;
   /** Skip all provider conversation checkpoint writes for an in-memory test turn. */
   ephemeral?: boolean;
+  /** Normal tools in a nonpersistent conversation, distinct from diagnostic tests. */
+  temporaryMode?: boolean;
   /** Ephemeral-only transport route. Never changes persistent provider or model settings. */
   testProvider?: ProviderId;
   testModel?: string;
@@ -186,7 +189,7 @@ export interface ChatRuntime {
   selectMemoryModel?(model: string): Promise<string>;
   reply(request: ChatRequest): Promise<ChatResponse>;
   /** Local due check, then tool-free maintenance of the selected formal SIWC lane. */
-  maintainContext?(request: ContextMaintenanceRequest): Promise<{ compacted: boolean; skipped?: string }>;
+  maintainContext?(request: ContextMaintenanceRequest): Promise<{ compacted: boolean; rebuilt?: boolean; skipped?: string }>;
   commitSession?(sessionId: string, deliveredText: string, deliveryId?: string): Promise<void | boolean>;
   editHistory?(sessionId: string, work: () => Promise<void>): Promise<void>;
   resetSession?(sessionId: string, deliveryId?: string): Promise<void | boolean>;
@@ -238,3 +241,6 @@ export interface ManagedChatRuntime extends ChatRuntime, RuntimeAuth, ModelCatal
 }
 export type CommandRuntime = ModelCatalog & Pick<ChatRuntime, "listMemoryModels" | "getMemoryModel" | "selectMemoryModel"> & Partial<ProviderControl> & Partial<ImageControl>;
 export type ControlRuntime = ModelCatalog & Pick<RuntimeAuth, "getSession"> & Partial<ProviderControl> & Partial<UsageReader>;
+
+/** Channel-owned RAM context; never serialize this object into channel state. */
+export interface TemporaryConversation { id: string; messages: ChatMessage[]; pendingInput?: ChatMessage }

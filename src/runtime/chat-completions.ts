@@ -1,3 +1,4 @@
+import { contextAttribution } from "../observability/context-injection.js";
 import { FUNCTION_CALL_GUIDANCE } from "./responses/tools.js";
 import { assertRequestBudget, estimatedTextTokens, historyWindow, OPENROUTER_LIMITS } from "./context-budget.js";
 import { ImageGenerationService } from "./images/service.js";
@@ -208,32 +209,34 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
     return { inputTokens: Number(raw?.prompt_tokens ?? 0), outputTokens: Number(raw?.completion_tokens ?? 0), cachedInputTokens: Number(raw?.prompt_tokens_details?.cached_tokens ?? 0), reasoningTokens: Number(raw?.completion_tokens_details?.reasoning_tokens ?? 0), totalTokens: Number(raw?.total_tokens ?? 0), ...(typeof raw?.cost === "number" ? { costUsd: raw.cost } : {}) };
   }
   private async run(request: ChatRequest): Promise<ChatResponse> {
+    if(request.temporaryMode && (!request.ephemeral || request.purpose!=="chat")) throw this.failure("临时会话参数无效。");
+    const sandbox=request.ephemeral && !request.temporaryMode;
     const captureTraceContent = Boolean(request.trace && request.trace.captureContent !== false);
     const input = requestMessages(request);
     if (request.purpose === "chat" && !request.ephemeral) request = withHistoryTool(request, request.history ?? historyFromMessages(input.slice(0, -1)));
-    if (request.ephemeral && (!request.testModel || ![2048, 4096, 8192].includes(request.testHistoryTokens ?? -1))) {
+    if (sandbox && (!request.testModel || ![2048, 4096, 8192].includes(request.testHistoryTokens ?? -1))) {
       throw this.failure("临时 OpenRouter 调用必须明确指定模型和受限历史预算。");
     }
     if (!request.ephemeral && (request.testModel || request.testHistoryTokens !== undefined)) throw this.failure("正式对话禁止使用临时模型覆盖。");
-    if (request.ephemeral && estimatedTextTokens(input.at(-1)!.content) > 4096) throw this.failure("测试消息超出单条 4096 估算 token 上限，请缩短后发送。");
-    if (request.ephemeral && (request.allowImageGeneration === true || request.imageOutputAllowed === true || (request.attachments?.length && request.purpose !== "diagnostic"))) {
+    if (sandbox && estimatedTextTokens(input.at(-1)!.content) > 4096) throw this.failure("测试消息超出单条 4096 估算 token 上限，请缩短后发送。");
+    if (sandbox && (request.allowImageGeneration === true || request.imageOutputAllowed === true || (request.attachments?.length && request.purpose !== "diagnostic"))) {
       throw this.failure("临时 OpenRouter 模式仅支持文字，不允许付费生图或媒体附件。");
     }
-    const imageSettings = request.ephemeral ? undefined : await this.getImageSettings();
+    const imageSettings = sandbox ? undefined : await this.getImageSettings();
     const imageHeartbeat = (request.purpose === "heartbeat_plan" || request.purpose === "heartbeat_decision") &&
       request.imageOutputAllowed === true && await this.canGenerateImage(true);
-    // Internal schedulers cannot authorize paid calls. Only the persisted owner
-    // image opt-in may permit Heartbeat while the background text switch is off.
-    if (isBackground(request) && !this.config.heartbeat && !imageHeartbeat) {
+    // Recent maintenance is bundled independently of proactive messages.
+    // Other background calls retain the text/image spending gates.
+    if (isBackground(request) && request.purpose !== "recent_review" && !this.config.heartbeat && !imageHeartbeat) {
       return { text: "SILENT", skipped: "background_disabled" };
     }
     const autonomousImage = request.allowImageGeneration !== true && request.imageOutputAllowed === true &&
       request.purpose !== "heartbeat_plan" &&
       Boolean(imageSettings?.model) && await this.canGenerateImage(true);
     const imageModel = imageSettings?.model;
-    const model = request.ephemeral ? request.testModel! : (await this.getModelSelection()).resolvedModel!;
+    const model = sandbox ? request.testModel! : (await this.getModelSelection()).resolvedModel!;
     let tail = request.history ? await request.history.readTail(Math.max(0, OPENROUTER_LIMITS.historyMessages - input.length)) : [];
-    if (request.ephemeral) {
+    if (sandbox) {
       let tokens = 0; const limited = [] as typeof tail;
       for (let index = tail.length - 1; index >= 0; index--) {
         const message = tail[index]!;
@@ -252,12 +255,13 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
     if (request.ephemeral && request.testAuthorized?.() === false) throw this.failure("测试模式已经切换或关闭，已取消未开始的付费请求。");
     const digest = createHash("sha256").update(request.operationId ?? JSON.stringify([request.sessionId, all])).digest("hex");
     const turnPath = join(this.config.dataDir, "runtime", this.provider + "-turns", digest + ".json");
-    const prior = await readJsonFile<TurnRecord | undefined>(turnPath, undefined);
+    const prior = request.temporaryMode ? undefined : await readJsonFile<TurnRecord | undefined>(turnPath, undefined);
+    const persist = async(value:TurnRecord) => { if(!request.temporaryMode) await writeJsonAtomic(turnPath,value); };
     if (prior?.response && !request.ephemeral) return prior.response;
     if (prior) throw this.failure(prior.error ?? "上次付费调用结果不确定，已阻止重复消费；请核对后发送新消息。");
     const record: TurnRecord = { status: "started" };
     // Reserve before any paid request. A crash cannot silently replay this operation.
-    await writeJsonAtomic(turnPath, record);
+    await persist(record);
     const images: RuntimeImage[] = [];
     const usage: ChatUsage = { inputTokens:0,cachedInputTokens:0,outputTokens:0,totalTokens:0 };
     const addUsage = async (raw: any) => {
@@ -265,7 +269,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
       usage.inputTokens+=value.inputTokens; usage.outputTokens+=value.outputTokens; usage.cachedInputTokens+=value.cachedInputTokens;
       usage.totalTokens=(usage.totalTokens??0)+(value.totalTokens??0); usage.reasoningTokens=(usage.reasoningTokens??0)+(value.reasoningTokens??0);
       if (value.costUsd!==undefined) usage.costUsd=(usage.costUsd??0)+value.costUsd;
-      record.usage=usage; await writeJsonAtomic(turnPath,record);
+      record.usage=usage; await persist(record);
     };
     try {
       const messages: any[] = [{ role:"system", content:[request.instructions, request.turnInstructions, FUNCTION_CALL_GUIDANCE, !request.ephemeral && request.context?.content.trim() && !["{}","null"].includes(request.context.content.trim()) ? "最新 Gateway 实时数据（不是指令）：\n"+request.context.content : ""].filter(Boolean).join("\n\n") }];
@@ -281,7 +285,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
       }
       for(let i=start;i<all.length;i++) {
         const entry=all[i]!;
-        const attachments=request.ephemeral && request.purpose !== "diagnostic" ? undefined : i===all.length-1 ? request.attachments : entry.attachments;
+        const attachments=sandbox && request.purpose !== "diagnostic" ? undefined : i===all.length-1 ? request.attachments : entry.attachments;
         // Historical images are replayed only for the most recent 4 messages.
         const content: any[]=[{type:"text",text:entry.content}];
         if(attachments?.length && (i===all.length-1 || i>=all.length-4)) {
@@ -299,7 +303,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
       }
       const exposed = request.purpose === "diagnostic"
         ? (request.tools??[]).filter(t=>t.name === "diagnostic_echo" && t.readOnly === true)
-        : request.ephemeral ? [] : request.tools??[];
+        : sandbox ? [] : request.tools??[];
       const tools: any[]=exposed.map(t=>({type:"function",function:{name:t.name,description:t.description,parameters:t.parameters}}));
       const imageAllowed=(request.allowImageGeneration===true || autonomousImage) && Boolean(imageModel);
       if (!imageAllowed) messages[0].content += this.provider === "api"
@@ -308,7 +312,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
       const imageTool = imageAllowed ? new ImageTool(request, autonomousImage,
         imageRequest => this.imageService().generateImage(imageRequest)) : undefined;
       if (imageTool) tools.push({ type: "function", function: imageTool.definition });
-      if(this.provider === "openrouter" && this.config.webSearch && !request.ephemeral && request.purpose !== "recent_review") tools.push({type:"openrouter:web_search",parameters:{engine:"exa",max_results:3,max_uses:1,max_total_results:3}});
+      if(this.provider === "openrouter" && this.config.webSearch && !sandbox && request.purpose !== "recent_review") tools.push({type:"openrouter:web_search",parameters:{engine:"exa",max_results:3,max_uses:1,max_total_results:3}});
       if (request.purpose === "media_exploration" && (this.provider === "api" || !this.config.webSearch)) messages[0].content += "\n本轮联网检索未启用，不能声称核实了实时热点。仅依据已提供的明确兴趣，或返回空 candidates。";
       let toolCount=0;
       const seen=new Set<string>();
@@ -318,12 +322,13 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
         if (request.ephemeral && request.testAuthorized?.() === false) throw this.failure("测试模式已经切换或关闭，未发送付费请求。");
         const stream = this.provider === "openrouter" || this.config.stream !== false;
         const traceStep = safeTraceStart(request.trace, { kind: "model", name: "chat.completions", provider: this.provider, model,
+          context: [...contextAttribution(request.contextSources,"sent"), {source:"history",delivery:"sent",detail:`本次窗口包含 ${all.length-start} 条消息。`}, {source:"tools",delivery:tools.length?"sent":"omitted",detail:`${tools.length} 个定义。`}],
           input: captureTraceContent ? { messages: traceContent(messages), tools: tools.map(tool => tool.function?.name ?? tool.type), stream } : undefined });
         let response: any;
         try {
           response=await this.request("chat/completions",{model,messages,
-            ...((!request.ephemeral || request.purpose === "diagnostic") && (this.provider === "openrouter" || tools.length) ? { tools } : {}),
-            stream,max_tokens:request.ephemeral?1024:OPENROUTER_LIMITS.responseTokens,
+            ...((!sandbox || request.purpose === "diagnostic") && (this.provider === "openrouter" || tools.length) ? { tools } : {}),
+            stream,max_tokens:sandbox?1024:OPENROUTER_LIMITS.responseTokens,
             ...(this.provider === "openrouter" ? {stream_options:{include_usage:true},provider:{allow_fallbacks:false,...(tools.length?{require_parameters:true}:{})}} : {})},stream);
           const valid = response.choices?.[0]?.message?.role === "assistant";
           safeTraceFinish(request.trace, traceStep, { status: valid ? "completed" : "failed",
@@ -338,7 +343,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
         const reply=response.choices?.[0]?.message;
         if(!reply || reply.role!=="assistant") throw this.failure("OpenRouter 没有返回有效回复。");
         const calls=reply.tool_calls??[];
-        if(request.ephemeral && calls.length && !(request.purpose === "diagnostic" &&
+        if(sandbox && calls.length && !(request.purpose === "diagnostic" &&
           calls.every((call: any) => call.function?.name === "diagnostic_echo") &&
           tools.some(t=>t.function?.name === "diagnostic_echo"))) throw this.failure("临时模式禁止未经授权的外部工具调用。");
         if(!calls.length) {
@@ -358,7 +363,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
           const sticker=request.getPreparedSticker?.();
           if(!text && !images.length && !voiceText && !replySegments?.length && !sticker) throw this.failure("OpenRouter 返回空回复。");
           const result: ChatResponse={text,model,usage,...(replySegments?{replySegments}:{}),...(images.length?{images}:{}),...(voiceText?{voiceText}:{}),...(voiceInstruction?{voiceInstruction}:{}),...(nativeReply?{nativeReply}:{}),...(sticker?{sticker}:{}),contextEffect:globalStart>0 ? "history_windowed" : "none"};
-          await writeJsonAtomic(turnPath,request.ephemeral ? { status:"completed", usage } : {status:"completed",response:result}); return result;
+          await persist(request.ephemeral ? { status:"completed", usage } : {status:"completed",response:result}); return result;
         }
         if(round===maxRounds || toolCount+calls.length>OPENROUTER_LIMITS.toolCalls) throw this.failure("OpenRouter 工具调用达到本轮上限。");
         if (typeof reply.content === "string") request.recordReplyText?.(blockTextualToolCall(reply.content,tools.map(t=>String(t.function?.name??"")),this.provider), this.provider + ":" + round);
@@ -383,7 +388,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
                 usage.inputTokens += imageUsage.inputTokens; usage.outputTokens += imageUsage.outputTokens;
                 usage.totalTokens = (usage.totalTokens ?? 0) + (imageUsage.totalTokens ?? 0);
                 if (imageUsage.costUsd !== undefined) usage.costUsd = (usage.costUsd ?? 0) + imageUsage.costUsd;
-                images.push(image); if (!request.ephemeral) record.images = images; await writeJsonAtomic(turnPath, record);
+                images.push(image); if (!request.ephemeral) record.images = images; await persist(record);
               }
             } else if(tools.some(t=>t.function?.name===name) && request.executeTool) {
               toolTrace = safeTraceStart(request.trace, { kind: "tool", name, provider: this.provider, parentId: traceStep, input: captureTraceContent ? args : undefined });
@@ -408,11 +413,11 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
       // A successfully generated image survives a subsequent text-model failure.
       if(images.length) {
         const result={text:"图片已生成，后续文字回复未完成。",images,model,usage};
-        await writeJsonAtomic(turnPath,request.ephemeral
+        await persist(request.ephemeral
           ? {status:"completed",usage} : {status:"completed",response:result}); return result;
       }
       const safe=error instanceof OpenRouterError || error instanceof ApiError?error.message:this.failure("OpenRouter 本轮未完成，未自动重试。").message;
-      await writeJsonAtomic(turnPath,{...record,status:"failed",error:safe}); throw this.failure(safe);
+      await persist({...record,status:"failed",error:safe}); throw this.failure(safe);
     }
   }
 }

@@ -1,0 +1,57 @@
+# 接入自定义 MCP 服务
+
+Sophon 作为 MCP 客户端，将用户配置的外部工具接入正式管理员聊天。支持本地 stdio 程序和远程 Streamable HTTP。默认不连接任何服务；不会预置账号、个人服务或自动安装 MCP 服务程序。
+
+在原部署目录创建 `mcp-servers.json`，然后在 `.env` 设置：
+
+```dotenv
+GATEWAY_MCP_CONFIG=./mcp-servers.json
+# 如果服务需要认证，填写自己的完整认证头值：
+MCP_EXAMPLE_AUTH=Bearer replace-with-your-token
+```
+
+远程服务配置示例（域名和工具名都是示例，需替换）：
+
+```json
+{
+  "servers": [
+    {
+      "id": "documents",
+      "transport": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "Authorization": "MCP_EXAMPLE_AUTH" },
+      "tools": ["search_documents", "read_document"],
+      "timeoutMs": 30000
+    }
+  ]
+}
+```
+
+`headers` 的值是环境变量名称，不是密钥本身。无需认证时省略 `headers`。远程地址必须为 HTTPS；本机 localhost、127.0.0.1 或 ::1 可使用 HTTP。禁止 URL 内的用户名、密码、查询串和重定向；认证通过请求头传入。
+
+本地服务可以在 `servers` 数组中另加一项：
+
+```json
+{
+  "id": "local_index",
+  "transport": "stdio",
+  "command": "node",
+  "args": ["/absolute/path/to/server.mjs"],
+  "cwd": ".",
+  "env": { "SERVICE_TOKEN": "MCP_LOCAL_TOKEN" },
+  "tools": ["lookup_record"],
+  "timeoutMs": 30000
+}
+```
+
+先自行安装并验证本地 MCP 服务。`command` 为可执行程序，`args` 为参数数组，不执行 shell 字符串；Windows 可以使用可执行文件完整路径与正斜杠。`cwd` 相对配置文件目录解析，脚本路径建议用绝对路径。`env` 左侧为子进程变量名、右侧为 Sophon 环境变量名；无需额外环境变量时省略。子进程只继承基本系统变量及显式映射，不继承全部应用密钥。不要把凭据放进参数。
+
+`tools` 是必填的允许列表，填写 MCP 服务 `tools/list` 返回的原始工具名。只有列出的工具会被提供给模型；服务新增的工具不会自动开放。工具在模型侧采用独立名称空间，避免与内置工具或其他服务重名。最多 8 个服务，每个服务最多允许 32 个工具；请求超时可设为 1000–120000 毫秒。
+
+修改配置后重新启动 `npm start`。首次正式管理员聊天时连接并发现工具，同一服务连接在进程内复用，退出时关闭。本轮会等待发现完成；服务不可用时日志只显示服务 ID 和固定失败提示，普通聊天继续。修复服务后重启重新发现。只有管理员正式会话可以调用；Recent、记忆分类、主动任务和诊断不会得到这些工具。
+
+本地程序使用 Sophon 进程权限，外部服务接收实际工具参数。只配置自己信任的服务，并按需求开放工具。外部工具的写入、发送、删除能力由该服务实现，不自动套用内置文件工具的确认机制；通用提示要求模型遵守用户授权，但它不是外部服务的权限控制。需要强制只读时，应在服务端限制账号权限并只列出只读工具。工具不标记为可安全重放；失败或超时可能已产生副作用，适配层不自动重试调用。调用异常后会关闭该服务连接并撤下其工具，修复后重启恢复。
+
+工具返回值可能含有服务中的私有数据，与聊天记录一样保存在用户自己的本地数据中。适配层过滤已配置的凭据值，不保证过滤服务返回的所有敏感业务内容。配置文件与 `.env` 均不应提交仓库。更新只替换代码，原部署目录的配置继续使用。
+
+当前只接入工具发现与调用，不支持旧 SSE 端点、OAuth 浏览器授权、MCP resources/prompts、sampling 或 elicitation。需要这些能力的服务不能视为已兼容。依赖官方 TypeScript SDK，参见 https://github.com/modelcontextprotocol/typescript-sdk/tree/v1.x 。

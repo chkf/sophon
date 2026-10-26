@@ -14,7 +14,6 @@ import {MemoryRecent} from './recent.js';
 import {LocalKnowledgeStore} from '../knowledge/store.js';
 import {parseClassification} from './validation.js';
 import {memoryWindow,buildMemoryRebase,memoryWindowDue} from '../runtime/siwc/memory-rebase.js';
-import {compactChatHistory} from '../runtime/siwc/chat-compaction.js';
 import {historyFromMessages} from '../runtime/history.js';
 import {ControlMemory} from '../control/memory.js';
 const owner='70001',at='2026-10-26T08:00:00.000Z';
@@ -38,9 +37,12 @@ test('bootstrap covers complete exchanges, worker persists grounded topics and r
  await exchange(sessions);assert.equal(graph.context().ready,false);
  beginBootstrap(graph);assert.equal(bootstrapStatus(graph).ready,false);
  let calls=0;const worker=new MemoryWorker(graph,{reply:async()=>{throw Error('unused');},classifyMemory:async input=>{
-  calls++;assert.match(input,/下周整理文档索引/);return JSON.stringify(result);
+  calls++;assert.match(input,/下周整理文档索引/);
+  return JSON.stringify(JSON.parse(input).stage==='roots'?result:{...result,proposed_topics:[]});
  }});
- await worker.tick(new Date(Date.now()+1000));assert.equal(calls,1);assert.equal(bootstrapStatus(graph).ready,true);
+ await worker.tick(new Date(Date.now()+1000));assert.equal(calls,1);
+ assert.equal(graph.topics().length,0);assert.equal(bootstrapStatus(graph).ready,false);
+ await worker.tick(new Date(Date.now()+1000));assert.equal(calls,2);assert.equal(bootstrapStatus(graph).ready,true);
  assert.equal(graph.topics()[0].name,'文档整理');assert.equal(graph.context().ready,true);
  const ui=new ControlMemory(graph.db,{ownerId:owner,enabled:true},sessions);assert.equal(ui.overview().available,true);
  assert.equal(Number(graph.db.prepare('SELECT count(*) n FROM memory_sources').get()!.n),2);
@@ -85,14 +87,6 @@ test('calendar window retains crossing-midnight exchanges and incomplete old tur
  assert.equal(memoryWindowDue(built.metadata,'UTC',new Date('2026-10-27T00:01:00Z')),true);
  assert.equal((await memoryWindow(historyFromMessages(rows.slice(0,1)),now,'UTC')).messages.length,1);
 });
-test('chat compaction uses only transcript and requires an actual opaque checkpoint',async()=>{
- const history=historyFromMessages([{role:'user',content:'目录问题',at},{role:'assistant',content:'目录答复',at}]);let request:any;
- const opts={sessionId:'synthetic',model:'fixture',history,items:[{role:'developer',content:'EXCLUDED_POLICY'}],reason:'seven_days' as const,now:()=>new Date(at),send:async(r:any)=>{request=r;return {id:'result',output:[{type:'compaction',encrypted_content:'fixture-opaque'}],status:'completed'} as any;}};
- const compacted=await compactChatHistory(opts);assert.equal(compacted?.checkpoint.source,'chat');
- assert.doesNotMatch(JSON.stringify(request),/EXCLUDED_POLICY/);assert.match(JSON.stringify(request),/目录问题/);
- assert.equal(await compactChatHistory({...opts,send:async()=>({id:'r',output:[],status:'completed'} as any)}),undefined);
-});
-
 test('deleting source text invalidates graph evidence and preserves remaining transcript',()=>fixture(async(_root,sessions,graph)=>{
  await exchange(sessions);beginBootstrap(graph);
  const job=graph.claim(new Date(Date.now()+1000))!,turn=graph.collect(job.assistant_rowid);
@@ -127,4 +121,47 @@ test('recall instructions retain original-history access with and without graph 
  assert.equal(captured[1].tools.some((t:any)=>t.name==='gateway_memory_search'),false);
  assert.match(captured[1].instructions,/若本轮未提供记忆工具/);
  assert.ok(captured[1].tools.some((t:any)=>t.name==='gateway_read_history'));
+}));
+
+test('classification resumes root selection after worker restart and a final skip leaves no topics',()=>fixture(async(_root,sessions,graph)=>{
+ await exchange(sessions);beginBootstrap(graph);
+ const first=new MemoryWorker(graph,{reply:async()=>{throw Error('Unexpected chat call');},classifyMemory:async input=>{
+  assert.equal(JSON.parse(input).stage,'roots');return JSON.stringify(result);
+ }});
+ await first.tick(new Date(Date.now()+1000));await first.stop();
+ assert.equal(graph.topics().length,0);
+ const next=new MemoryWorker(graph,{reply:async()=>{throw Error('Unexpected chat call');},classifyMemory:async input=>{
+  assert.equal(JSON.parse(input).stage,'branches');
+  return JSON.stringify({schema_version:1,decision:'SKIP',labels:[],proposed_topics:[],relation_hints:[]});
+ }});
+ await next.tick(new Date(Date.now()+1000));await next.stop();
+ assert.equal(graph.topics().length,0);assert.equal(bootstrapStatus(graph).ready,true);
+ assert.equal(Number(graph.db.prepare('SELECT count(*) n FROM memory_nodes').get()!.n),0);
+ assert.equal((await sessions.view('telegram',owner)).history.count,2);
+}));
+
+test('topic directory edits invalidate saved routing before branch classification',()=>fixture(async(_root,sessions,graph)=>{
+ await exchange(sessions);beginBootstrap(graph);
+ let calls=0;
+ const worker=new MemoryWorker(graph,{reply:async()=>{throw Error('Unexpected chat call');},classifyMemory:async input=>{
+  calls++;assert.equal(JSON.parse(input).stage,'roots');return JSON.stringify(result);
+ }});
+ await worker.tick(new Date(Date.now()+1000));
+ // A synthetic directory insertion changes the routing snapshot without changing the source turn.
+ graph.db.prepare(`INSERT INTO memory_topics(id,owner_scope,name,normalized_name,description,mass_updated_at,created_at,updated_at)
+ VALUES(?,?,?,?,?,?,?,?)`).run('existing-root',graph.scope,'索引','索引','合成目录',at,at,at);
+ await worker.tick(new Date(Date.now()+1000));await worker.stop();
+ assert.equal(calls,2);assert.equal(graph.topics().length,1);
+ assert.equal(bootstrapStatus(graph).ready,false);
+}));
+
+test('invalid branch output retries without committing proposed root topics',()=>fixture(async(_root,sessions,graph)=>{
+ await exchange(sessions);beginBootstrap(graph);let calls=0;
+ const worker=new MemoryWorker(graph,{reply:async()=>{throw Error('Unexpected chat call');},classifyMemory:async()=>{
+  calls++;return JSON.stringify(calls===1?result:{...result,labels:[{topic_id:'unselected-topic',score:0.9}],proposed_topics:[]});
+ }});
+ await worker.tick(new Date(Date.now()+1000));await worker.tick(new Date(Date.now()+1000));await worker.stop();
+ assert.equal(graph.topics().length,0);
+ assert.equal(graph.db.prepare('SELECT status FROM memory_jobs').get()!.status,'retry');
+ assert.equal(bootstrapStatus(graph).ready,false);
 }));

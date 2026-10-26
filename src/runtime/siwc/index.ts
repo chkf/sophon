@@ -1,3 +1,4 @@
+import { defaultMemoryPrompt, validateMemoryPrompts, type MemoryPromptId } from "../../memory/prompts.js";
 import { memoryTaskRequest, type MemoryTask } from "../../memory/tasks.js";
 import { classificationRequest, LUNA_MODEL } from "../../memory/classifier.js";
 import { MemoryError } from "../../memory/validation.js";
@@ -50,6 +51,7 @@ async function prepareModelCall<T>(prepare: () => Promise<T>): Promise<T> {
 export class SiwcRuntime implements ManagedChatRuntime {
   private readonly modelStatePath: string;
   private readonly memoryModelPath: string;
+  private readonly memoryPromptsPath: string;
   private readonly statefulResponses: StatefulResponsesBridge;
   private readonly memoryResponses: StatefulResponsesBridge;
 
@@ -60,6 +62,7 @@ export class SiwcRuntime implements ManagedChatRuntime {
     private readonly credentialEncryption: CredentialEncryptionAdapter,
     private readonly preferredModel?: string,
   ) {
+    this.memoryPromptsPath = resolve(dataDir, "runtime", "memory-prompts.json");
     this.memoryModelPath = resolve(dataDir, "runtime", "memory-model.json");
     this.modelStatePath = resolve(dataDir, "runtime", "model.json");
     this.statefulResponses = new StatefulResponsesBridge(dataDir);
@@ -153,16 +156,20 @@ export class SiwcRuntime implements ManagedChatRuntime {
     await writeJsonAtomic(this.memoryModelPath, {model});
     return model;
   }
+  private async memoryPrompt(id: MemoryPromptId): Promise<string> {
+    const settings = validateMemoryPrompts(await readJsonFile(this.memoryPromptsPath, {revision:0,overrides:{}}));
+    return settings.overrides[id] ?? defaultMemoryPrompt(id);
+  }
   async runMemoryTask(task: MemoryTask,input: string): Promise<string> {
-    return (await this.reply(memoryTaskRequest(task,input))).text;
+    return (await this.reply({...memoryTaskRequest(task,input),instructions:await this.memoryPrompt(task)})).text;
   }
   async classifyMemory(input: string): Promise<string> {
-    return (await this.reply(classificationRequest(input))).text;
+    return (await this.reply({...classificationRequest(input),instructions:await this.memoryPrompt("classify")})).text;
   }
 
   async reply(request: ChatRequest): Promise<ChatResponse> {
     const messages = requestMessages(request);
-    if (request.purpose === "chat") request = withHistoryTool(request, request.history ?? historyFromMessages(messages.slice(0, -1)));
+    if (request.purpose === "chat" && !request.temporaryMode) request = withHistoryTool(request, request.history ?? historyFromMessages(messages.slice(0, -1)));
     if (request.purpose === "memory_classify" && (!request.ephemeral || !request.stateful || request.history ||
       request.context || request.memory || request.tools?.length || request.executeTool || request.attachments?.length || request.deferAssistantCommit || request.testModel))
       throw new MemoryError("INVALID_MEMORY_REQUEST");
@@ -193,7 +200,7 @@ export class SiwcRuntime implements ManagedChatRuntime {
       const result = await responseBridge.reply({
         ...(request.memory && request.purpose === "chat" && !request.ephemeral ? {memory:request.memory} : {}),
         ...(["recent_review", "memory_classify"].includes(request.purpose) ? { webSearchAllowed: false } : {}),
-        ...(request.trace ? { trace: request.trace } : {}),
+        ...(request.trace ? { trace: request.trace, contextSources: request.contextSources } : {}),
         accessToken,
         model: selected.id,
         sessionId,
@@ -233,7 +240,7 @@ export class SiwcRuntime implements ManagedChatRuntime {
         contextEffect: result.compacted ? "checkpoint_compacted" : result.historyWindowed ? "history_windowed" : "none",
       };
       } finally {
-        if (background) await responseBridge.resetSession(sessionId);
+        if (background || request.temporaryMode) await responseBridge.resetSession(sessionId);
       }
     }
 

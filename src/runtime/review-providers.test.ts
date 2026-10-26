@@ -11,7 +11,7 @@ import type { ChatRequest } from "./types.js";
 const review: ChatRequest = { purpose: "recent_review", sessionId: "review-fixture", operationId: "review-1",
   text: '{"messages":[],"entries":[]}', imageOutputAllowed: false, tools: [] };
 
-test("Recent review respects the API background spending gate and sends a tool-free request when enabled", async t => {
+test("Recent review runs independently of proactive spending settings with no tools", async t => {
   const root = await mkdtemp(join(tmpdir(), "sophon-review-api-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   let requests = 0;
@@ -23,8 +23,10 @@ test("Recent review respects the API background spending gate and sends a tool-f
       assert.equal(body.messages.at(-1).content, review.text);
       return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: '{"changes":[],"creates":[],"deletes":[]}' }, finish_reason: "stop" }] }));
     } };
-  assert.equal((await new ApiRuntime({ ...config, heartbeat: false }).reply(review)).skipped, "background_disabled");
+  assert.equal((await new ApiRuntime({ ...config, heartbeat: false }).reply({...review, purpose: "heartbeat_decision"})).skipped, "background_disabled");
   assert.equal(requests, 0);
+  assert.equal((await new ApiRuntime({ ...config, heartbeat: false }).reply(review)).skipped, undefined);
+  assert.equal(requests, 1);
   const result = await new ApiRuntime({ ...config, heartbeat: true }).reply(review);
   assert.equal(result.skipped, undefined);
   assert.equal(requests, 1);

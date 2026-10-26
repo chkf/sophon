@@ -1,3 +1,4 @@
+import { executeLocalContextTool } from "./tools.js";
 import { writeLegacyPersonaFixture, fixturePresets } from "../../scripts/testing/persona-fixture.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -68,7 +69,7 @@ async function fixture(version: 0 | 1 | 2, run: (value: {
   }
 }
 
-test("formal owner Gateway executes v2 Core and expression settings and immediate Recent deletion and refreshes the next turn", () => fixture(2, async value => {
+test("manual Core edits refresh chat while model tools only mutate Recent", () => fixture(2, async value => {
   const requests: ChatRequest[] = [], results: Record<string, any> = {};
   const snapshots: Array<ReturnType<LocalCoreContextProvider["peek"]>> = [];
   let failure: unknown;
@@ -77,10 +78,12 @@ test("formal owner Gateway executes v2 Core and expression settings and immediat
     if (requests.length === 1) {
       try {
         const execute = request.executeTool!;
-        results.core = await execute("gateway_core_read", {});
-        results.coreWrite = await execute("gateway_core_write", {
+        await assert.rejects(execute("gateway_core_read", {}),/未开放/);
+        results.core = await executeLocalContextTool(value.root,"formal","gateway_core_read", {});
+        results.coreWrite = await executeLocalContextTool(value.root,"formal","gateway_core_write", {
           body: REVISED_CORE, expected_revision: results.core.core.revision,
         });
+        await value.context.load();
         snapshots.push(value.context.peek());
         await value.personas.setShowStageDirections(true);
         await value.context.load();
@@ -104,7 +107,8 @@ test("formal owner Gateway executes v2 Core and expression settings and immediat
   if (first.kind !== "model_reply") throw new Error("Formal request failed");
   await gateway.commitDeliveredAssistant("telegram", "123", "123", first.text, undefined, first.deliveryId);
   const advertised = requests[0]!.tools!.map(tool => tool.name);
-  for (const name of NEW_TOOLS) assert.ok(advertised.includes(name), name);
+  assert.ok(advertised.includes("gateway_recent_delete"));
+  assert.equal(advertised.some(name=>name.startsWith("gateway_core_")),false);
   assert.equal(requests[0]!.ephemeral, undefined);
   assert.equal(requests[0]!.sessionId, "telegram:123");
   assert.equal(results.coreWrite.updated.body, REVISED_CORE);
