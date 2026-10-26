@@ -1,3 +1,4 @@
+import { availableParallelism } from "node:os";
 import { readdir, rm } from "node:fs/promises";
 import { execFile, spawn } from "node:child_process";
 import { join } from "node:path";
@@ -29,7 +30,7 @@ try {
   if (probe.stdout !== ready) throw new Error("测试子进程未返回就绪凭据；拒绝把文件级退出状态记为用例通过。");
   // Absolute source/loader paths let cwd remain empty: loadConfig cannot read the
   // checkout's .env, and default data paths cannot open the running Host's state.
-  const child = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), "--test", ...files], {
+  const child = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), "--test", "--test-concurrency="+Math.min(4,availableParallelism()), ...files], {
     cwd: sandbox.root, env: sandbox.env, stdio: "inherit",
   });
   process.exitCode = await new Promise(resolve => {

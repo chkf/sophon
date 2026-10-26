@@ -1,3 +1,6 @@
+import { MemoryRecent } from "./memory/recent.js";
+import { MemoryWorker } from "./memory/worker.js";
+import { cleanupBackgroundArchives, cleanupConfirmedArchivesOnStartup } from "./runtime/siwc/background-cleanup.js";
 import { SerialQueue } from "./util/serial-queue.js";
 import { FileService } from "./files/service.js";
 import { RecentReview } from "./knowledge/review.js";
@@ -30,7 +33,7 @@ import { readJsonFile } from "./util/atomic-json.js";
 import { heartbeatEligible, dateKey, type HeartbeatState } from "./heartbeat/policy.js";
 import { localMinutes } from "./heartbeat/planner.js";
 import { Gateway } from "./gateway.js";
-import { PersonaStore } from "./persona/store.js";
+import { ExpressionStore } from "./expression/store.js";
 import { HeartbeatRunner } from "./heartbeat/runner.js";
 import { MediaStore } from "./media/store.js";
 import type { ManagedChatRuntime } from "./runtime/types.js";
@@ -58,10 +61,12 @@ export class GatewayService {
   private readonly conversationQueue = new SerialQueue();
   private readonly voice: VoiceService;
   private readonly ilink?: IlinkAdapter;
-  private readonly personas: PersonaStore;
+  private readonly expressions: ExpressionStore;
   private readonly gatewayContext: LocalCoreContextProvider;
   private readonly localKnowledge?: LocalKnowledgeStore;
   private readonly gateway: Gateway;
+  private readonly memoryWorker?: MemoryWorker;
+  private chatInFlight=0;
   private readonly compactionNotices: CompactionNoticeLedger;
   private readonly telegram?: TelegramAdapter;
   private readonly activeChannels: ActiveChannelRouter;
@@ -84,7 +89,11 @@ export class GatewayService {
 
     const media = new MediaStore(join(config.dataDir, "media"));
     this.sessions = new SessionStore(config.dataDir);
-    this.personas = new PersonaStore(config.dataDir);
+    const enabled=config.memoryGraphEnabled;
+    if(enabled===true && !config.telegram?.ownerId)throw Error('记忆图需要正式管理员会话。');
+    const memory=enabled===true?this.sessions.enableMemory(config.telegram!.ownerId):undefined;
+    if(memory)this.memoryWorker=new MemoryWorker(memory,runtime,()=>!this.stopping&&this.chatInFlight===0);
+    this.expressions = new ExpressionStore(config.dataDir);
     const speechSettings=new VoiceSettingsStore(config.dataDir);
     const speechClient=new BailianSpeech(config.voice ?? {});
     const speechQueue=new SerialQueue();
@@ -92,18 +101,18 @@ export class GatewayService {
     this.localKnowledge = new LocalKnowledgeStore(config.dataDir, "formal");
     this.compactionNotices = new CompactionNoticeLedger(config.dataDir);
     this.gatewayContext = new LocalCoreContextProvider(config.dataDir,
-      () => renderRecentSummary(this.localKnowledge!.listRecent()),
-      () => this.personas.snapshot(), () => this.localKnowledge!.getRecentRevision());
+      () => renderRecentSummary(memory?new MemoryRecent(memory).remainingDirectory(this.localKnowledge!.listRecent()):this.localKnowledge!.listRecent()),
+      () => this.expressions.snapshot(), () => this.localKnowledge!.getRecentRevision());
     const files = config.files?.enabled && config.telegram ? new FileService(config.dataDir,
       config.files.generatedDir, config.telegram.ownerId, file => {
         if (!this.telegram) throw new Error("Telegram is unavailable for document delivery");
         return this.telegram.sendDocumentToOwner(file);
       }) : undefined;
     if (config.recentReview?.enabled && config.telegram) this.recentReview = new RecentReview(config.dataDir,
-      config.telegram.ownerId, runtime, this.sessions, this.localKnowledge, this.gatewayContext, this.conversationQueue);
+      config.telegram.ownerId, runtime, this.sessions, this.localKnowledge, this.gatewayContext, this.conversationQueue, () => !!memory && new MemoryRecent(memory).enabled());
     this.gateway = new Gateway(runtime, this.sessions, this.gatewayContext,
       config.maxToolRounds, config.heartbeat.timezone,
-      undefined, this.personas, this.localKnowledge, async message =>
+      undefined, this.expressions, this.localKnowledge, async message =>
         message.senderId===config.telegram?.ownerId && message.conversationId===config.telegram?.ownerId &&
         this.voice.configured() && (await this.voice.settings.get()).tts,
       async checkpoint => {
@@ -113,12 +122,12 @@ export class GatewayService {
           ? "距离上次成功压缩已满 7 天" : "上下文达到容量阈值（120K token）";
         await this.telegram.notifyTemporary(
           "🧠 Gateway 上下文已压缩\n原因：" + reason + "\n历史检查点已保存，对话可以继续。", 60_000);
-      }, config.control ? observation => persistContextObservation(config.dataDir, observation) : undefined, files);
+      }, config.control ? observation => persistContextObservation(config.dataDir, observation) : undefined, files, memory);
 
     if (config.telegram) {
       const telegramVoice=new TelegramVoiceTransport(this.voice,config.telegram.ownerId);
       this.telegram = new TelegramAdapter({
-        showStageDirections: async () => (await this.personas.snapshot()).showStageDirections === true,
+        showStageDirections: async () => (await this.expressions.snapshot()).showStageDirections === true,
         ...config.telegram,
         dataDir: config.dataDir,
         mediaStore: media,
@@ -142,7 +151,7 @@ export class GatewayService {
     }
     if (config.ilink && config.telegram) {
       this.ilink = new IlinkAdapter({
-        showStageDirections: async () => (await this.personas.snapshot()).showStageDirections === true, ownerId: config.telegram.ownerId,
+        showStageDirections: async () => (await this.expressions.snapshot()).showStageDirections === true, ownerId: config.telegram.ownerId,
         store: new IlinkStore(config.dataDir, createCredentialEncryption(process.platform, config.credentialKeyFile)),
         media, queue: this.conversationQueue,
         bind: (owner, user) => this.sessions.bindOwnerSession(owner, user),
@@ -174,7 +183,9 @@ export class GatewayService {
       this.control = new ControlCenter({
         publicUrl: config.control.publicUrl,
         data: new ControlData(config.dataDir, { sessions: this.sessions, knowledge: this.localKnowledge,
-          context: this.gatewayContext, personas: this.personas, timezone: config.heartbeat.timezone }),
+          context: this.gatewayContext, expressions: this.expressions, timezone: config.heartbeat.timezone,
+          memory: {ownerId: config.telegram?.ownerId, enabled: config.memoryGraphEnabled},
+          editHistory: async (id, work) => { if(!runtime.editHistory)throw Error("历史编辑不可用。");await runtime.editHistory(id,work); } }),
         traces: this.taskTraces, host: new HostMonitor(config.dataDir),
         mutate: work => this.conversationQueue.run(async () => work()),
         heartbeat: async () => {
@@ -188,7 +199,7 @@ export class GatewayService {
         },
       });
     }
-    this.commands = new GatewayCommandRouter(runtime, this.activeChannels, undefined, undefined, this.personas,
+    this.commands = new GatewayCommandRouter(runtime, this.activeChannels, undefined, undefined, this.expressions,
       message => {
         if (message.channel !== "telegram" || message.senderId !== config.telegram?.ownerId || message.conversationId !== config.telegram?.ownerId) {
           return "控制中心入口仅向已配置的管理员私聊提供。";
@@ -213,7 +224,7 @@ export class GatewayService {
           "\n下一计划唤醒："+(next??state.nextCheckAt??"尚无计划")+"\n当前条件："+(!config.heartbeat.enabled?"未启用":active==="off"?"渠道关闭":policy.reason??"满足基础条件，到点后仍可选择静默")+"\n时区："+config.heartbeat.timezone;
       },
     }));
-    this.panels=new CommandPanels(runtime,this.activeChannels,this.personas,this.diagnostics,logDir,
+    this.panels=new CommandPanels(runtime,this.activeChannels,this.expressions,this.diagnostics,logDir,
       config.heartbeat.timezone,()=>creditSummary(config.openrouter?.apiKey,process.env.GATEWAY_OPENROUTER_MANAGEMENT_KEY),this.ilink,new VoicePanel(this.voice,()=>this.telegram?.previewVoice()??Promise.resolve(false)));
 
     if (config.heartbeat.enabled) {
@@ -224,12 +235,13 @@ export class GatewayService {
         this.sessions,
         this.gatewayContext,
         this.activeChannels,
-        this.personas,
+        this.expressions,
         undefined,
         this.localKnowledge,
         this.conversationQueue,
         async () => { const settings=await this.voice.settings.get();return this.voice.configured()&&settings.tts&&settings.proactive; },
         this.taskTraces,
+        memory ? () => ({...memory.context(), refresh: () => memory.context()}) : undefined,
       );
     }
   }
@@ -239,7 +251,8 @@ export class GatewayService {
     if (command !== undefined) return { kind: "local_reply", text: command };
     try { message = await this.voice.preprocess(message); }
     catch (error) { return { kind: "local_reply", text: error instanceof Error ? error.message : "附件或语音处理失败，请重发。" }; }
-    return this.gateway.handle(message);
+    this.chatInFlight++;
+    try { return await this.gateway.handle(message); } finally { this.chatInFlight--; }
   }
 
   async start(): Promise<void> {
@@ -248,6 +261,8 @@ export class GatewayService {
     try {
       // The old Gateway is stopped; verify SQLite integrity before starting channels.
       await this.sessions.prepare();
+      await cleanupBackgroundArchives(this.config.dataDir);
+      await cleanupConfirmedArchivesOnStartup(this.config.dataDir);
       this.taskTraces?.recoverInterrupted();
       const session = await this.runtime.getSession();
       if (session.status !== "connected" || !session.sharing) {
@@ -270,6 +285,7 @@ export class GatewayService {
       if (this.ilink) await this.ilink.start((message) => this.handleInbound(message));
       await this.heartbeat?.start();
       this.recentReview?.start();
+      this.memoryWorker?.start();
 
       console.error(
         "[gateway] ready on http://" + this.config.server.host + ":" + this.config.server.port +
@@ -298,6 +314,7 @@ export class GatewayService {
     await attempt(() => this.recentReview?.stop());
     await attempt(() => this.ilink?.stop());
     await attempt(() => this.telegram?.stop());
+    await attempt(() => this.memoryWorker?.stop());
     await attempt(() => this.runtime.close?.());
     await attempt(() => this.control?.close());
     await attempt(() => this.taskTraces?.close());

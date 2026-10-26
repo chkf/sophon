@@ -1,4 +1,4 @@
-import type { PersonaSnapshot } from "../persona/store.js";
+import type { ExpressionSnapshot } from "../expression/store.js";
 
 /** Local context owned by Gateway, independent of optional external services. */
 export interface LocalCoreSnapshot {
@@ -7,8 +7,8 @@ export interface LocalCoreSnapshot {
   guidance: string;
   coreRevision: string;
   recentRevision: string;
-  persona?: PersonaSnapshot;
-  personaRevision?: string;
+  expression?: ExpressionSnapshot;
+  expressionRevision?: string;
 }
 export interface LocalContextSnapshot {
   available: boolean;

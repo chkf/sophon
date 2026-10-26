@@ -180,3 +180,12 @@ test("a disconnected browser cannot apply its still-queued edit later", async ()
     } finally { gate.release(); }
   }, gate.block);
 });
+
+test("automatic login fragment is one-use and a newer entry invalidates an old code",()=>fixture(async({control,post})=>{
+  const old=new URL(control.loginEntry().url),entry=control.loginEntry(),url=new URL(entry.url);
+  assert.equal(url.search,'');assert.match(url.hash,/^#login_code=/);
+  const code=new URLSearchParams(url.hash.slice(1)).get('login_code');
+  assert.equal((await post('login',{code:new URLSearchParams(old.hash.slice(1)).get('login_code')})).status,401);
+  assert.equal((await post('login',{code})).status,200);
+  assert.equal((await post('login',{code})).status,401);
+}));

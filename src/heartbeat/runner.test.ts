@@ -259,7 +259,8 @@ test("planned heartbeat schedules once, sends only when due, persists text, and 
         assert.ok(request.text.trim());
         // Planning uses local context without a required external service.
         assert.match(request.instructions, /根据可靠的本地 Recent、近期对话/);
-        assert.match(request.instructions, /无任务闲聊/);
+        assert.match(request.instructions, /这是上限，无需填满/);
+        assert.match(request.instructions, /先依据 Core/);
         assert.match(request.instructions, /用户已有回答或刚问过不要重复问/);
         assert.match(request.instructions, /缺少记录不代表空闲/);
         assert.equal(request.tools?.length ?? 0, 0);

@@ -21,9 +21,9 @@ Telegram / optional WeChat iLink
 
 ## 上下文与历史
 
-`src/setup.ts` 提供显式初始化。`src/core` 读取和校验 Core，`src/persona` 管理用户定义的表达风格，`src/knowledge` 保存 Recent 话题。`src/sessions` 保存会话原文。正式状态集中于 `data/sessions/gateway.sqlite`，启动时校验完整性，缺失或损坏的正式上下文不静默恢复为默认身份。
+`src/setup.ts` 提供显式初始化。`src/core` 读取和校验 Core，`src/expression` 管理独立的心理和动作描写开关，`src/memory` 管理可选的记忆图，`src/knowledge` 保存 Recent 话题。`src/sessions` 保存会话原文。正式状态集中于 `data/sessions/gateway.sqlite`，启动时校验完整性，缺失或损坏的正式上下文不静默恢复为默认身份。
 
-Core 可以通过 CLI 以 Markdown 导入导出。Core、Persona 与 Recent 的模型工具使用修订检查，防止覆盖较新的状态。不要用示例配置替换已有用户数据库。
+Core 可以通过 CLI 以 Markdown 导入导出。Core 与 Recent 的模型工具使用修订检查，防止覆盖较新的状态。不要用示例配置替换已有用户数据库。
 
 ## 模型与渠道
 
@@ -35,9 +35,9 @@ Core 可以通过 CLI 以 Markdown 导入导出。Core、Persona 与 Recent 的�
 
 ## 本地工具
 
-Gateway 为正式对话提供本地 Core、Persona、Recent 和聊天历史工具，并按渠道与配置开放语音、原生回复等能力。工具执行范围由代码定义，未知工具调用会被拒绝。
+Gateway 为正式对话提供本地 Core、Recent 和聊天历史工具，并按渠道与配置开放语音、原生回复等能力。工具执行范围由代码定义，未知工具调用会被拒绝。
 
-Core、Persona 与 Recent 的修改写入本地 SQLite，执行前校验参数和修订号，执行后读取确认。工具输出与异常不能改变用户授权或持久指令。
+Core 与 Recent 的修改写入本地 SQLite，执行前校验参数和修订号，执行后读取确认。工具输出与异常不能改变用户授权或持久指令。
 
 ## 主动消息
 

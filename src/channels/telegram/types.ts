@@ -3,7 +3,7 @@ import type { Attachment, InboundMessage, PlatformMessageFragment, TelegramNativ
 import type { MediaStore } from "../../media/store.js";
 import type { ReplyOutcome } from "../reply.js";
 export interface TelegramPhoto { file_id: string; file_size?: number; width?: number; height?: number }
-export interface TelegramFile { file_id: string; file_name?: string; mime_type?: string; file_size?: number; duration?: number }
+export interface TelegramFile { file_id: string; file_name?: string; mime_type?: string; file_size?: number; duration?: number; thumbnail?: TelegramPhoto }
 export interface TelegramMessage {
   message_id: number;
   date: number;
@@ -13,6 +13,7 @@ export interface TelegramMessage {
   chat: { id: number | string; type: string };
   reply_to_message?: TelegramMessage;
   sticker?: TelegramFile & { is_animated?: boolean; is_video?: boolean; emoji?: string; set_name?: string; thumbnail?: TelegramPhoto };
+  animation?: TelegramFile & { thumbnail?: TelegramPhoto };
   photo?: TelegramPhoto[];
   document?: TelegramFile;
   audio?: TelegramFile;

@@ -201,6 +201,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
   async resetSession(): Promise<void> { /* Stateless HTTP: shared transcript is the recovery source. */ }
   async commitSession(): Promise<void> { /* Assistant commits are owned by Gateway delivery acknowledgements. */ }
   reply(request: ChatRequest): Promise<ChatResponse> {
+    if(request.purpose === "memory_classify") return Promise.reject(new Error("记忆分类仅通过独立 SIWC 入口执行。"));
     return this.exclusive(() => this.run(request));
   }
   private usage(raw: any): ChatUsage {

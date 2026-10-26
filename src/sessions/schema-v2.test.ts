@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SessionStore } from "./store.js";
-import { PersonaStore } from "../persona/store.js";
+import { ExpressionStore } from "../expression/store.js";
 import { VoiceStore } from "../voice/store.js";
 import { IlinkStore, validateIlinkReceipt } from "../channels/ilink/store.js";
 import { IlinkAdapter } from "../channels/ilink/adapter.js";

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initializeGateway } from "./setup.js";
 import { LocalCoreContextProvider } from "./core/context.js";
-import { PersonaStore } from "./persona/store.js";
+import { ExpressionStore } from "./expression/store.js";
 import { SessionStore } from "./sessions/store.js";
 
 test("fresh standalone setup creates usable context and schema without remote services", async () => {
@@ -15,8 +15,8 @@ test("fresh standalone setup creates usable context and schema without remote se
     const context = await new LocalCoreContextProvider(data).load();
     assert.equal(context.available, true);
     assert.match(context.data!.core, /用户自行配置/);
-    const personas = await new PersonaStore(data).snapshot();
-    assert.deepEqual(Object.keys(personas.presets), ["default"]);
+    const personas = await new ExpressionStore(data).snapshot();
+    assert.deepEqual(Object.keys(personas), ["showStageDirections"]);
     assert.equal(personas.showStageDirections, false);
     const sessions = new SessionStore(data);
     try {

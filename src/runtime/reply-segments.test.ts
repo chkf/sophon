@@ -62,10 +62,10 @@ test("proactive adapter delivers multiple voices with stable distinct paid-attem
 
 test("Gateway hidden stage directions are absent from delivered shared history and history search",()=>temp(async root=>{
   const sessions=new SessionStore(root);await sessions.bindOwnerSession("1","wx");
-  const context=localContext();context.data!.persona={active:"custom",presets:{custom:["CLEAR"]},showStageDirections:false};
+  const context=localContext();context.data!.expression={showStageDirections:false};
   const gateway=new Gateway({reply:async request=>{
-    assert.match(request.instructions!,/【表达风格】当前模式：custom/);
-    assert.match(request.instructions!,/不要自行添加角色经历或内心独白/);
+    assert.match(request.instructions!,/心理和动作描写已关闭/);
+    assert.match(request.instructions!,/回复仅包含正文/);
     request.recordReplyText!("（PRIVATE_STAGE）\n先说一句","one");
     await request.executeTool!("send_voice",{text:"第一段",instruction:"清晰、自然表达"});
     request.recordReplyText!("中间文字","two");

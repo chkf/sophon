@@ -420,7 +420,7 @@ test("SIWC compaction restart syncs only new deliveries and persists the history
     const secondSocket = new FakeSocket([compact("opaque-second")]);
     const second = new StatefulResponsesBridge(directory, () => secondSocket); bridges.push(second);
     await second.reply({ ...request("续聊"), history }); await second.close();
-    assert.deepEqual(reads, [2]); assert.match(JSON.stringify(secondSocket.sent[0]!.input), /opaque-first/);
+    assert.deepEqual(reads, [2, 2]); assert.match(JSON.stringify(secondSocket.sent[0]!.input), /opaque-first/);
     assert.match(JSON.stringify(secondSocket.sent[0]!.input), /重启间已送达/);
     assert.doesNotMatch(JSON.stringify(secondSocket.sent[0]!.input), /旧问题|旧答复/);
     const thirdSocket = new FakeSocket([messageResponse("third", "继续")]);
@@ -658,14 +658,14 @@ test("lazy persistent history is complete on SIWC recovery and unread during con
     await bridge.reply({ ...request("current"), history });
     const input = socket.sent[0]!.input as Record<string, unknown>[];
     assert.deepEqual(input.filter(item => item.role === "user" || item.role === "assistant").map(item => item.content), [...original.map(m => "[历史消息发送时间：2026-10-11 00:00（UTC）]\n" + m.content), "current"]);
-    assert.equal(reads, 2, "initial creation time and transcript are both read");
+    assert.equal(reads, 3, "creation time, capacity assessment and transcript are read");
     await bridge.reply({ ...request("next"), history });
-    assert.equal(reads, 2); assert.ok(socket.sent[1]!.previous_response_id);
+    assert.equal(reads, 3); assert.ok(socket.sent[1]!.previous_response_id);
     bridge.close();
     const recoveredSocket = new FakeSocket([messageResponse("recovered", "done")]);
     bridge = new StatefulResponsesBridge(directory, () => recoveredSocket);
     await bridge.reply({ ...request("after restart"), history });
-    assert.equal(reads, 3); assert.match(JSON.stringify(recoveredSocket.sent[0]!.input), /original 0/);
+    assert.equal(reads, 5); assert.match(JSON.stringify(recoveredSocket.sent[0]!.input), /original 0/);
   } finally { bridge?.close(); sessions.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -2221,44 +2221,10 @@ test("SIWC >48K completed chat keeps previous_response_id without a proactive re
     assert.equal(first.sent[1]?.previous_response_id, "large");
     assert.doesNotMatch(JSON.stringify(first.sent[1]?.input), /first question|first answer/);
     assert.match(JSON.stringify(first.sent[1]?.input), /second question/);
-    assert.equal((first.sent[1]?.context_management as any)?.[0]?.compact_threshold, 120_000);
+    assert.equal(first.sent[1]?.context_management, undefined);
   } finally { await bridge.close(); await rm(directory, {recursive: true, force: true}); }
 });
 
-test("seven-day active compaction persists a cumulative opaque checkpoint and resets the deadline", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "gateway-seven-day-compaction-"));
-  let now = Date.parse("2026-10-01T00:00:00Z");
-  const first = new FakeSocket([messageResponse("first", "first answer")]);
-  const resumed = new FakeSocket([messageResponse("second", "second answer"), messageResponse("third", "third answer")]);
-  const sockets = [first, resumed];
-  let compactCalls = 0;
-  const bridge = new StatefulResponsesBridge(directory, () => sockets.shift()!, 300_000,
-    async () => undefined, 50 * 60_000, () => new Date(now),
-    async (_token, model, items) => {
-      assert.equal(model, "test-model");
-      assert.match(JSON.stringify(items), /first answer/);
-      compactCalls++;
-      return [{ type: "compaction", encrypted_content: "cumulative-weekly-opaque" }];
-    });
-  try {
-    await bridge.reply(request("first question"));
-    now += 7 * 24 * 60 * 60_000;
-    const second = await bridge.reply(request("second question"));
-    assert.equal(second.compaction?.reason, "seven_days");
-    assert.equal(compactCalls, 1);
-    assert.match(JSON.stringify(resumed.sent[0]!.input), /cumulative-weekly-opaque/);
-    assert.equal((resumed.sent[0]!.context_management as any)?.[0]?.compact_threshold, 120_000);
-    const { LaneStore } = await import("./lane-store.js");
-    const saved = await new LaneStore(directory).read(request().sessionId);
-    assert.equal(saved?.lastCompactedAt, new Date(now).toISOString());
-    assert.equal(saved?.checkpoint?.id, second.compaction?.id);
-    now += 24 * 60 * 60_000;
-    await bridge.reply(request("third question"));
-    assert.equal(resumed.sent[1]!.previous_response_id, "second");
-    assert.equal((resumed.sent[1]!.context_management as any)?.[0]?.compact_threshold, 120_000);
-    assert.equal(compactCalls, 1, "seven-day timer begins again after successful compaction");
-  } finally { await bridge.close(); await rm(directory, { recursive: true, force: true }); }
-});
 
 test("unsupported weekly compact never invents success; real automatic compaction resets the timer", async () => {
   const directory = await mkdtemp(join(tmpdir(), "gateway-weekly-fallback-"));
@@ -2280,14 +2246,14 @@ test("unsupported weekly compact never invents success; real automatic compactio
     now += 7 * 24 * 60 * 60_000;
     const failed = await bridge.reply(request("due"));
     assert.equal(failed.compaction, undefined);
-    assert.equal(attempted, 1);
+    assert.equal(attempted, 0);
     assert.equal((socket.sent[1]!.context_management as any)?.[0]?.compact_threshold, 1_000);
     const actual = await bridge.reply(request("server auto compacted"));
     assert.equal(actual.compaction?.reason, "seven_days");
-    assert.equal(attempted, 2);
+    assert.equal(attempted, 0);
     now += 2 * 24 * 60 * 60_000;
     await bridge.reply(request("within new window"));
-    assert.equal(attempted, 2);
+    assert.equal(attempted, 0);
     assert.equal((socket.sent[3]!.context_management as any)?.[0]?.compact_threshold, 120_000);
   } finally { await bridge.close(); await rm(directory, { recursive: true, force: true }); }
 });

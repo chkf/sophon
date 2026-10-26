@@ -35,17 +35,25 @@ export type StatefulResponsesSocketFactory = (accessToken: string) => StatefulRe
 
 export type CompactionReason = "seven_days" | "capacity";
 export interface CompactionCheckpoint {
+  /** Only set by the isolated, authoritative-chat compactor; legacy opaque data is untrusted. */
+  source?: "chat";
   version: 1;
   id: string;
   sessionId: string;
   model: string;
   at: string;
   coveredThroughSeq: number;
+  /** SQLite boundary at compaction creation; unlike coverage, never advances with delivery. */
+  replayFromSeq?: number;
   sha256: string;
   reason: CompactionReason;
 }
 
 export interface PersistedLaneState {
+  archiveReason?:string;
+  memoryRebase?: import("./memory-rebase.js").MemoryRebase;
+  /** Recompose the transcript tail on the next natural connection rebuild. */
+  historyRebuildPending?: boolean;
   historyCursor?: number;
   attachmentCursor?: number;
   coverageVerified?: boolean;
@@ -71,6 +79,11 @@ export interface PersistedLaneState {
 }
 
 export interface LaneState {
+  memoryRebase?: import("./memory-rebase.js").MemoryRebase;
+  /** Latest observed working size, used only as a conservative capacity trigger. */
+  workingTokens?: number;
+  /** Recompose the transcript tail on the next natural connection rebuild. */
+  historyRebuildPending?: boolean;
   historyCursor?: number;
   attachmentCursor?: number;
   coverageVerified?: boolean;
@@ -97,6 +110,7 @@ export interface LaneState {
 }
 
 export interface StatefulResponseOptions {
+  memory?: import("../types.js").MemoryRuntimeContext;
   webSearchAllowed?: boolean;
   trace?: import("../../observability/types.js").RuntimeTraceObserver;
   history?: RuntimeHistory;
@@ -134,5 +148,7 @@ export interface StatefulResponseResult {
   text: string;
   usage: ChatUsage;
   compacted: boolean;
+  /** A local calendar window rebuild, without a model compaction request. */
+  historyWindowed?: boolean;
   compaction?: CompactionCheckpoint;
 }

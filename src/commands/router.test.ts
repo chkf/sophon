@@ -5,7 +5,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GatewayCommandRouter } from "./router.js";
-import { PersonaStore } from "../persona/store.js";
+import { ExpressionStore } from "../expression/store.js";
 import { formatHostDiagnosis } from "./host-logs.js";
 
 function message(text: string): any {
@@ -170,51 +170,6 @@ test("Telegram literal npm run commands use a fixed allowlist without model call
   ]);
 });
 
-test("Telegram persona slash commands persist and hashtags remain normal chat", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "gateway-persona-commands-"));
-  try {
-    await seedPersonaDatabase(dir);
-    const store = new PersonaStore(dir);
-    const runtime = { listModels: async () => [], getModelSelection: async () => ({ mode: "auto" as const }),
-      selectModel: async () => ({ mode: "auto" as const }) };
-    const channels = { getActive: async () => "telegram" as const, isConfigured: () => true, setActive: async () => {} };
-    const router = new GatewayCommandRouter(runtime, channels as any, undefined, undefined, store);
-    const initial = await router.execute(message("/persona")) ?? "";
-    assert.match(initial, /^当前 Persona：default/m);
-    assert.match(initial, /● default · CLEAR, HELPFUL/);
-    assert.match(initial, /○ formal · PRECISE/);
-    assert.match(initial, /○ casual · FRIENDLY/);
-    assert.match(initial, /详情：\/persona show formal/);
-    assert.equal(initial.split("\n").length, 7, "mobile list stays compact");
-    assert.match(await router.execute(message("/persona show default")) ?? "", /CLEAR, HELPFUL/);
-    assert.match(await router.execute(message("/persona show formal")) ?? "", /PRECISE/);
-    assert.match(await router.execute(message("/persona add brief CLEAR CONCISE")) ?? "", /已添加/);
-    assert.match(await router.execute(message("/persona")) ?? "", /○ brief · CLEAR, CONCISE/);
-    assert.match(await router.execute(message("/persona brief")) ?? "", /已切到 brief/);
-    assert.equal(await router.execute(message("#formal")), undefined, "known Persona hashtag is ordinary chat");
-    assert.equal(await router.execute(message("#default")), undefined, "default hashtag is ordinary chat");
-    assert.equal(await router.execute(message("#brief")), undefined, "custom Persona hashtag is ordinary chat");
-    assert.equal((await store.snapshot()).active, "brief", "hashtags must not switch the active Persona");
-    const selected = await router.execute(message("/persona formal")) ?? "";
-    assert.match(selected, /已切到 formal（PRECISE）/);
-    assert.match(await router.execute(message("/persona set brief CALM PRECISE")) ?? "", /已修改/);
-    assert.match(await router.execute(message("/persona show brief")) ?? "", /CALM, PRECISE/);
-    assert.match(await router.execute(message("/persona delete brief")) ?? "", /已删除/);
-    assert.match(await router.execute(message("/persona delete default")) ?? "", /不能删除/);
-    assert.match(await router.execute(message("/persona set formal SERIOUS")) ?? "", /已修改/);
-    const edited = await router.execute(message("/persona")) ?? "";
-    assert.match(edited, /● formal · SERIOUS/, "edited built-ins must not display stale descriptions");
-    assert.match(await router.execute(message("/persona show formal")) ?? "", /SERIOUS/);
-    assert.equal(await router.execute(message("#not_a_persona")), undefined);
-    assert.equal(await router.execute(message("这里提到了 #formal")), undefined);
-    assert.equal((await store.snapshot()).active, "formal");
-    const nonTelegram = { ...message("/persona formal"), channel: "wechat" } as any;
-    assert.equal(await router.execute(nonTelegram), "Persona 管理仅支持 Telegram 私聊。");
-    assert.equal((await new PersonaStore(dir).snapshot()).active, "formal");
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
 
 test("model and channel are the only entrypoints for provider, image and active-channel settings", async () => {
   const active: string[] = [];

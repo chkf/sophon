@@ -1,4 +1,4 @@
-import { seedPersonaDatabase } from "../../scripts/testing/persona-fixture.mjs";
+import { seedPersonaDatabase } from "../../scripts/testing/expression-fixture.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
@@ -11,7 +11,7 @@ import { readLogEvents } from "./host-logs.js";
 import { DiagnosticRegistry } from "./diagnostics.js";
 import { CommandPanels } from "./panels.js";
 import { GatewayCommandRouter } from "./router.js";
-import { PersonaStore } from "../persona/store.js";
+import { ExpressionStore } from "../expression/store.js";
 
 async function temp(fn:(dir:string)=>Promise<void>){const dir=await mkdtemp(join(tmpdir(),"command-panels-"));try{await fn(dir);}finally{await rm(dir,{recursive:true,force:true});}}
 const message=(text:string)=>({channel:"telegram" as const,conversationId:"1",senderId:"1",messageId:"1",text,attachments:[]});
@@ -19,7 +19,7 @@ const click=(v:PanelView,label:string)=>v.rows.flat().find(b=>b.text.includes(la
 
 test("public commands direct configuration to authenticated panels and do not launch host scripts",async()=>{
   const router=new GatewayCommandRouter({} as any,{} as any);
-  for(const command of ["/model 2","/persona formal","/proactive wechat","/test runtime:test","/logs all"])
+  for(const command of ["/model 2","/expression formal","/proactive wechat","/test runtime:test","/logs all"])
     assert.match((await router.handle(message(command)))!,/面板/);
   assert.match((await router.handle(message("npm run test")))!,/诊断面板/);
   assert.match((await router.handle(message("/update")))!,/不提供远程自动更新/);
@@ -137,7 +137,7 @@ test("model buttons bind selection to provider and credits only queried on OpenR
   let provider="siwc",chosen="a",credits=0;let route="provider";
   const runtime:any={getProvider:async()=>provider,getModelSelection:async()=>({model:chosen}),listModels:async()=>[{id:"a",displayName:"A"},{id:"b",displayName:"B"}],selectModel:async(id:string,expected:string)=>{assert.equal(provider,expected);chosen=id;},
     selectProvider:async(p:string)=>{provider=p;},getImageSettings:async()=>({model:"image",route,proactive:false,dailyLimit:10}),selectImageRoute:async(r:string)=>{route=r;}};
-  const panel= new CommandPanels(runtime, {} as any, new PersonaStore(dir), new DiagnosticRegistry([]), dir, "Asia/Shanghai", async()=>{credits++;return "credit";});
+  const panel= new CommandPanels(runtime, {} as any, new ExpressionStore(dir), new DiagnosticRegistry([]), dir, "Asia/Shanghai", async()=>{credits++;return "credit";});
   const root=await panel.model();assert.equal(credits,0);
   const models=await click(root,"聊天模型");await click(models,"B");assert.equal(chosen,"b");
   const providers=await click(await panel.model(),"Provider");const confirm=await click(providers,"openrouter");assert.equal(provider,"siwc");assert.equal(credits,0);await click(confirm,"确认切换");assert.equal(credits,1);
@@ -151,7 +151,7 @@ test("generic API panels confirm paid selections and never query OpenRouter feat
     getImageSettings:async()=>assert.fail("API views must not query image routes"),
     diagnosticModels:async(p:string)=>{assert.equal(p,"api");return [{id:chosen,displayName:chosen}];},
     diagnosticReply:async(p:string,model:string,kind:string)=>{assert.equal(p,"api");assert.equal(model,"custom/b");assert.equal(kind,"text");diagnosticCalls++;return "ok";}};
-  const panel=new CommandPanels(runtime,{} as any,new PersonaStore(dir),new DiagnosticRegistry([]),dir,"UTC",async()=>assert.fail("API must not query OpenRouter credits"));
+  const panel=new CommandPanels(runtime,{} as any,new ExpressionStore(dir),new DiagnosticRegistry([]),dir,"UTC",async()=>assert.fail("API must not query OpenRouter credits"));
   const choice=await click(await panel.providers(),"通用 API");assert.equal(provider,"siwc");assert.match(choice.text,/可能产生费用/);
   await click(choice,"确认切换");assert.equal(provider,"api");
   assert.match((await panel.model()).text,/Provider：通用 API/);
@@ -179,20 +179,4 @@ test("retry response expires and persisted pause notices clear on resume",()=>te
   const reply=state.commandReplyDeletions[0].messageIds[0];
   await new Promise(r=>setTimeout(r,35));assert.ok(calls.some(c=>c.method==="deleteMessage"&&c.body.message_id===reply));
   await adapter.stop();
-}));
-
-
-test("global stage display panel persists across restart and preset switches",()=>temp(async dir=>{
-  await seedPersonaDatabase(dir);
-  const store=new PersonaStore(dir);
-  const panel= new CommandPanels({} as any, {} as any, store, new DiagnosticRegistry([]), dir, "Asia/Shanghai", async()=>"");
-  const before=await store.snapshot();
-  const shown=await click(await panel.persona(),"角色描写：隐藏");
-  assert.match(shown.rows.flat().map(b=>b.text).join(" "),/角色描写：显示/);
-  await store.select("formal");
-  const restarted=new PersonaStore(dir);
-  assert.equal((await restarted.snapshot()).showStageDirections,true);
-  assert.deepEqual((await restarted.snapshot()).presets,before.presets);
-  await click(await panel.persona(),"角色描写：显示");
-  assert.equal((await restarted.snapshot()).showStageDirections,false);
 }));

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { loadCore } from "./loader.js";
-import { personaInstruction, type PersonaSnapshot } from "../persona/store.js";
+import { expressionInstruction, type ExpressionSnapshot } from "../expression/store.js";
 import type { LocalContextSnapshot } from "./context-contract.js";
 import type { RecentEntry } from "../knowledge/store.js";
 
@@ -26,14 +26,14 @@ function revision(value: string): string {
 const RECENT_GUIDANCE = [
   "Recent 用于记录跨越当前上下文的持续交流话题，不记录普通闲聊。只在出现重要进展时更新，话题不再活跃时可归档。",
   "每轮提供的是活跃话题目录。需要细节时主动读取完整 Recent；查找过去的对话则使用历史检索，不凭摘要猜测。",
-  "只根据可靠事实管理记忆，不混淆交流状态与任务完成状态。Core、Persona 和 Recent 的修改必须通过实际工具执行。",
+  "只根据可靠事实管理记忆，不混淆交流状态与任务完成状态。Core 和 Recent 的修改必须通过实际工具执行。",
 ].join("\n");
 
 /** Assemble the local Core, expression settings and SQLite Recent directory. */
 export class LocalCoreContextProvider {
   private snapshot?: LocalContextSnapshot;
   constructor(private readonly dataDir: string, private readonly recentSummary: () => string = () => "",
-    private readonly currentPersona?: () => Promise<PersonaSnapshot>,
+    private readonly currentExpression?: () => Promise<ExpressionSnapshot>,
     private readonly currentRecentRevision?: () => string) {}
   invalidate(): void { this.snapshot = undefined; }
   peek(): LocalContextSnapshot | undefined { return this.snapshot; }
@@ -42,17 +42,17 @@ export class LocalCoreContextProvider {
       const core = await loadCore(this.dataDir);
       const recent = this.recentSummary();
       const recentVersion = this.currentRecentRevision?.();
-      const persona = await this.currentPersona?.();
-      const personaText = persona ? personaInstruction(persona) : "";
+      const expression = await this.currentExpression?.();
+      const expressionText = expression ? expressionInstruction(expression) : "";
       if (typeof recent !== "string" || recent.length > 30_000) {
         throw new Error("Invalid or oversized local Recent context.");
       }
       const guidance = RECENT_GUIDANCE;
       this.snapshot = { available: true, loadedAt: new Date().toISOString(), data: {
         core: core.text, recent, guidance,
-        coreRevision: revision(core.text + "\n" + guidance + (personaText ? "\n" + personaText : "")),
+        coreRevision: revision(core.text + "\n" + guidance + (expressionText ? "\n" + expressionText : "")),
         recentRevision: revision(recent + (recentVersion ? "\n" + recentVersion : "")),
-        ...(persona ? { persona, personaRevision: revision(personaText) } : {}),
+        ...(expression ? { expression, expressionRevision: revision(expressionText) } : {}),
       } };
     } catch {
       this.snapshot = { available: false, loadedAt: new Date().toISOString(),

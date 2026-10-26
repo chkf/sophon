@@ -1,3 +1,5 @@
+import type { MemoryStore } from "./memory/store.js";
+import { MEMORY_TOOLS, executeMemoryTool, memoryHint } from "./memory/tools.js";
 import { replyText } from "./runtime/reply-segments.js";
 import type { FileService } from "./files/service.js";
 import { LOCAL_CONTEXT_TOOLS, executeLocalContextTool } from "./core/tools.js";
@@ -7,14 +9,14 @@ import type { InboundMessage, PlatformMessageFragment } from "./channels/types.j
 import type { ReplyOutcome } from "./channels/reply.js";
 import { randomUUID, createHash } from "node:crypto";
 import { HISTORY_DEFINITION, HISTORY_TOOL, readHistoryTool } from "./runtime/history-tool.js";
-import { StickerTurn, STICKER_TOOL, validSticker } from "./runtime/stickers.js";
+import { StickerTurn, STICKER_NOTE_TOOL, STICKER_TOOL, validSticker } from "./runtime/stickers.js";
 import { NativeReplyTurn, NATIVE_REPLY_TOOL, RETIRED_TEXT_QUOTE_TOOL, NATIVE_REPLY_GUIDANCE, NATIVE_REPLY_DEFINITION, stripLegacyQuoteTokens, nativeReplyParameters } from "./runtime/native-reply.js";
 import type { RuntimeImage, ChatMessage, ChatRuntime, ChatResponse, RuntimeAttachment, RuntimeTool } from "./runtime/types.js";
 import type { SessionStore } from "./sessions/store.js";
 import { readSessionView } from "./sessions/view.js";
 import type { LocalCoreContextProvider } from "./core/context.js";
 import { renderLocalPolicy } from "./core/render.js";
-import { personaInstruction, type PersonaStore } from "./persona/store.js";
+import { expressionInstruction, type ExpressionStore } from "./expression/store.js";
 import type { LocalKnowledgeStore } from "./knowledge/store.js";
 import { executeLocalKnowledgeTool, localKnowledgeTools, LOCAL_KNOWLEDGE_TOOLS, LOCAL_KNOWLEDGE_TOOL_NAMES } from "./knowledge/tools.js";
 
@@ -107,12 +109,13 @@ export class Gateway {
     private readonly maxToolRounds = 0,
     private readonly timezone = "Asia/Shanghai",
     private readonly clock: () => Date = () => new Date(),
-    private readonly personas?: PersonaStore,
+    private readonly expressions?: ExpressionStore,
     private readonly localKnowledge?: LocalKnowledgeStore,
     private readonly voiceAllowed?: (message: InboundMessage) => Promise<boolean>,
     private readonly onCompaction?: (checkpoint: import("./runtime/siwc/stateful-types.js").CompactionCheckpoint) => Promise<void>,
     private readonly onContextObservation?: (observation: ContextObservation) => void | Promise<void>,
     private readonly files?: FileService,
+    private readonly memory?: MemoryStore,
   ) { this.delivery = new DeliveryCoordinator(runtime, sessions); }
 
   private runtimeTools(contextAvailable: boolean): RuntimeTool[] {
@@ -172,18 +175,30 @@ export class Gateway {
     }
 
     const discoveredTools = this.runtimeTools(context.available);
-    const persona = context.data.persona ?? await this.personas?.snapshot();
-    const replyTurn = new VoiceTurn(persona?.showStageDirections === true);
+    const expression = context.data.expression ?? await this.expressions?.snapshot();
+    const replyTurn = new VoiceTurn(expression?.showStageDirections === true);
     const voice = message.channel === "telegram" && await this.voiceAllowed?.(message) ? replyTurn : undefined;
     // Real native targets only: Telegram, same bot and private owner chat.
     const native = message.channel === "telegram" ? new NativeReplyTurn(view.history, message) : undefined;
-    const stickers = native?.enabled ? new StickerTurn(view.history, message) : undefined;
+    if (native?.enabled) {
+      const account = message.platformMessages?.[0]?.accountId;
+      const received = (message.platformMessages ?? []).flatMap(fragment => fragment.attachments ?? [])
+        .map(attachment => attachment.sticker).filter(sticker => validSticker(sticker, message.conversationId, account));
+      await this.sessions.rememberTelegramReactions(received, receivedAt);
+    }
+    const stickers = native?.enabled ? new StickerTurn(view.history, message, this.sessions) : undefined;
     const tools = discoveredTools.filter(tool =>
       tool.name !== RETIRED_TEXT_QUOTE_TOOL && tool.name !== NATIVE_REPLY_TOOL &&
       tool.name !== HISTORY_TOOL && tool.name !== STICKER_TOOL.name);
     // Keep the advertised list and the real function definitions in sync.
     // The Provider also wraps this definition to handle direct/background calls.
     if (view.history.count > 0) tools.push(HISTORY_DEFINITION);
+    const memory = this.memory && message.senderId===message.conversationId &&
+      this.sessions.sessionKey(message.channel,message.conversationId)===this.memory.scope ? this.memory : undefined;
+    if(memory) tools.push(...MEMORY_TOOLS);
+    let memoryDirectory="";
+    if(memory)try { memoryDirectory=memoryHint(memory,message.text); } catch { console.error("[memory] hint_unavailable"); }
+    if(stickers && this.sessions.supportsTelegramReactionNotes()) tools.push(STICKER_NOTE_TOOL);
     if(native?.enabled) tools.push(NATIVE_REPLY_DEFINITION);
     if(stickers) tools.push(STICKER_TOOL);
     if(voice) tools.push(voiceTool);
@@ -196,9 +211,10 @@ export class Gateway {
     const instructions = renderLocalPolicy(context);
     const availableToolNames = tools.map(tool => tool.name).join("、");
     const turnInstructions = [
+      memoryDirectory,
       "本轮可用函数：" + (availableToolNames || "无") + "。",
       NATIVE_REPLY_GUIDANCE,
-      stickers ? "发送 Telegram 贴纸前，先用 gateway_sticker 的 list 查找，再用 select 登记一个。可指定 history_index 查找较早记录。不要编造贴纸 ID；动态贴纸仅提供静态预览。工具登记不代表已经送达。" : "",
+      stickers ? "发送 Telegram 贴纸前，先用 gateway_sticker 的 list 查找，再用 select 登记一个。可指定 history_index 查找较早记录。不要编造贴纸 ID；GIF 和视频贴纸只提供有限的多帧预览，TGS 只有静态缩略图，不推断未看到的动作。可用 gateway_sticker_note 记录实际观察或用户说明的简短含义；工具登记不代表已经送达。" : "",
       voice?.guidance ?? "本轮不提供语音输出工具，请使用文字回复，不承诺发送音频。",
       "本轮来源渠道：" + message.channel + "。回复仅发回该渠道。微信默认文字回复。",
       "【当前 Recent 活跃话题目录（实时、仅作索引）】\n" +
@@ -206,7 +222,7 @@ export class Gateway {
       ...(message.channel === "wechat" ? [
         "微信当前可以理解用户发来的引用和有效语音转写，但不支持发送原生引用回复或语音气泡。需要这类输出时简短说明目前不可用并用文字回答；不把普通引文、音频附件或 TG 的语音能力当作微信原生输出，也不承诺已经发送。",
       ] : []),
-      ...(this.personas && !context.data.persona ? [personaInstruction(await this.personas.snapshot())] : []),
+      ...(this.expressions && !context.data.expression ? [expressionInstruction(await this.expressions.snapshot())] : []),
       temporalContext,
       view.unansweredCount
         ? "历史记录中还有 " + view.unansweredCount + " 条用户消息在发送后没有得到成功交付的 Gateway 答复。本轮请结合这些未答消息和当前消息，优先回答仍有效的实质问题；对重复的催问只需自然回应一次，不要机械逐条复述。如果当前消息明确取消或取代旧问题，以最新意图为准。"
@@ -237,6 +253,7 @@ export class Gateway {
         ...(observation ? { trace: observation } : {}),
         deliveryId,
         purpose: "chat",
+        ...(memory?{memory:{...memory.context(),refresh:()=>memory.context()}}:{}),
         finalizeReplyText: text => replyTurn.finalize(stripLegacyQuoteTokens(text)),
         recordReplyText: (text, id) => replyTurn.recordText(stripLegacyQuoteTokens(text), id),
         getPreparedReplySegments: () => replyTurn.segments,
@@ -248,7 +265,7 @@ export class Gateway {
         imageOutputAllowed: message.channel === "telegram",
         allowImageGeneration: message.channel === "telegram" && explicitImageRequest(message.text),
         messages,
-        ...(!view.eagerMessages ? { history } : {}),
+        ...(memory || !view.eagerMessages ? { history } : {}),
         instructions,
         resetVoicePreferenceOnReconnect: true,
         ...(turnInstructions ? { turnInstructions } : {}),
@@ -268,10 +285,12 @@ export class Gateway {
           executeTool: async (name: string, args: Record<string, unknown>) => {
             if (!tools.some(tool => tool.name === name)) throw new Error("本轮未开放该工具。");
             if (this.files && fileTools.some(tool => tool.name === name)) return this.files.execute(name, args, message);
+            if(memory && MEMORY_TOOLS.some(t=>t.name===name)) return executeMemoryTool(memory,name,args);
             if (name === HISTORY_TOOL) {
               return readHistoryTool(view.history, args);
             }
             if (name === STICKER_TOOL.name && stickers) return stickers.execute(args);
+            if (name === STICKER_NOTE_TOOL.name && stickers) return stickers.note(args);
             if (name === NATIVE_REPLY_TOOL) {
               if (!native?.enabled) throw new Error("本轮不支持原生回复目标选择。");
               return native.select(args);

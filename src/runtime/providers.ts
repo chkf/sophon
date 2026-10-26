@@ -8,12 +8,12 @@ import { join } from "node:path";
 import { readJsonFile, writeJsonAtomic } from "../util/atomic-json.js";
 import { requestMessages } from "./request.js";
 import { tagInboundRetryability } from "./retry-policy.js";
-import type { ChatRequest, ChatResponse, DeliverySettlementOptions, ManagedChatRuntime, ProviderId, RuntimeModelSelection } from "./types.js";
+import type { ChatRequest, ChatResponse, ContextMaintenanceRequest, DeliverySettlementOptions, ManagedChatRuntime, ProviderId, RuntimeModelSelection } from "./types.js";
 
 interface Selection {
   provider: ProviderId;
   epoch: number;
-  /** Model-specific SIWC generations keep old opaque checkpoints addressable. */
+  /** Model-specific SIWC generation IDs stay reserved; retired contexts rebuild from history. */
   activeSiwcModel?: string;
   siwcEpochByModel?: Record<string, number>;
   nextEpoch?: number;
@@ -197,8 +197,37 @@ export class ProviderRuntime implements ManagedChatRuntime {
       catch (error) { await writeJsonAtomic(this.path, state); throw error; }
     });
   }
+  maintainContext(request: ContextMaintenanceRequest): Promise<{ compacted: boolean; skipped?: string }> {
+    return this.exclusive(async () => {
+      const state = await this.state();
+      if (state.provider !== "siwc") return { compacted: false, skipped: "provider" };
+      if (await this.deliveryStore.read(request.sessionId)) return { compacted: false, skipped: "pending_delivery" };
+      const sessionId = state.epoch === 0 ? request.sessionId : request.sessionId + ":provider:siwc:" + state.epoch;
+      return this.providers.siwc.maintainContext?.({ ...request, sessionId }) ?? { compacted: false, skipped: "unsupported" };
+    });
+  }
+  async listMemoryModels(): Promise<import("./types.js").RuntimeModel[]> { return this.providers.siwc.listModels(); }
+  async getMemoryModel(): Promise<string> {
+    if (!this.providers.siwc.getMemoryModel) throw new Error("记忆模型设置不可用。");
+    return this.providers.siwc.getMemoryModel();
+  }
+  async selectMemoryModel(model: string): Promise<string> {
+    if (!this.providers.siwc.selectMemoryModel) throw new Error("记忆模型设置不可用。");
+    return this.providers.siwc.selectMemoryModel(model);
+  }
+  async runMemoryTask(task: import("../memory/tasks.js").MemoryTask,input: string): Promise<string> {
+    const runtime=this.providers.siwc;
+    if(!runtime.runMemoryTask)throw new Error("SIWC 记忆整理能力不可用。");
+    return runtime.runMemoryTask(task,input);
+  }
+  async classifyMemory(input: string): Promise<string> {
+    const siwc = this.providers.siwc;
+    if (!siwc.classifyMemory) throw new Error("SIWC 记忆分类能力不可用。");
+    return siwc.classifyMemory(input);
+  }
   async reply(request: ChatRequest): Promise<ChatResponse> {
     requestMessages(request);
+    if (request.purpose === "memory_classify") throw new Error("记忆分类仅可通过独立 SIWC 入口执行。");
     return this.exclusive(async () => {
       if (request.ephemeral && request.testAuthorized?.() === false) throw new Error("测试配置已变更，本轮请求已取消，未调用付费模型。");
       if (request.testProvider !== undefined && (!request.ephemeral || request.purpose !== "chat")) {
@@ -245,6 +274,13 @@ export class ProviderRuntime implements ManagedChatRuntime {
         }
         throw error;
       }
+    });
+  }
+  editHistory(sessionId: string, work: () => Promise<void>): Promise<void> {
+    return this.exclusive(async () => {
+      if (await this.deliveryStore.read(sessionId)) throw new Error("当前回复尚未完成交付，请稍后再删除记录。");
+      if (!this.providers.siwc.editHistory) throw new Error("历史编辑尚未就绪。");
+      await this.providers.siwc.editHistory(sessionId, work);
     });
   }
   settleSessionDelivery(sessionId: string, deliveryId: string, text: string | undefined, record: () => Promise<void>, options?: DeliverySettlementOptions): Promise<boolean> {
@@ -311,7 +347,14 @@ export function lazyRuntime(factory: () => Promise<ManagedChatRuntime>): Managed
     validateTestModel: async model => { const runtime = await get(); if (!runtime.validateTestModel) throw new Error("临时 OpenRouter 模型验证不可用。"); return runtime.validateTestModel(model); },
     selectModel: async model => (await get()).selectModel(model),
     reply: async request => (await get()).reply(request),
+    listMemoryModels: async () => (await get()).listModels(),
+    getMemoryModel: async () => { const runtime=await get(); if (!runtime.getMemoryModel) throw new Error("记忆模型设置不可用。"); return runtime.getMemoryModel(); },
+    selectMemoryModel: async model => { const runtime=await get(); if (!runtime.selectMemoryModel) throw new Error("记忆模型设置不可用。"); return runtime.selectMemoryModel(model); },
+    runMemoryTask: async (task,input) => { const runtime=await get(); if(!runtime.runMemoryTask)throw new Error("SIWC 记忆整理能力不可用。"); return runtime.runMemoryTask(task,input); },
+    classifyMemory: async input => { const runtime=await get(); if (!runtime.classifyMemory) throw new Error("SIWC 记忆分类能力不可用。"); return runtime.classifyMemory(input); },
+    maintainContext: async request => (await get()).maintainContext?.(request) ?? { compacted: false, skipped: "unsupported" },
     commitSession: async (id, text, deliveryId) => (await get()).commitSession?.(id, text, deliveryId),
+    editHistory: async (id, work) => { if (!promise) return work(); const runtime = await promise; if (!runtime.editHistory) throw new Error("历史编辑尚未就绪。"); await runtime.editHistory(id, work); },
     resetSession: async (id, deliveryId) => (await get()).resetSession?.(id, deliveryId),
     // Do not initialize an unused provider just to close a CLI runtime.
     close: async () => {

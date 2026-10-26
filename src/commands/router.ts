@@ -3,12 +3,12 @@ import { HOST_TEST_SCRIPTS, isHostTestScript, type HostTestRunner } from "./host
 import type { InboundMessage } from "../channels/types.js";
 import type { ActiveChannelRouter, ActiveProactiveChannel } from "../channels/active.js";
 import type { CommandRuntime } from "../runtime/types.js";
-import type { PersonaStore } from "../persona/store.js";
+import type { ExpressionStore } from "../expression/store.js";
 import { API_UNSUPPORTED_IMAGES, isProvider, providerLabel } from "./providers.js";
 
 export const TELEGRAM_COMMANDS = [
   { command: "retry", description: "重试失败的待回复消息" },
-  { command: "persona", description: "人格预设：切换、添加、修改、删除" },
+  { command: "expression", description: "开启或关闭心理和动作描写" },
   { command: "model", description: "Provider/聊天模型/生图设置" },
   { command: "proactive", description: "选择 Telegram/微信/关闭主动消息" },
   { command: "logs", description: "查看最近 15 分钟日志" },
@@ -42,14 +42,17 @@ export class GatewayCommandRouter {
     private readonly channels: ActiveChannelRouter,
     private readonly logReader?: GatewayLogReader,
     private readonly testRunner?: HostTestRunner,
-    private readonly personas?: PersonaStore,
+    _expressions?: ExpressionStore,
     private readonly controlEntry?: (message: InboundMessage) => string | Promise<string>,
   ) {}
 
   async handle(message: InboundMessage): Promise<string | undefined> {
     const parsed=parseCommand(message.text);
     if (/^npm\s+run(?:\s|$)/i.test(message.text.trim())) return "请使用 /test 诊断面板。";
-    if (parsed && ["model","persona","proactive","test","logs"].includes(parsed.name)) {
+    if (parsed?.name === "model" && (parsed.args==='memory'||parsed.args.startsWith('memory '))) {
+      return this.execute(message);
+    }
+    if (parsed && ["model","expression","proactive","test","logs"].includes(parsed.name)) {
       return "请发送 /"+parsed.name+"，通过面板按钮操作。";
     }
     if (parsed?.name === "channel") return "此入口已改为 /proactive。";
@@ -73,8 +76,8 @@ export class GatewayCommandRouter {
         return this.controlEntry ? this.controlEntry(message) : "控制中心未启用；请配置 GATEWAY_CONTROL_PUBLIC_URL。";
       case "retry":
         return "恢复待回复消息仅在所有者的 Telegram 私聊提供。";
-      case "persona":
-        return message.channel === "telegram" ? this.persona(parsed.args) : "Persona 管理仅支持 Telegram 私聊。";
+      case "expression":
+        return "请发送 /expression，通过面板切换心理和动作描写。";
       case "model":
         return this.modelCommand(parsed.args);
       case "channel":
@@ -87,46 +90,6 @@ export class GatewayCommandRouter {
         return message.channel === "telegram" ? this.hostTest(parsed.args) : "Host 测试仅在 Telegram 私聊可用。";
       default:
         return "这个命令不存在。";
-    }
-  }
-
-  private async persona(args: string): Promise<string> {
-    if (!this.personas) return "当前运行方式尚未启用 Persona。";
-    try {
-      const [action = "", name = "", ...words] = args.trim().split(/\s+/).filter(Boolean);
-      if (action === "add" || action === "set") {
-        if (!name || !words.length) return "用法：/persona " + action + " <name> <ENGLISH_KEYWORDS...>";
-        const result = await this.personas.define(name, words, action === "set");
-        return "已" + (action === "add" ? "添加" : "修改") + " " + name.toLowerCase() + "："
-          + result.presets[name.toLowerCase()]!.join(", ");
-      }
-      if (action === "delete" || action === "del") {
-        if (!name || words.length) return "用法：/persona delete <name>";
-        const result = await this.personas.remove(name);
-        return "已删除 " + name.toLowerCase() + "。当前模式：" + result.active;
-      }
-      if (action === "show") {
-        if (!name || words.length) return "用法：/persona show <name>";
-        const state = await this.personas.snapshot();
-        const tags = state.presets[name.toLowerCase()];
-        return tags ? name.toLowerCase() + "：" + tags.join(", ") : "找不到这个 Persona。";
-      }
-      if (!action) {
-        const state = await this.personas.snapshot();
-        return [
-          "当前 Persona：" + state.active,
-          ...Object.entries(state.presets).map(([id, tags]) =>
-            (id === state.active ? "● " : "○ ") + id + " · " + tags.join(", ")),
-          "切换：/persona formal",
-          "详情：/persona show formal",
-          "管理：/persona add、set、delete",
-        ].join("\n");
-      }
-      if (name || words.length) return "用法：/persona [name|add|set|delete|show]；发送 /persona 查看示例。";
-      const state = await this.personas.select(action);
-      return "Persona 已切到 " + state.active + "（" + state.presets[state.active]!.join(", ") + "）。";
-    } catch (error) {
-      return error instanceof Error ? error.message : "Persona 操作失败。";
     }
   }
 
@@ -162,6 +125,12 @@ export class GatewayCommandRouter {
   private async modelCommand(args: string): Promise<string> {
     if (args === "provider" || args.startsWith("provider ")) return this.provider(args.slice("provider".length).trim());
     if (args === "image" || args.startsWith("image ")) return this.image(args.slice("image".length).trim());
+    if (args === "memory" || args.startsWith("memory ")) {
+      if (!this.runtime.listMemoryModels || !this.runtime.getMemoryModel || !this.runtime.selectMemoryModel) return "记忆模型设置不可用。";
+      const model=args.slice(6).trim();
+      if (model) return "记忆分类模型已设为："+await this.runtime.selectMemoryModel(model);
+      return "记忆分类模型（SIWC）："+await this.runtime.getMemoryModel()+"\n"+(await this.runtime.listMemoryModels()).map(m=>m.id).join("\n");
+    }
     return this.model(args);
   }
 

@@ -10,6 +10,8 @@ export interface PlannedWake {
 export interface DailyWakePlan {
   date: string;
   channel: string;
+  // Missing on legacy plans; only reuse intents under the policy that produced them.
+  policyRevision?: string;
   lastUserAt?: string;
   generatedAt: string;
   wakes: PlannedWake[];

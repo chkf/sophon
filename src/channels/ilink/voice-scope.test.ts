@@ -14,7 +14,7 @@ import { VoiceService } from "../../voice/service.js";
 import { VoiceStore } from "../../voice/store.js";
 import { VoiceSettingsStore } from "../../voice/settings.js";
 import { SessionStore } from "../../sessions/store.js";
-import { PersonaStore } from "../../persona/store.js";
+import { ExpressionStore } from "../../expression/store.js";
 import { migrateState, migrateSchema } from "../../state/migration.js";
 import { SerialQueue } from "../../util/serial-queue.js";
 import { createCredentialEncryption } from "../../runtime/siwc/credential-encryption.js";

@@ -1,7 +1,7 @@
 import type { PanelView, PanelButton } from "../channels/telegram/panels.js";
 import type { ManagedChatRuntime, ProviderId } from "../runtime/types.js";
 import type { ActiveChannelRouter } from "../channels/active.js";
-import type { PersonaStore } from "../persona/store.js";
+import type { ExpressionStore } from "../expression/store.js";
 import type { InboundMessage } from "../channels/types.js";
 import { IMAGE_PRESETS } from "../runtime/image-settings.js";
 import { readLogEvents, summarizeLog, type LogRange, type LogSource } from "./host-logs.js";
@@ -11,14 +11,14 @@ import { API_UNSUPPORTED_IMAGES, PROVIDERS, isPaidProvider, providerLabel } from
 const button=(text:string,run:()=>Promise<PanelView>):PanelButton=>({text,run});
 export class CommandPanels {
   constructor(private readonly runtime:ManagedChatRuntime,private readonly channels:ActiveChannelRouter,
-    private readonly personas:PersonaStore,private readonly diagnostics:DiagnosticRegistry,
+    private readonly expressions:ExpressionStore,private readonly diagnostics:DiagnosticRegistry,
     private readonly logDir:string,private readonly timezone:string,private readonly credits:()=>Promise<string>,
     private readonly weixin?:{choose:()=>Promise<PanelView>;panel:()=>Promise<PanelView>},
     private readonly voice?:{open:()=>Promise<PanelView>}) {}
   async open(command:string,_message:InboundMessage):Promise<PanelView|undefined> {
-    if(!["model","persona","proactive","test","logs"].includes(command))return undefined;
+    if(!["model","expression","proactive","test","logs"].includes(command))return undefined;
     if(command==="model")return this.model();
-    if(command==="persona")return this.persona();
+    if(command==="expression")return this.expression();
     if(command==="proactive")return this.proactive();
     if(command==="logs")return this.logs();
     return this.diagnosticMenu();
@@ -28,7 +28,7 @@ export class CommandPanels {
     let selected="暂时不可用";try{const s=await this.runtime.getModelSelection();selected=s.model??s.resolvedModel??"Auto";}catch{}
     let image=provider==="api"?"不支持":"未配置";if(provider!=="api")try{image=(await this.runtime.getImageSettings?.())?.model??image;}catch{}
     return {text:[note,"模型设置","Provider："+providerLabel(provider),"聊天模型："+selected,"生图模型："+image,...(provider==="api"?["本页仅显示配置，连接未验证；可在 /test 显式测试（可能收费）。",API_UNSUPPORTED_IMAGES]:[])].filter(Boolean).join("\n"),rows:[
-      [button("聊天模型",()=>this.models())],[button("生图设置",()=>this.images())],[button("切换 Provider",()=>this.providers())],...(this.voice?[[button("语音设置",()=>this.voice!.open())]]:[])]};
+      [button("聊天模型",()=>this.models())],...(this.runtime.listMemoryModels ? [[button("记忆分类模型（SIWC）",()=>this.memoryModels())]] : []),[button("生图设置",()=>this.images())],[button("切换 Provider",()=>this.providers())],...(this.voice?[[button("语音设置",()=>this.voice!.open())]]:[])]};
   }
   async models(page=0):Promise<PanelView> {
     const provider=await this.runtime.getProvider?.()??"api";
@@ -45,6 +45,21 @@ export class CommandPanels {
     if(!isPaidProvider(provider))return save();
     return {text:"选择 "+providerLabel(provider)+" / "+(model??"Auto")+"？\n后续聊天和已启用的后台活动可能产生费用。",rows:[
       [button("确认选择",save),button("取消",()=>this.models())]]};
+  }
+  async memoryModels(page=0,note=""):Promise<PanelView> {
+    if (!this.runtime.listMemoryModels || !this.runtime.getMemoryModel || !this.runtime.selectMemoryModel) throw Error("记忆模型设置不可用。");
+    const models=await this.runtime.listMemoryModels(),selected=await this.runtime.getMemoryModel();
+    const pages=Math.max(1,Math.ceil(models.length/8));page=Math.max(0,Math.min(page,pages-1));
+    const rows=models.slice(page*8,page*8+8).map(m=>[button((m.id===selected?"✓ ":"")+m.displayName.slice(0,45),async()=>{
+      await this.runtime.selectMemoryModel!(m.id);return this.memoryModels(page,"已选择："+m.id);
+    })]);
+    const nav:PanelButton[]=[];
+    if(page>0)nav.push(button("上一页",()=>this.memoryModels(page-1)));
+    if(page+1<pages)nav.push(button("下一页",()=>this.memoryModels(page+1)));
+    if(nav.length)rows.push(nav);rows.push([button("返回",()=>this.model())]);
+    return {text:[note,"记忆分类模型 · SIWC · "+(page+1)+"/"+pages,"当前："+selected,
+      !models.some(m=>m.id===selected)?"当前模型不可用，分类任务将等待重新选择或权限恢复。":"",
+      "此设置只影响后续记忆分类任务，不改变聊天模型。"].filter(Boolean).join("\n"),rows};
   }
   async providers():Promise<PanelView> {
     const current=await this.runtime.getProvider?.();
@@ -73,37 +88,12 @@ export class CommandPanels {
     const active=await this.channels.getActive();
     return {text:"主动消息渠道\n只影响主动消息，你仍可使用任一已配置渠道聊天。",rows:(["telegram","wechat","off"] as const).map(c=>[button((c===active?"✓ ":"")+({telegram:"Telegram",wechat:"微信",off:"关闭"}[c]),async()=>{if(c==="wechat"&&this.weixin)return this.weixin.choose();await this.channels.setActive(c);return this.proactive();})]).concat(this.weixin?[[button("微信管理 / 重新绑定",()=>this.weixin!.panel())]]:[])};
   }
-  async persona(manage=false):Promise<PanelView> {
-    const s=await this.personas.snapshot();
-    const rows=Object.keys(s.presets).map(name=>[button((s.active===name?"✓ ":"")+name,async()=>{
-      if(manage)return this.personaDetail(name);await this.personas.select(name);return this.persona();
-    })]);
-    rows.push([button("角色描写："+(s.showStageDirections ? "显示" : "隐藏"),async()=>{
-      await this.personas.setShowStageDirections(!s.showStageDirections);return this.persona(manage);
-    })]);
-    rows.push([button(manage?"新增预设":"管理预设",()=>manage?this.personaName():this.persona(true))]);
-    if(manage)rows.push([button("返回",()=>this.persona())]);
-    return {text:(manage?"管理人格预设":"选择人格")+"\n当前："+s.active,rows};
-  }
-  async personaDetail(name:string):Promise<PanelView> {
-    const s=await this.personas.snapshot();if(!s.presets[name])return this.persona(true);
-    return {text:name+"\n"+s.presets[name]!.join(", "),rows:[
-      [button("编辑关键词",()=>this.personaWords(name,true))],
-      [button("删除",async()=>({text:"确定删除预设 "+name+"？",rows:[[button("确认删除",async()=>{await this.personas.remove(name);return this.persona(true);}),button("取消",()=>this.personaDetail(name))]]}))],
-      [button("返回",()=>this.persona(true))]]};
-  }
-  async personaName():Promise<PanelView> {
-    return {text:"请回复这条面板消息，填写预设名称（1–24 位英文字母、数字或下划线，以字母开头）。",rows:[[button("取消",()=>this.persona(true))]],input:async text=>{
-      const name=text.trim().toLowerCase();
-      if(!/^[a-z][a-z0-9_]{0,23}$/.test(name)|| (await this.personas.snapshot()).presets[name])return {...await this.personaName(),text:"名称无效或已存在，请回复此面板重新填写。"};
-      return this.personaWords(name,false);
-    }};
-  }
-  async personaWords(name:string,edit:boolean):Promise<PanelView> {
-    return {text:"请回复这条面板消息，填写 "+name+" 的英文关键词，用空格分隔。",rows:[[button("取消",()=>this.persona(true))]],input:async text=>{
-      try{await this.personas.define(name,text.trim().split(/\s+/),edit);return this.personaDetail(name);}
-      catch{return {...await this.personaWords(name,edit),text:"关键词保存失败，请检查格式后回复此面板重试。"};}
-    }};
+  async expression():Promise<PanelView> {
+    const state=await this.expressions.snapshot();
+    return {text:"心理和动作描写："+(state.showStageDirections?"开启":"关闭"),rows:[
+      [button(state.showStageDirections?"关闭描写":"开启描写",async()=>{
+        await this.expressions.setShowStageDirections(!state.showStageDirections);return this.expression();
+      })]]};
   }
   async logs(range:LogRange="15m",source:LogSource="all",errorsOnly=true):Promise<PanelView> {
     const events=await readLogEvents(this.logDir,{range,source,errorsOnly,timezone:this.timezone});

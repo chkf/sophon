@@ -8,10 +8,10 @@ export class VoiceSupplementError extends Error {
 }
 export const voiceTool: RuntimeTool = {
   name: VOICE_TOOL,
-  description: "登记下一段语音，可多次调用，与文字和角色描写按生成顺序交替交付。text 只写台词，不含角色描写；instruction 结合 Persona、对应描写和语境描述情绪、语气、语速及停顿。成功仅表示已登记，实际发送由 Gateway 完成。",
+  description: "登记下一段语音，可多次调用，与文字和角色描写按生成顺序交替交付。text 只写台词，不含角色描写；instruction 结合 Core、对应描写和语境描述情绪、语气、语速及停顿。成功仅表示已登记，实际发送由 Gateway 完成。",
   parameters: {type:"object",properties:{
     text:{type:"string",description:"实际台词，1–500 字符，不含角色描写、代码、链接或排版标记。"},
-    instruction:{type:"string",maxLength:MAX_VOICE_INSTRUCTION_CHARS,description:"结合 Persona、对应角色描写和当前语境生成自然的情绪、语气、语速和停顿描述。"}
+    instruction:{type:"string",maxLength:MAX_VOICE_INSTRUCTION_CHARS,description:"结合 Core、对应角色描写和当前语境生成自然的情绪、语气、语速和停顿描述。"}
   },required:["text","instruction"],additionalProperties:false},
   readOnly:false,
   replaySafe:true,
@@ -25,7 +25,7 @@ export class VoiceTurn {
   // Legacy getters are retained only for older provider consumers.
   get text(): string | undefined { return this.parts.find(part => part.kind === "voice")?.text; }
   get instruction(): string | undefined { return this.parts.find(part => part.kind === "voice")?.instruction; }
-  readonly guidance="根据内容和情绪自然选择文字或语音，可以分成多个气泡，不限制语音段数。角色描写遵循 Core 和 Persona 的设置；如需描写，使用简短、中性的动作说明。instruction 利用对应描写指导表达，语音只朗读正文。普通文字与 send_voice 按输出顺序交付。不要重复输出已登记的台词。工具成功仅代表登记，实际发送和失败回退由 Gateway 完成。";
+  readonly guidance="根据内容和情绪自然选择文字或语音，可以分成多个气泡，不限制语音段数。角色描写遵循 Core 和独立描写开关的设置；如需描写，使用简短、中性的心理或动作描写。instruction 利用对应描写指导表达，语音只朗读正文。普通文字与 send_voice 按输出顺序交付。不要重复输出已登记的台词。工具成功仅代表登记，实际发送和失败回退由 Gateway 完成。";
   recordText(text: string, id: string): void {
     if (this.recorded.has(id)) return;
     this.recorded.add(id);

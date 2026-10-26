@@ -70,9 +70,14 @@ export class ControlCenter {
     this.auth = new ControlAuth(this.url.protocol === "https:");
   }
 
-  loginMessage(): string {
-    return "Sophon 控制中心\n" + this.url.href + "\n\n一次性登录码（5 分钟内有效）：\n" + this.auth.issueCode();
+  loginEntry(): { text: string; url: string } {
+    const code = this.auth.issueCode();
+    const url = new URL(this.url.href);
+    url.hash = new URLSearchParams({ login_code: code }).toString();
+    return { url: url.href, text: "Sophon 控制中心\n打开以下链接即可自动登录（5 分钟内有效）。\n\n备用登录码：\n" + code };
   }
+
+  loginMessage(): string { const entry = this.loginEntry(); return entry.text + "\n" + entry.url; }
 
   start(): void { this.options.host.start(); }
   beginShutdown(): void {
@@ -162,12 +167,17 @@ export class ControlCenter {
       switch (action) {
         case "conversations": data = await this.options.data.conversations(input); break;
         case "history": data = await this.options.data.history(input as never); break;
+        case "history-delete": data = await mutate(() => this.options.data.deleteHistory(input as never)); break;
         case "core": data = await this.options.data.core(); break;
         case "core-save": data = await mutate(() => this.options.data.saveCore(input as never)); break;
         case "recent": data = await this.options.data.recent(input); break;
         case "recent-save": data = await mutate(() => this.options.data.saveRecent(input as never)); break;
         case "recent-archive": data = await mutate(() => this.options.data.archiveRecent(input as never)); break;
         case "recent-delete": data = await mutate(() => this.options.data.deleteRecent(input as never)); break;
+        case "graph": data = this.options.data.memory.overview(); break;
+        case "graph-topics": data = this.options.data.memory.topics(input); break;
+        case "graph-nodes": data = this.options.data.memory.nodes(input); break;
+        case "graph-node": data = await this.options.data.memory.node(input); break;
         case "context": data = await this.options.data.context(); break;
         case "tasks": {
           if (input.limit !== undefined && (typeof input.limit !== "number" || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100)) {

@@ -18,6 +18,7 @@
         <button type="button" data-page="tasks" aria-current="page"><span class="nav-icon" aria-hidden="true">◈</span>主动任务<span class="nav-active-dot"></span></button>
         <button type="button" data-page="history"><span class="nav-icon" aria-hidden="true">▤</span>聊天历史</button>
         <button type="button" data-page="memory"><span class="nav-icon" aria-hidden="true">▧</span>Core / Recent</button>
+        <button type="button" data-page="graph"><span class="nav-icon" aria-hidden="true">◇</span>记忆图</button>
         <button type="button" data-page="context"><span class="nav-icon" aria-hidden="true">▱</span>上下文</button>
         <button type="button" data-page="host"><span class="nav-icon" aria-hidden="true">▥</span>主机监控</button>
       </nav>
@@ -32,7 +33,7 @@
       <section id="login" class="login-panel" aria-labelledby="login-title">
         <div class="login-symbol" aria-hidden="true">S</div>
         <p class="eyebrow">PRIVATE WORKSPACE</p><h2 id="login-title">连接你的 Sophon</h2>
-        <p>在 Telegram 所有者私聊发送 <code>/status</code>，将一次性登录码粘贴到下方。</p>
+        <p>在 Telegram 所有者私聊发送 <code>/status</code>，点击返回的按钮即可自动登录；也可在下方输入备用登录码。</p>
         <form id="login-form"><label for="login-code">一次性登录码</label><input id="login-code" name="code" type="password" autocomplete="one-time-code" maxlength="256" required placeholder="输入登录码"><button class="button primary" type="submit">进入控制中心 <span aria-hidden="true">→</span></button></form>
         <p class="muted small">登录码仅可使用一次。页面关闭不会停止 Sophon。</p>
       </section>

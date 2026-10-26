@@ -124,13 +124,18 @@ export async function deliverPreparedReply(api: TelegramApiClient, pending: Tele
       if (pending.senderId !== pending.chatId || !validSticker(pending.sticker, pending.chatId, accountId))
         throw new Error("Prepared sticker is not authorized for this bot and chat.");
       const reply = attached ? undefined : verified;
-      const sent = await api.call<{ message_id?: number }>("sendSticker", { chat_id: pending.chatId,
-        sticker: pending.sticker.fileId, ...(reply ? { reply_parameters: reply } : {}) });
+      const gif = pending.sticker.format === "gif";
+      const gifDocument = pending.sticker.format === "gif_document" || pending.sticker.format === "mp4_document";
+      const sent = await api.call<{ message_id?: number }>(gif ? "sendAnimation" : gifDocument ? "sendDocument" : "sendSticker", {
+        chat_id: pending.chatId,
+        [gif ? "animation" : gifDocument ? "document" : "sticker"]: pending.sticker.fileId,
+        ...(reply ? { reply_parameters: reply } : {}) });
       const id = sent?.message_id;
-      if (id === undefined || !Number.isSafeInteger(id) || id <= 0) throw new Error("Sticker delivery is uncertain: missing message_id.");
+      if (id === undefined || !Number.isSafeInteger(id) || id <= 0) throw new Error("Reaction delivery is uncertain: missing message_id.");
       if (reply) attached = true;
-      deliveredText.push("[已发送贴纸]");
-      record(id, "[已发送贴纸]");
+      const label = pending.sticker.format === "mp4_document" ? "[已发送 MP4 动图]" : gif || gifDocument ? "[已发送 GIF]" : "[已发送贴纸]";
+      deliveredText.push(label);
+      record(id, label);
       if (platformMessages.length) platformMessages[platformMessages.length - 1]!.attachments = [{ kind: "image", sticker: pending.sticker }];
     }
     for (const image of (pending.kind === "model_reply" ? pending.images ?? [] : []).slice(0, 1)) {
@@ -174,7 +179,8 @@ export async function deliverPreparedReply(api: TelegramApiClient, pending: Tele
     if (pending.kind === "model_reply") {
       try {
         await callbacks.onReplyDelivered?.({
-          conversationId: pending.chatId, senderId: pending.senderId, reply: pending.text || (pending.sticker ? "[已发送贴纸]" : ""),
+          conversationId: pending.chatId, senderId: pending.senderId, reply: pending.text || (pending.sticker
+            ? (pending.sticker.format === "mp4_document" ? "[已发送 MP4 动图]" : pending.sticker.format.startsWith("gif") ? "[已发送 GIF]" : "[已发送贴纸]") : ""),
           images: pending.images, deliveryId: pending.deliveryId,
           ...(platformMessages.length ? { platformMessages } : {}),
         });

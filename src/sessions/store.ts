@@ -1,8 +1,9 @@
+import { MemoryStore } from "../memory/store.js";
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { mkdirSync, existsSync, realpathSync } from 'node:fs';
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
-import type { ChannelName, InboundMessageReference, PlatformMessageFragment } from '../channels/types.js';
+import type { ChannelName, InboundMessageReference, PlatformMessageFragment, TelegramSticker } from '../channels/types.js';
 import type { RuntimeHistory, RuntimeHistoryEntry } from '../runtime/types.js';
 import { writeJsonAtomic } from '../util/atomic-json.js';
 import { SerialQueue } from '../util/serial-queue.js';
@@ -14,14 +15,24 @@ export { normalizeSessionMessage } from './types.js';
 export interface SessionView { tail: SessionMessage[]; lastUser?: SessionMessage; lastAssistant?: SessionMessage; unansweredCount: number; unansweredStart?: number; history: RuntimeHistory }
 type Conv = { key: string; channel: ChannelName; conversation_id: string; sender_id: string; updated_at: string; count: number; last_user: number|null; last_assistant: number|null; last_reply: number|null; unanswered_users: number };
 type Msg = { seq: number; msg_id: string|null; role: 'user'|'assistant'; content: string; at: string; attachments: string|null; origin: 'chat'|'proactive'|null; partial: number|null; source:string|null; source_channel?:ChannelName|null };
+export interface TelegramReactionEntry { sticker: TelegramSticker; note?: string; seenAt: string }
+const REACTION_CATALOG_KEY = 'runtime/telegram-reactions.json';
+const REACTION_BACKFILL_KEY = 'runtime/telegram-reactions-backfill-v1';
 const key = (channel: ChannelName, id: string) => channel + ':' + id;
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 function cursor(n: number) { if (!Number.isSafeInteger(n) || n < 0) throw new Error('Invalid history cursor.'); }
 function instant(s?: string) { if (s === undefined) return undefined; const n = Date.parse(s); if (!Number.isFinite(n)) throw new Error('Invalid date filter.'); return n; }
 
+/** Revision of the exact decoded record shown by the control center. */
+export function messageRevision(message: SessionMessage): string { return hash(JSON.stringify(message)); }
+
 /** SQLite is the only active session store. */
 export class SessionStore {
   private readonly ops = new SerialQueue();
+  private memory?: MemoryStore;
+  enableMemory(ownerId:string): MemoryStore {
+    return this.memory ??= new MemoryStore(this.db, 'telegram:'+ownerId);
+  }
   private readonly db: DatabaseSync;
   private readonly dir: string;
   private readonly roots: string[];
@@ -79,6 +90,100 @@ export class SessionStore {
     if(rows.some(row=>row.quick_check!=='ok'))throw new Error('SQLite quick_check failed.');
   }); }
   close() { this.db.close(); }
+  supportsTelegramReactionNotes():boolean { return this.version !== 0; }
+  private reactionCatalog(): TelegramReactionEntry[] {
+    if (!this.version) return [];
+    const row=getState(this.db,REACTION_CATALOG_KEY);
+    if (!row) return [];
+    let value:unknown;
+    try { value=JSON.parse(row.value); } catch { throw new Error('Telegram 表情包目录损坏；不会覆盖原记录。'); }
+    if (!Array.isArray(value) || value.some(item=>!item || typeof item!=='object' ||
+      typeof item.seenAt!=='string' || !item.sticker || typeof item.sticker.fileId!=='string' ||
+      typeof item.sticker.accountId!=='string' || typeof item.sticker.chatId!=='string' ||
+      (item.note!==undefined && typeof item.note!=='string')))
+      throw new Error('Telegram 表情包目录格式无效；不会覆盖原记录。');
+    return value as TelegramReactionEntry[];
+  }
+  /** Import only real inbound Telegram sticker metadata already saved in message history. */
+  private reactionCatalogWithHistory(): TelegramReactionEntry[] {
+    const entries=this.reactionCatalog();
+    if (!this.version || getState(this.db,REACTION_BACKFILL_KEY)) return entries;
+    const known=new Map(entries.map(entry=>[
+      entry.sticker.accountId+'\0'+entry.sticker.chatId+'\0'+entry.sticker.fileId,entry]));
+    const rows=this.db.prepare("SELECT source,at FROM messages WHERE conv_key LIKE 'telegram:%' AND source LIKE '%\"sticker\"%' ORDER BY at_ms")
+      .all() as {source:string;at:string}[];
+    for (const row of rows) {
+      let source:unknown;
+      try { source=JSON.parse(row.source); } catch { continue; }
+      if (!source || typeof source!=='object') continue;
+      const fragments=(source as {platformMessages?:unknown}).platformMessages;
+      if (!Array.isArray(fragments)) continue;
+      for (const fragment of fragments) {
+        if (!fragment || typeof fragment!=='object' || fragment.direction!=='inbound' ||
+          typeof fragment.accountId!=='string' || typeof fragment.conversationId!=='string' || !Array.isArray(fragment.attachments)) continue;
+        for (const attachment of fragment.attachments) {
+          const sticker=attachment?.sticker as TelegramSticker|undefined;
+          if (!sticker || !/^telegram-bot:[1-9][0-9]*$/.test(sticker.accountId) ||
+            sticker.accountId!==fragment.accountId || sticker.chatId!==fragment.conversationId ||
+            !/^[A-Za-z0-9_-]{1,512}$/.test(sticker.fileId) ||
+            !['static','animated','video','gif','gif_document','mp4_document'].includes(sticker.format)) continue;
+          const key=sticker.accountId+'\0'+sticker.chatId+'\0'+sticker.fileId;
+          const existing=known.get(key);
+          if (existing) { if (row.at>existing.seenAt) existing.seenAt=row.at; }
+          else known.set(key,{sticker,seenAt:row.at});
+        }
+      }
+    }
+    const merged=[...known.values()];
+    const annotated=merged.filter(entry=>entry.note);
+    const unannotated=merged.filter(entry=>!entry.note).sort((a,b)=>b.seenAt.localeCompare(a.seenAt)).slice(0,1000);
+    const result=[...annotated,...unannotated];
+    putState(this.db,{key:REACTION_CATALOG_KEY,value:JSON.stringify(result)});
+    putState(this.db,{key:REACTION_BACKFILL_KEY,value:'true'});
+    return result;
+  }
+  /** Store only source identifiers and descriptions; original media remains in the media cache. */
+  rememberTelegramReactions(stickers:TelegramSticker[], seenAt:string):Promise<void> {
+    if (!this.version || !stickers.length) return Promise.resolve();
+    return this.ops.run(async()=>this.tx(()=>{
+      const entries=this.reactionCatalogWithHistory();
+      for (const sticker of stickers) {
+        const existing=entries.find(entry=>entry.sticker.accountId===sticker.accountId &&
+          entry.sticker.chatId===sticker.chatId && entry.sticker.fileId===sticker.fileId);
+        if (existing) { existing.sticker=sticker; existing.seenAt=seenAt; }
+        else entries.push({sticker,seenAt});
+      }
+      // Preserve all annotated entries; bound only unannotated inventory growth.
+      const annotated=entries.filter(entry=>entry.note);
+      const unannotated=entries.filter(entry=>!entry.note).sort((a,b)=>b.seenAt.localeCompare(a.seenAt)).slice(0,1000);
+      putState(this.db,{key:REACTION_CATALOG_KEY,value:JSON.stringify([...annotated,...unannotated])});
+    }));
+  }
+  listTelegramReactions(accountId:string,chatId:string,query?:string,limit=50):Promise<TelegramReactionEntry[]> {
+    return this.ops.run(async()=>this.tx(()=>this.reactionCatalogWithHistory())
+      .filter(entry=>entry.sticker.accountId===accountId && entry.sticker.chatId===chatId)
+      .filter(entry=>!query || [entry.note,entry.sticker.emoji,entry.sticker.setName,entry.sticker.format]
+        .some(value=>value?.toLowerCase().includes(query.toLowerCase())))
+      .sort((a,b)=>b.seenAt.localeCompare(a.seenAt)).slice(0,limit));
+  }
+  setTelegramReactionNote(accountId:string,chatId:string,fileId:string,note:string):Promise<TelegramReactionEntry> {
+    if (!this.version) return Promise.reject(new Error('当前主库尚未迁移，无法保存表情包备注。'));
+    const cleaned=note.trim();
+    if (!cleaned || cleaned.length>280) return Promise.reject(new Error('备注须为 1 至 280 个字符。'));
+    return this.ops.run(async()=>{
+      const chosen=this.tx(()=>{
+        const entries=this.reactionCatalogWithHistory();
+        const entry=entries.find(item=>item.sticker.accountId===accountId && item.sticker.chatId===chatId && item.sticker.fileId===fileId);
+        if (!entry) throw new Error('只能给当前私聊真实收到并已登记的表情包写备注。');
+        entry.note=cleaned;
+        putState(this.db,{key:REACTION_CATALOG_KEY,value:JSON.stringify(entries)});
+        return entry;
+      });
+      const verified=this.reactionCatalog().find(item=>item.sticker.accountId===accountId && item.sticker.chatId===chatId && item.sticker.fileId===fileId);
+      if (verified?.note!==cleaned) throw new Error('表情包备注写入后校验失败。');
+      return chosen;
+    });
+  }
   private tx<T>(body: () => T): T { this.db.exec('BEGIN IMMEDIATE'); try { const result = body(); this.db.exec('COMMIT'); return result; } catch (e) { try { this.db.exec('ROLLBACK'); } catch { /* original failure wins */ } throw e; } }
   private routes():{route:string;target:string;owner:string}[] {
     if(this.version!==2)return this.db.prepare('SELECT route,target,owner FROM owner_session_routes').all() as {route:string;target:string;owner:string}[];
@@ -120,8 +225,9 @@ export class SessionStore {
     const exists=this.db.prepare('SELECT 1 FROM messages WHERE conv_key=? AND msg_id=?');
     for(const value of messages) {
       const m=validateMessage(value);
-      if(m.id) {if(seen.has(m.id))continue;seen.add(m.id);if(exists.get(k,m.id))continue;}
-      insert.run(k,count,m.id??null,m.role,m.content,m.at,Date.parse(m.at),m.attachments===undefined?null:JSON.stringify(this.central?references(m.attachments,this.rootDir,'store',this.roots):m.attachments),m.origin??null,m.partial===undefined?null:m.partial?1:0,m.source?JSON.stringify(this.central?references(this.version===2?(({channel:_,...source})=>source)(m.source):m.source,this.rootDir,'store',this.roots):m.source):null,...(this.version===2?[m.source?.channel??null]:[]));
+      if(m.id) {if(seen.has(m.id))continue;seen.add(m.id);if(exists.get(k,m.id)||this.deletedIds().includes(hash(k+'\0'+m.id)))continue;}
+      const inserted=insert.run(k,count,m.id??null,m.role,m.content,m.at,Date.parse(m.at),m.attachments===undefined?null:JSON.stringify(this.central?references(m.attachments,this.rootDir,'store',this.roots):m.attachments),m.origin??null,m.partial===undefined?null:m.partial?1:0,m.source?JSON.stringify(this.central?references(this.version===2?(({channel:_,...source})=>source)(m.source):m.source,this.rootDir,'store',this.roots):m.source):null,...(this.version===2?[m.source?.channel??null]:[]));
+      if(this.memory && k===this.memory.scope && sender===id && m.role==='assistant' && m.origin==='chat' && m.partial===false) this.memory.enqueue(Number(inserted.lastInsertRowid));
       if(m.role==='user'){lastUser=count;unanswered++;}
       else{lastAssistant=count;if(replyState([m]).lastReply!==undefined){lastReply=count;unanswered=0;}}
       count++;lastAt=m.at;fresh.push(m);
@@ -133,6 +239,49 @@ export class SessionStore {
     return this.ops.run(async()=>{messages.forEach(validateMessage);
       const committed=this.tx(()=>this.add(channel,id,senderId,messages)),row=this.conv(channel,id)!;
       return {...this.meta(row),count:row.count,committed};});
+  }
+  private deletedIds(): string[] {
+    if(this.version!==2)return [];
+    const row=getState(this.db,'sessions/deleted_messages');
+    if(!row)return [];
+    const value:unknown=JSON.parse(row.value);
+    if(row.encoding!=='json'||!Array.isArray(value)||value.some(x=>typeof x!=='string'||!/^[a-f0-9]{64}$/.test(x)))throw Error('Invalid deleted message guards.');
+    return value;
+  }
+  /** Physical row deletion. Stable dedup hashes live outside the transcript. */
+  deleteMessage(channel:ChannelName,id:string,index:number,expectedRevision:string):Promise<'deleted'|'conflict'|'missing'> {
+    return this.ops.run(async()=>this.tx(()=>{
+      cursor(index);
+      if(this.version!==2)throw Error('History deletion requires schema v2.');
+      const message=this.range(channel,id,index,1)[0];
+      if(!message)return 'missing';
+      if(messageRevision(message)!==expectedRevision)return 'conflict';
+      const k=this.sessionKey(channel,id),oldCount=this.conv(channel,id)!.count;
+      if(message.id)putState(this.db,{key:'sessions/deleted_messages',category:'metadata',value:JSON.stringify([...new Set([...this.deletedIds(),hash(k+'\0'+message.id)])])});
+      // Adjust coverage metadata only; encrypted compaction and contextItems
+      // remain byte-for-byte intact. This commits atomically with row renumbering.
+      for(const row of this.db.prepare("SELECT key,value FROM gateway_state WHERE key LIKE 'runtime/context/%.json'").all() as {key:string;value:string}[]) {
+        const saved=JSON.parse(row.value);
+        const laneId=saved.sessionId;
+        if(!(laneId===k || typeof laneId==='string'&&laneId.startsWith(k+':provider:') || !laneId&&row.key==='runtime/context/'+hash(k)+'.json'))continue;
+        if(saved.pendingDeliveryItems || saved.pendingDeliveryId)throw Error('Pending context delivery prevents history edit.');
+        for(const field of ['historyCursor','attachmentCursor'])if(typeof saved[field]==='number'&&saved[field]>index)saved[field]--;
+        if(saved.checkpoint?.coveredThroughSeq>index)saved.checkpoint.coveredThroughSeq--;
+        if(saved.checkpoint?.replayFromSeq>index)saved.checkpoint.replayFromSeq--;
+        saved.historyRebuildPending=true;
+        putState(this.db,{key:row.key,category:'runtime',value:JSON.stringify(saved)});
+      }
+      this.db.prepare('DELETE FROM messages WHERE conv_key=? AND seq=?').run(k,index);
+      // Move into a disjoint positive range first, avoiding UNIQUE(seq) collisions.
+      this.db.prepare('UPDATE messages SET seq=seq+? WHERE conv_key=? AND seq>?').run(oldCount,k,index);
+      this.db.prepare('UPDATE messages SET seq=seq-? WHERE conv_key=? AND seq>=?').run(oldCount+1,k,oldCount);
+      this.db.prepare('UPDATE conversations SET count=count-1,recent_review_through_seq=CASE WHEN recent_review_through_seq>=? THEN recent_review_through_seq-1 ELSE recent_review_through_seq END WHERE key=?').run(index,k);
+      const remaining=this.range(channel,id,0,oldCount-1),state=replyState(remaining),roles=remaining.map(m=>m.role);
+      const user=roles.lastIndexOf('user'),assistant=roles.lastIndexOf('assistant');
+      this.db.prepare('UPDATE conversations SET last_user=?,last_assistant=?,last_reply=?,unanswered_users=? WHERE key=?')
+        .run(user<0?null:user,assistant<0?null:assistant,state.lastReply??null,state.unansweredUsers??0,k);
+      return 'deleted';
+    }));
   }
   get(channel:ChannelName,id:string):Promise<SessionRecord|undefined> {return this.ops.run(async()=>{const row=this.conv(channel,id);return row?{...this.meta(row),messages:this.range(channel,id,0,row.count)}:undefined;});}
   readRange(channel:ChannelName,id:string,offset:number,limit=128):Promise<SessionMessage[]> {return this.ops.run(async()=>this.range(channel,id,offset,limit));}

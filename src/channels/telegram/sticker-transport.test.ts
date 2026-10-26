@@ -26,7 +26,7 @@ async function preview(format: "static" | "animated" | "video", failure?: "missi
 }
 for (const format of ["static", "animated", "video"] as const) test(`${format} sticker uses the expected visual source and keeps original send metadata`, async () => {
   const { item, fetched } = await preview(format);
-  assert.deepEqual(fetched, [format === "static" ? sticker.fileId : "fixture_preview"]);
+  assert.deepEqual(fetched, format === "video" ? [sticker.fileId, "fixture_preview"] : [format === "static" ? sticker.fileId : "fixture_preview"]);
   assert.equal(item.sticker!.fileId, sticker.fileId);
   assert.equal(item.sticker!.format, format);
   assert.ok(item.localPath);

@@ -83,12 +83,14 @@ export interface ImageSettings {
   dailyLimit: number;
 }
 
-export type RequestPurpose = "chat" | "heartbeat_plan" | "heartbeat_decision" | "recent_review" | "media_exploration" | "diagnostic";
+export type RequestPurpose = "chat" | "heartbeat_plan" | "heartbeat_decision" | "recent_review" | "media_exploration" | "diagnostic" | "memory_classify";
 export type ChatInput = { text: string; messages?: ChatMessage[] } | { text?: string; messages: ChatMessage[] };
 export type ChatRequest = ChatInput & {
   /** Optional local observability; never serialized to providers. */
   trace?: import("../observability/types.js").RuntimeTraceObserver;
   purpose: RequestPurpose;
+  memory?: MemoryRuntimeContext;
+  memoryTask?: import("../memory/tasks.js").MemoryTask;
   deliveryId?: string;
   history?: RuntimeHistory;
   sessionId: string;
@@ -176,13 +178,30 @@ export interface DeliverySettlementOptions {
 }
 
 export interface ChatRuntime {
+  /** Separately selected model on an independent SIWC lane; never routes through paid providers. */
+  classifyMemory?(input: string): Promise<string>;
+  runMemoryTask?(task: import("../memory/tasks.js").MemoryTask, input: string): Promise<string>;
+  listMemoryModels?(): Promise<RuntimeModel[]>;
+  getMemoryModel?(): Promise<string>;
+  selectMemoryModel?(model: string): Promise<string>;
   reply(request: ChatRequest): Promise<ChatResponse>;
+  /** Local due check, then tool-free maintenance of the selected formal SIWC lane. */
+  maintainContext?(request: ContextMaintenanceRequest): Promise<{ compacted: boolean; skipped?: string }>;
   commitSession?(sessionId: string, deliveredText: string, deliveryId?: string): Promise<void | boolean>;
+  editHistory?(sessionId: string, work: () => Promise<void>): Promise<void>;
   resetSession?(sessionId: string, deliveryId?: string): Promise<void | boolean>;
   /** Validate, record and settle under the same provider ticket queue. */
   settleSessionDelivery?(sessionId: string, deliveryId: string, text: string | undefined, record: () => Promise<void>, options?: DeliverySettlementOptions): Promise<boolean>;
   /** Release active transport resources for one-shot CLI runtimes. */
   close?(): Promise<void> | void;
+}
+
+export interface MemoryRuntimeContext { ready?:boolean; revision:number; content:string; refresh?:()=>MemoryRuntimeContext }
+export interface ContextMaintenanceRequest {
+  memory?: MemoryRuntimeContext;
+  sessionId: string;
+  history: RuntimeHistory;
+  timezone: string;
 }
 
 export interface RuntimeAuth {
@@ -217,5 +236,5 @@ export interface ManagedChatRuntime extends ChatRuntime, RuntimeAuth, ModelCatal
   diagnosticModels?(provider: ProviderId): Promise<RuntimeModel[]>;
   diagnosticReply?(provider: ProviderId, model: string, kind: "text" | "tools" | "vision" | "image"): Promise<string>;
 }
-export type CommandRuntime = ModelCatalog & Partial<ProviderControl> & Partial<ImageControl>;
+export type CommandRuntime = ModelCatalog & Pick<ChatRuntime, "listMemoryModels" | "getMemoryModel" | "selectMemoryModel"> & Partial<ProviderControl> & Partial<ImageControl>;
 export type ControlRuntime = ModelCatalog & Pick<RuntimeAuth, "getSession"> & Partial<ProviderControl> & Partial<UsageReader>;

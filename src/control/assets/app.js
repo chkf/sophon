@@ -1,13 +1,19 @@
 (() => {
   'use strict';
+  // Fragments never enter HTTP requests. Remove the credential before any await.
+  const entryParams = new URLSearchParams(window.location.hash.slice(1));
+  let entryCode = entryParams.get('login_code') || '';
+  if (entryParams.has('login_code')) history.replaceState(null, '', location.pathname + location.search);
+  if (!/^[A-Za-z0-9_-]{43}$/.test(entryCode)) entryCode = '';
   const $ = selector => document.querySelector(selector);
   const content = $('#page-content');
   let hostResize;
   const state = { authenticated: false, csrf: '', page: 'tasks', epoch: 0, dirty: false, saving: false, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     task: { runs: [], nextBefore: null, selected: null, open: new Set(), filter: 'all', heartbeat: null },
     history: { conversations: [], nextConversations: null, key: '', query: '', from: '', to: '', offset: 0, around: null },
+    graph: { topic: null, topicOffset: 0, offset: 0, query: "", status: "active", selected: null },
     memory: { tab: 'core', selected: null, entries: [], nextOffset: null, query: '', archived: false }, pollBusy: false };
-  const pages = { tasks: ['主动任务', '从触发到交付，查看每一步真实执行。'], history: ['聊天历史', '按时间翻阅对话，搜索原文与关联附件。'], memory: ['Core / Recent', '管理稳定指令与持续话题。'], context: ['上下文', '查看本地上下文的组成与可恢复检查点。'], host: ['主机监控', '资源走势与当前进程，来自真实采样。'] };
+  const pages = { graph: ["记忆图", "按主题浏览记忆与原始记录。"], tasks: ['主动任务', '从触发到交付，查看每一步真实执行。'], history: ['聊天历史', '最新消息在前，翻阅对话、搜索原文与关联附件。'], memory: ['Core / Recent', '管理稳定指令与持续话题。'], context: ['上下文', '查看本地上下文的组成与可恢复检查点。'], host: ['主机监控', '资源走势与当前进程，来自真实采样。'] };
   const statusNames = { running: '运行中', completed: '已完成', silent: '保持静默', skipped: '已跳过', failed: '失败', delivered: '确认送达', delivery_unknown: '交付不确定', interrupted: '已中断', acknowledged: '已确认', started: '进行中', pending: '待处理', unknown: '未知' };
   const taskNames = { heartbeat_plan: 'Heartbeat · 计划生成', heartbeat_decision: 'Heartbeat · 主动判断', heartbeat_delivery: 'Heartbeat · 消息交付', heartbeat_check: 'Heartbeat · 条件检查' };
   const triggerNames = { scheduler_gate: '调度条件检查', pending_delivery: '待交付消息', context_changed: '上下文变化', daily_plan: '每日计划', planned_wake: '计划唤醒', scheduled_check: '定时检查' };
@@ -85,8 +91,13 @@
     state.authenticated = authenticated; state.csrf = csrfToken;
     $('#login').hidden = authenticated; $('#workspace').hidden = !authenticated; $('#header-actions').hidden = !authenticated;
     $('#navigation').querySelectorAll('button').forEach(node => { node.disabled = !authenticated; });
-    if (!authenticated) { state.epoch++; state.dirty = false; state.task.runs = []; state.task.selected = null; state.history.conversations = []; state.memory.entries = []; content.replaceChildren(); }
+    if (!authenticated) { state.epoch++; state.dirty = false; state.task.runs = []; state.task.selected = null; state.history.conversations = []; state.memory.entries = []; state.graph.selected = null; content.replaceChildren(); }
   }
+  window.addEventListener('hashchange', () => {
+    if (!new URLSearchParams(location.hash.slice(1)).has('login_code')) return;
+    if (state.authenticated) history.replaceState(null, '', location.pathname + location.search);
+    else location.reload(); // Reopening a link in the same tab also runs login bootstrap.
+  });
   function canLeave() { if (state.saving) { showNotice('修改正在保存，请稍候。'); return false; } if (!state.dirty) return true; return window.confirm('有尚未保存的修改，离开后会丢弃这些修改。继续吗？'); }
   async function navigate(page, force = false) {
     if (!state.authenticated || (!force && !canLeave())) return;
@@ -100,6 +111,7 @@
       if (state.page === 'tasks') await loadTasks(false, epoch);
       else if (state.page === 'history') await historyPage(epoch);
       else if (state.page === 'memory') await memoryPage(epoch);
+      else if (state.page === 'graph') await graphPage(epoch);
       else if (state.page === 'context') await contextPage(epoch);
       else await hostPage(epoch);
       if (epoch === state.epoch) updated();
@@ -226,15 +238,31 @@
     }, 'small subtle');
     content.replaceChildren(el('div', { class: 'panel' }, el('div', { class: 'history-toolbar' }, picker, more, form), el('div', { id: 'history-results' }, loading())));
   }
-  async function loadHistory(epoch = state.epoch) {
+  function historyPosition(deletedRevision) {
+    const anchor = [...document.querySelectorAll('#history-results .message')].find(node =>
+      node.dataset.messageRevision !== deletedRevision && node.getBoundingClientRect().bottom > 0);
+    return { revision: anchor?.dataset.messageRevision, top: anchor?.getBoundingClientRect().top, y: window.scrollY };
+  }
+  function restoreHistoryPosition(position) {
+    if (!position) return;
+    const anchor = [...document.querySelectorAll('#history-results .message')].find(node => node.dataset.messageRevision === position.revision);
+    window.scrollTo({ top: anchor ? window.scrollY + anchor.getBoundingClientRect().top - position.top : position.y, behavior: 'instant' });
+  }
+  async function loadHistory(epoch = state.epoch, position = null) {
     const hs = state.history, target = $('#history-results'); if (!target) return;
     const sequence = hs.sequence = (hs.sequence || 0) + 1;
-    const request = { conversationKey: hs.key, limit: 40, ...(hs.around !== null ? { around: hs.around } : { offset: hs.offset, ...(hs.query ? { query: hs.query } : {}), ...(hs.from ? { from: hs.from } : {}), ...(hs.to ? { to: hs.to } : {}) }) };
-    replace(target, loading());
-    const result = await api('history', request);
+    const request = { conversationKey: hs.key, limit: 40, ...(hs.around !== null ? { around: hs.around, expectedRevision: hs.aroundRevision } : { offset: hs.offset, ...(hs.query ? { query: hs.query } : {}), ...(hs.from ? { from: hs.from } : {}), ...(hs.to ? { to: hs.to } : {}) }) };
+    if (!position) replace(target, loading());
+    let result = await api('history', request);
+    if (epoch !== state.epoch || sequence !== hs.sequence || hs.key !== request.conversationKey || !$('#history-results')) return;
+    // Deleting the final row of the last page may make its offset invalid.
+    if (request.around === undefined && request.offset > 0 && !result.items?.length) {
+      hs.offset = request.offset = Math.max(0, Math.floor((result.total - 1) / request.limit) * request.limit);
+      result = await api('history', request);
+    }
     if (epoch !== state.epoch || sequence !== hs.sequence || hs.key !== request.conversationKey || !$('#history-results')) return;
     const contextMode = hs.around !== null;
-    const top = el('div', { class: 'history-meta' }, el('span', {}, contextMode ? '匹配消息的前后文' : `${result.filtered ? '匹配' : '共'} ${number(result.total)} 条消息`), contextMode ? button('返回查询结果', () => { hs.around = null; return loadHistory(); }, 'small subtle') : el('span', {}, `日期按 ${state.timezone}`));
+    const top = el('div', { class: 'history-meta' }, el('span', {}, contextMode ? '匹配消息的前后文 · 最新在前' : `${result.filtered ? '匹配' : '共'} ${number(result.total)} 条消息`), contextMode ? button('返回查询结果', () => { hs.around = null; return loadHistory(); }, 'small subtle') : el('span', {}, `最新在前 · 日期按 ${state.timezone}`));
     const messages = el('div', { class: 'messages' });
     for (const message of result.items || []) {
       const attachments = (message.attachments || []).map(attachment => {
@@ -251,18 +279,48 @@
         if (safeImage) group.append(button('下载', () => downloadAttachment(hs.key, message.index, attachment), 'small subtle'));
         return group;
       });
-      messages.append(el('article', { class: `message ${message.role}`, 'data-message-index': message.index }, el('div', { class: 'message-avatar', 'aria-hidden': 'true' }, message.role === 'assistant' ? 'S' : 'U'), el('div', {},
+      messages.append(el('article', { class: `message ${message.role}`, 'data-message-index': message.index, 'data-message-revision': message.revision }, el('div', { class: 'message-avatar', 'aria-hidden': 'true' }, message.role === 'assistant' ? 'S' : 'U'), el('div', {},
         el('div', { class: 'message-top' }, el('strong', {}, message.role === 'assistant' ? 'Sophon' : '用户'), el('span', {}, date(message.at, { second: '2-digit' })), el('span', {}, message.channel === 'wechat' ? '微信' : 'Telegram'), message.origin === 'proactive' ? el('span', { class: 'message-label' }, '主动消息') : null, message.partial ? el('span', { class: 'message-label' }, '部分交付') : null),
         el('div', { class: 'message-content' }, message.content), attachments.length ? el('div', { class: 'attachment-list' }, attachments) : null,
-        result.filtered ? el('div', { class: 'message-context' }, button('查看前后文', () => { hs.around = message.index; return loadHistory(); }, 'small subtle')) : null)));
+        el('div', { class: 'message-context' }, button('删除记录', async () => {
+          if (state.saving || sequence !== hs.sequence) return;
+          if (!window.confirm('删除这条本地聊天记录？\n\n' + message.content.slice(0, 160) + '\n\n这条记录会从聊天数据库中删除，不留占位；保留现有压缩上下文，等下次重建时更新近期记录，不立即重建或重新压缩。不会撤回 Telegram／微信消息，也不会清理 Recent、附件文件或备份。此操作不能在页面内撤销。')) return;
+          const conversationKey = hs.key, position = historyPosition(message.revision);
+          state.saving = true;
+          try {
+            await api('history-delete', { conversationKey, messageIndex: message.index, expectedRevision: message.revision, confirm: true });
+            if (epoch !== state.epoch || state.page !== 'history' || hs.key !== conversationKey) return;
+            showNotice('本地记录已删除。', 'success');
+            if (sequence !== hs.sequence) return; // A newer search or page owns the view.
+            if (contextMode) {
+              // SQLite closes the deleted index gap; retain the context target,
+              // or choose its nearest surviving neighbour when that target was deleted.
+              const remaining = result.items.filter(item => item.index !== message.index);
+              const anchor = remaining.find(item => item.index === hs.around) ||
+                remaining.sort((a, b) => Math.abs(a.index - hs.around) - Math.abs(b.index - hs.around))[0];
+              hs.around = anchor ? anchor.index - (anchor.index > message.index ? 1 : 0) : null;
+              hs.aroundRevision = anchor?.revision;
+            }
+            const conversation = hs.conversations.find(item => item.key === conversationKey);
+            if (conversation) {
+              conversation.count = Math.max(0, conversation.count - 1);
+              const index = hs.conversations.indexOf(conversation);
+              const option = $('.conversation-picker')?.options[index];
+              if (option) option.textContent = `${conversation.channel === 'wechat' ? '微信' : 'Telegram'} · 会话 ${index + 1} · ${number(conversation.count)} 条 · ${date(conversation.updatedAt)}`;
+            }
+            await loadHistory(epoch, position);
+          } finally { state.saving = false; }
+        }, 'small danger')),
+        result.filtered ? el('div', { class: 'message-context' }, button('查看前后文', () => { hs.around = message.index; hs.aroundRevision = message.revision; return loadHistory(); }, 'small subtle')) : null)));
     }
     if (!result.items?.length) messages.append(empty('没有匹配的消息', '试试其他关键词或日期范围。'));
     const offset = result.offset ?? hs.offset;
-    const pager = contextMode ? null : el('div', { class: 'pager' }, button('上一页', () => { hs.offset = Math.max(0, offset - 40); return loadHistory(); }, '', { disabled: offset <= 0 }), el('span', {}, result.items?.length ? `${offset + 1}–${offset + result.items.length} / ${number(result.total)}` : '0 条'), button('下一页', () => { hs.offset = result.nextOffset; return loadHistory(); }, '', { disabled: result.nextOffset === null || result.nextOffset === undefined }));
+    const pager = contextMode ? null : el('div', { class: 'pager' }, button('较新消息', () => { hs.offset = Math.max(0, offset - 40); return loadHistory(); }, '', { disabled: offset <= 0 }), el('span', {}, result.items?.length ? `${offset + 1}–${offset + result.items.length} / ${number(result.total)}` : '0 条'), button('更早消息', () => { hs.offset = result.nextOffset; return loadHistory(); }, '', { disabled: result.nextOffset === null || result.nextOffset === undefined }));
     replace(target, top, messages, ...(pager ? [pager] : [])); updated();
+    restoreHistoryPosition(position);
   }
   async function fetchAttachment(conversationKey, messageIndex, attachment) {
-    const response = await fetch('/control/api/attachment', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json', 'x-control-csrf': state.csrf }, body: JSON.stringify({ conversationKey, messageIndex, attachmentIndex: attachment.index }) });
+    const response = await fetch('/control/api/attachment', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json', 'x-control-csrf': state.csrf }, body: JSON.stringify({ conversationKey, messageIndex, attachmentIndex: attachment.index, expectedRevision: attachment.expectedRevision }) });
     if (!response.ok) { const payload = await response.json().catch(() => null); if (response.status === 401) setAuthenticated(false); throw new Error(payload?.error?.message || '附件无法读取。'); }
     return response.blob();
   }
@@ -361,6 +419,102 @@
     } }, el('strong', {}, firstLine(entry.body)), el('span', {}, `${entry.archived ? '已归档' : '活跃'} · ${date(entry.updatedAt)}`))));
   }
   function renderRecentEditor() { const entry = state.memory.entries.find(item => item.id === state.memory.selected); $('#recent-editor')?.replaceChildren(entry ? makeEditor(entry, 'recent') : empty('选择一个话题', '从左侧打开 Recent，查看或编辑正文。')); }
+  const graphKind = { turn: '对话记忆', rollup: '融合记忆', recent: '持续事项' };
+  const graphStatus = { active: '活跃', archived: '已归档', stale: '来源已变化', covered: '已融合覆盖' };
+  const activity = value => typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value * 100)}%` : '—';
+  async function graphPage(epoch) {
+    const result = await api('graph'); if (epoch !== state.epoch) return;
+    if (!result.available) {
+      content.replaceChildren(el('div', { class: 'panel' }, empty('记忆图尚未准备好', result.version ? '需要完成记忆图升级并配置所有者，之后即可浏览。' : '完成首次迁移后，主题和记忆会显示在这里。'))); return;
+    }
+    content.replaceChildren(el('div', { id: 'graph-overview' }), el('div', { class: 'panel graph-workbench' },
+      el('section', { id: 'graph-topics', class: 'graph-topics', 'aria-label': '主题目录' }, loading()),
+      el('section', { class: 'graph-memories', 'aria-label': '主题记忆' }, el('div', { id: 'graph-filters' }), el('div', { id: 'graph-nodes' }, loading()))),
+      el('section', { id: 'graph-detail', class: 'panel panel-pad graph-detail', 'aria-label': '记忆详情' }, empty('选择一条记忆', '查看内容、主题关联和原文来源。')));
+    renderGraphOverview(result);
+    const gs = state.graph;
+    const query = el('input', { type: 'search', maxlength: '500', value: gs.query, placeholder: '搜索全图记忆', 'aria-label': '搜索记忆图' });
+    const filter = el('select', { 'aria-label': '记忆状态' }, el('option', { value: 'active' }, '活跃记忆'), el('option', { value: 'archived' }, '已归档 / 已融合'), el('option', { value: 'stale' }, '来源已变化'));
+    filter.value = gs.status; filter.disabled = Boolean(gs.query);
+    const apply = () => { gs.query = query.value.trim(); gs.offset = 0; gs.selected = null; filter.disabled = Boolean(gs.query); loadGraphNodes(epoch).catch(showError); };
+    query.addEventListener('search', apply);
+    filter.addEventListener('change', () => { gs.status = filter.value; gs.offset = 0; gs.selected = null; loadGraphNodes(epoch).catch(showError); });
+    $('#graph-filters').append(el('form', { class: 'filter-form', onsubmit: event => { event.preventDefault(); apply(); } },
+      el('label', { class: 'grow' }, '全图搜索', query), el('label', {}, '浏览状态', filter), el('button', { type: 'submit', class: 'button' }, '搜索')));
+    await Promise.all([loadGraphTopics(epoch), loadGraphNodes(epoch)]);
+    if (gs.selected) await loadGraphNode(gs.selected, 0, epoch);
+  }
+  function renderGraphOverview(result) {
+    const target = $('#graph-overview'); if (!target) return;
+    const p = result.progress, jobs = p.jobs, pending = (jobs.pending || 0) + (jobs.running || 0) + (jobs.retry || 0);
+    const outstanding = pending + (jobs.failed || 0) + p.missingTurns + p.staleTurns;
+    const summary = !result.enabled ? '后台状态 · 未启用' : !p.initialized ? '后台状态 · 待初始建图' : outstanding ? `后台状态 · ${number(outstanding)} 项待处理` : '后台状态';
+    const details = el('details', { class: 'panel graph-background', open: target.querySelector('details')?.open === true }, el('summary', {}, summary),
+      el('p', { class: 'muted small' }, result.enabled ? (p.ready ? '初始分类已就绪，整理任务仍可继续运行。' : '后台逐轮处理，正常聊天优先。入队不代表建图完成。') : '后台处理未启用，已保存的记忆仍可浏览。'),
+      kv([['已处理分类', number(jobs.done || 0)], ['待处理 / 运行中', `${number(jobs.pending || 0)} / ${number(jobs.running || 0)}`],
+        ['重试 / 失败', `${number(jobs.retry || 0)} / ${number(jobs.failed || 0)}`], ['待回灌 / 失效轮次', `${number(p.missingTurns)} / ${number(p.staleTurns)}`],
+        ['初始建图登记', p.initialized ? date(p.startedAt) : '尚未登记'], ['上下文重建就绪', p.ready ? '是' : '否']]),
+      el('p', { class: 'muted small' }, '整理任务：' + (Object.entries(p.operations).map(([key, value]) => `${statusNames[key] || key} ${number(value)}`).join(' · ') || '暂无')),
+      ...(result.problems || []).map(item => el('p', { class: 'graph-problem' }, `${statusNames[item.status] || item.status} · ${item.error_code || '未知原因'} · 尝试 ${item.attempts} 次 · ${date(item.updated_at)}`)),
+      button('刷新后台状态', async () => { const epoch = state.epoch, next = await api('graph'); if (epoch === state.epoch && next.available) renderGraphOverview(next); }, 'small subtle'));
+    target.replaceChildren(el('div', { class: 'graph-summary' }, fact('主题', number(result.topics)), fact('活跃记忆', number(result.counts.active || 0)),
+      fact('来源已变化', number(result.counts.stale || 0)), el('p', { class: 'muted small' }, '活跃度随时间变化，不代表事实可信度。原始聊天仍可查阅。')), details);
+  }
+  async function chooseGraphTopic(id) {
+    const gs = state.graph; gs.topic = id; gs.topicOffset = 0; gs.offset = 0; gs.query = ''; gs.selected = null;
+    const search = $('#graph-filters input'); if (search) search.value = '';
+    const select = $('#graph-filters select'); if (select) select.disabled = false;
+    await Promise.all([loadGraphTopics(), loadGraphNodes()]);
+  }
+  async function loadGraphTopics(epoch = state.epoch) {
+    const gs = state.graph, sequence = gs.topicSequence = (gs.topicSequence || 0) + 1;
+    const result = await api('graph-topics', { parentId: gs.topic, offset: gs.topicOffset, limit: 20 });
+    if (epoch !== state.epoch || sequence !== gs.topicSequence || !$('#graph-topics')) return;
+    const crumbs = el('div', { class: 'graph-breadcrumbs' }, button('全部主题', () => chooseGraphTopic(null), 'small subtle'),
+      ...result.path.map(item => button(item.name, () => chooseGraphTopic(item.id), 'small subtle')));
+    $('#graph-topics').replaceChildren(el('h3', {}, '主题目录'), crumbs,
+      ...(result.items.length ? result.items.map(item => button([el('strong', {}, item.name), el('span', {}, `${number(item.memories)} 条直属记忆 · ${number(item.children)} 个子主题`)], () => chooseGraphTopic(item.id), 'graph-topic')) : [el('p', { class: 'muted small' }, gs.topic ? '这是叶主题，没有子主题。' : '尚无主题，后台处理后会逐步出现。')]),
+      el('div', { class: 'graph-pager' }, gs.topicOffset ? button('上一页主题', () => { gs.topicOffset = Math.max(0, gs.topicOffset - 20); return loadGraphTopics(); }, 'small') : null,
+        result.nextOffset !== null ? button('下一页主题', () => { gs.topicOffset = result.nextOffset; return loadGraphTopics(); }, 'small') : null),
+      result.related.length ? el('div', { class: 'graph-related' }, el('h3', {}, '关联主题'), ...result.related.map(item => button(`${item.name} · ${activity(item.strength)}`, () => chooseGraphTopic(item.id), 'small subtle'))) : null);
+  }
+  async function loadGraphNodes(epoch = state.epoch) {
+    const gs = state.graph, sequence = gs.nodeSequence = (gs.nodeSequence || 0) + 1;
+    const result = await api('graph-nodes', { topicId: gs.topic, query: gs.query, status: gs.status, offset: gs.offset, limit: 20 });
+    if (epoch !== state.epoch || sequence !== gs.nodeSequence || !$('#graph-nodes')) return;
+    if (!result.items.some(item => item.id === gs.selected)) gs.selected = null;
+    if (!gs.selected) $('#graph-detail')?.replaceChildren(empty('选择一条记忆', '查看内容、主题关联和原文来源。'));
+    $('#graph-nodes').replaceChildren(el('p', { class: 'muted small graph-list-note' }, result.search ? '全图相关记忆 · 最多 16 条，按相关性排序' : gs.topic ? '当前主题的直属记忆；子主题可在目录中展开。' : '全部主题中的记忆，按原始时间倒序排列。'),
+      ...(result.items.length ? result.items.map(item => button([el('strong', {}, item.gist || '来源已变化，内容已失效'),
+        el('span', {}, `${item.protected ? '持续事项 · 受保护' : graphKind[item.kind] || '相关记忆'} · 活跃度 ${activity(item.activation)} · 重要性 ${activity(item.importance)}`),
+        item.paths?.length ? el('span', {}, item.paths.join(' / ')) : null], () => loadGraphNode(item.id), 'graph-node', { 'data-node-id': item.id, 'aria-pressed': item.id === gs.selected })) : [empty('没有匹配的记忆', '可以切换主题、浏览状态或搜索关键词。')]),
+      el('div', { class: 'graph-pager' }, gs.offset ? button('上一页记忆', () => { gs.offset = Math.max(0, gs.offset - 20); return loadGraphNodes(); }, 'small') : null,
+        result.nextOffset !== null ? button('下一页记忆', () => { gs.offset = result.nextOffset; return loadGraphNodes(); }, 'small') : null));
+  }
+  async function loadGraphNode(id, offset = 0, epoch = state.epoch) {
+    const gs = state.graph; gs.selected = id;
+    const sequence = gs.detailSequence = (gs.detailSequence || 0) + 1;
+    const row = await api('graph-node', { id, offset, limit: 8 });
+    if (epoch !== state.epoch || sequence !== gs.detailSequence || gs.selected !== id || !$('#graph-detail')) return;
+    document.querySelectorAll('.graph-node').forEach(node => node.setAttribute('aria-pressed', String(node.dataset.nodeId === id)));
+    $('#graph-detail').replaceChildren(el('h3', {}, row.recent ? '持续事项' : graphKind[row.kind] || '记忆详情'),
+      el('div', { class: 'graph-detail-meta' }, kv([['状态', graphStatus[row.status] || row.status], ['活跃度 / 重要性', `${activity(row.activation)} / ${activity(row.importance)}`],
+        ['原始时间', date(row.created_at)], ['衰减参考时间', date(row.reinforced_at)], ['半衰期', `${number(row.half_life_days)} 天`]])),
+      row.status === 'stale' ? el('p', { class: 'notice' }, '原文已被编辑或删除，派生内容已经失效。') : el('div', {},
+        row.recent ? el('div', {}, el('p', { class: 'muted small' }, row.recent.state === 'Done' ? '事项已结束。' : '事项尚未结束，受保护，不参与普通衰减归档。'), el('pre', {}, row.recent.body + (row.recent.truncated ? '\n（节选）' : ''))) : el('div', {}, el('p', { class: 'message-content' }, row.gist), row.summary ? el('pre', {}, row.summary) : null, row.detail ? el('pre', {}, formatGraphDetail(row.detail)) : null)),
+      el('div', { class: 'graph-related' }, ...row.memberships.map(item => button(`${item.name} · ${graphStatus[item.status] || item.status}`, () => chooseGraphTopic(item.id), 'small subtle'))),
+      el('h3', { class: 'graph-source-title' }, '原文来源'),
+      ...(row.sources.length ? row.sources.map(source => el('article', { class: 'graph-source' }, el('p', { class: 'muted small' }, `${source.role === 'user' ? '用户' : '助手'} · ${date(source.at)}`),
+        el('p', { class: 'message-content' }, source.content), source.truncated ? el('p', { class: 'muted small' }, '这里显示原文节选。') : null,
+        button('查看完整对话', async () => { state.history.key = source.conversationKey; state.history.query = ''; state.history.from = ''; state.history.to = ''; state.history.offset = 0; state.history.around = source.index; state.history.aroundRevision = source.revision; await navigate('history'); }, 'small subtle'))) : [el('p', { class: 'muted small' }, row.recent ? '正文来自当前 Recent，不复制聊天原文。' : '没有可用的原文来源。')]),
+      el('div', { class: 'graph-pager' }, offset ? button('上一页来源', () => loadGraphNode(id, Math.max(0, offset - 8)), 'small') : null,
+        row.nextOffset !== null ? button('下一页来源', () => loadGraphNode(id, row.nextOffset), 'small') : null));
+  }
+  function formatGraphDetail(value) {
+    try { const parsed = JSON.parse(value); return [...(parsed.highlights || []).map(item => `${item.text}（${item.status}）\n引用：${item.quote}`), ...(parsed.uncertainties || []).map(item => '待确认：' + (typeof item === 'string' ? item : stringify(item)))].join('\n\n') || stringify(parsed); }
+    catch { return value; }
+  }
+
   async function contextPage(epoch) {
     const result = await api('context'); if (epoch !== state.epoch) return;
     const local = result.local;
@@ -371,13 +525,13 @@
       const section = (title, entries, body, bodyLabel = '查看内容') => el('section', { class: 'panel context-section' }, el('h3', {}, title), kv(entries), el('details', {}, el('summary', {}, bodyLabel), el('pre', {}, body || '内容为空')));
       grid.append(section('Core', [['来源', '最近一次组装'], ['修订', local.revisions?.core], ['组装时间', date(result.loadedAt)]], local.core),
         section('Recent 目录', [['活跃话题', number(result.recent?.activeCount)], ['全部话题', number(result.recent?.totalCount)], ['修订', local.revisions?.recent]], local.recentDirectory),
-        section('表达风格', [['当前预设', local.persona?.active || '未加载'], ['修订', local.revisions?.persona]], local.persona?.instruction),
+        section('心理和动作描写', [['状态', local.expression?.showStageDirections ? '开启' : '关闭'], ['修订', local.revisions?.expression]], local.expression?.instruction),
         section('本地指导', [['来源', '本地上下文组装'], ['组装时间', date(result.loadedAt)]], local.guidance));
     } else grid.append(el('div', { class: 'panel context-section full' }, empty('尚无已组装的上下文快照', '首次请求或内容变更后的下一次请求会生成新的本地快照。')));
-    const checkpointPanel = el('section', { class: 'panel context-section full' }, el('div', { class: 'section-heading' }, el('h3', {}, '恢复检查点'), el('span', { class: 'small' }, `${number(result.checkpoints?.length || 0)} 条记录`)));
-    if (!result.checkpoints?.length) checkpointPanel.append(empty('没有可展示的检查点', '当前 Provider 或会话可能尚未生成可恢复的压缩检查点。'));
-    else for (const checkpoint of result.checkpoints) checkpointPanel.append(el('article', { class: 'checkpoint' }, el('div', { class: 'checkpoint-top' }, el('strong', {}, checkpoint.model || '模型未记录'), el('span', {}, checkpoint.archived ? '归档检查点' : '当前会话状态')),
-      kv([['更新于', date(checkpoint.updatedAt)], ['最近压缩', date(checkpoint.checkpoint?.at || checkpoint.lastCompactedAt)], ['压缩原因', checkpoint.checkpoint?.reason === 'seven_days' ? '7 天触发' : checkpoint.checkpoint?.reason === 'capacity' ? '容量触发' : '未记录'], ['历史游标', number(checkpoint.historyCursor)], ['覆盖校验', checkpoint.coverageVerified === true ? '已验证' : checkpoint.coverageVerified === false ? '未验证' : '未记录'], ['待交付', checkpoint.pendingDelivery ? '有待结算交付' : '无'], ['检查点标识', checkpoint.checkpoint?.id || checkpoint.id]])));
+    const checkpointPanel = el('section', { class: 'panel context-section full' }, el('div', { class: 'section-heading' }, el('h3', {}, '已保存的上下文'), el('span', { class: 'small' }, `${number(result.checkpoints?.length || 0)} 条记录`)));
+    if (!result.checkpoints?.length) checkpointPanel.append(empty('没有已保存的上下文', '会话尚未保存可恢复的上下文状态。'));
+    else for (const checkpoint of result.checkpoints) checkpointPanel.append(el('article', { class: 'checkpoint' }, el('div', { class: 'checkpoint-top' }, el('strong', {}, checkpoint.model || '模型未记录'), el('span', {}, checkpoint.archived ? '历史归档' : '会话存档（不代表正在使用）')),
+      kv([['存储更新于', date(checkpoint.updatedAt)], ['最近压缩', date(checkpoint.checkpoint?.at || checkpoint.lastCompactedAt)], ['压缩原因', checkpoint.checkpoint?.reason === 'seven_days' ? '7 天触发' : checkpoint.checkpoint?.reason === 'capacity' ? '容量触发' : '未记录'], ['历史游标', number(checkpoint.historyCursor)], ['覆盖校验', checkpoint.coverageVerified === true ? '已验证' : checkpoint.coverageVerified === false ? '未验证' : '未记录'], ['待交付', checkpoint.pendingDelivery ? '有待结算交付' : '无'], ['记录标识', checkpoint.id]])));
     grid.append(checkpointPanel);
     if (result.lastRequest) {
       const request = result.lastRequest;
@@ -448,12 +602,13 @@
     try { await api('logout'); state.dirty = false; setAuthenticated(false); showNotice('已退出控制中心。'); $('#login-code').value = ''; }
     catch (error) { showError(error); }
   });
-  $('#login-form').addEventListener('submit', async event => {
-    event.preventDefault(); const submit = event.currentTarget.querySelector('button'); submit.disabled = true; showNotice('');
+  async function login() {
+    const submit = $('#login-form button'); submit.disabled = true; showNotice('');
     try { const result = await api('login', { code: $('#login-code').value.trim() }); $('#login-code').value = ''; setAuthenticated(result.authenticated === true, result.csrfToken); await navigate('tasks', true); }
     catch (error) { showError(error); }
     finally { submit.disabled = false; }
-  });
+  }
+  $('#login-form').addEventListener('submit', event => { event.preventDefault(); if (!$('#login-form button').disabled) void login(); });
   window.addEventListener('beforeunload', event => { if (!state.dirty) return; event.preventDefault(); event.returnValue = ''; });
   setInterval(async () => {
     if (!state.authenticated || document.hidden || state.pollBusy || state.dirty || document.activeElement?.tagName === 'SELECT' || !['tasks', 'host'].includes(state.page)) return;
@@ -484,5 +639,11 @@
     finally { state.pollBusy = false; }
   }, 10_000);
   setAuthenticated(false);
-  api('session').then(async result => { setAuthenticated(result.authenticated === true, result.csrfToken); if (result.authenticated) await navigate('tasks', true); }).catch(showError);
+  $('#login-form button').disabled = true;
+  api('session').then(async result => {
+    const code = entryCode; entryCode = '';
+    setAuthenticated(result.authenticated === true, result.csrfToken);
+    if (result.authenticated) await navigate('tasks', true);
+    else if (code) { $('#login-code').value = code; await login(); }
+  }).catch(showError).finally(() => { entryCode = ''; $('#login-form button').disabled = false; });
 })();
