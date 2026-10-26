@@ -29,6 +29,12 @@ async function fakeBuild(command,args,cwd){
   await writeFile(join(cwd,'update-protocol.json'),JSON.stringify({version:1,stateChanges:'explicit-only'}));
  }
  if(command==='git'&&args[0]==='rev-parse')return 'a'.repeat(40);
+ if(command==='npm'&&args[0]==='ci'){
+  await mkdir(join(cwd,'node_modules'),{recursive:true});await writeFile(join(cwd,'node_modules/.package-lock.json'),'{}');
+ }
+ if(command==='npm'&&args[1]==='build'){
+  await mkdir(join(cwd,'dist/config'),{recursive:true});await writeFile(join(cwd,'dist/main.js'),'// synthetic build');await writeFile(join(cwd,'dist/config/index.js'),'// synthetic config');
+ }
  return '';
 }
 test('preparation validates in isolation and never rewrites deployment settings or active pointer',()=>fixture(async root=>{
@@ -36,7 +42,7 @@ test('preparation validates in isolation and never rewrites deployment settings 
  const candidate=await prepareRelease(root,selectSource(sources),async(...args)=>{calls.push(args);return fakeBuild(...args);});
  assert.equal((await currentRelease(root)).pointer,null);
  assert.equal(await readFile(join(root,'.env'),'utf8'),'SYNTHETIC_SETTING=preserve');
- assert.deepEqual(calls.filter(c=>c[0]==='npm').map(c=>c[1]),[['ci','--no-audit','--no-fund'],['run','build'],['test']]);
+ assert.deepEqual(calls.filter(c=>c[0]==='npm').map(c=>c[1]),[['ci','--prefer-offline','--no-audit','--no-fund'],['run','build'],['test']]);
  assert.ok(calls.every(c=>c[2]!==root));
  await saveRelease(root,candidate.pointer);assert.equal((await currentRelease(root)).path,candidate.path);
  const same=await prepareRelease(root,selectSource(sources),fakeBuild);assert.equal(same.unchanged,true);

@@ -1,9 +1,9 @@
-import {execFile} from 'node:child_process';
-import {promisify} from 'node:util';
+import {spawn} from 'node:child_process';
 import {mkdir,readFile,writeFile,rename,rm,lstat,mkdtemp} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {commandSpec} from './process.mjs';
+import {updatePlan,reusableArtifacts,copyArtifacts,changedTreeFiles,runtimeIdentity} from './update-plan.mjs';
 
 export const DEFAULT_SOURCES={default:'official',sources:{official:{repository:'chkf/sophon',branch:'main'}}};
 const namePattern=/^[a-z][a-z0-9_-]{0,31}$/;
@@ -53,11 +53,23 @@ export function buildEnvironment(env=process.env){
  for(const [key,value] of Object.entries(env))if(value&&allowed.has(key.toUpperCase()))result[key]=value;
  return result;
 }
-const exec=promisify(execFile);
-export async function runCommand(command,args,cwd,env=buildEnvironment()){
+export async function runCommand(command,args,cwd,env=buildEnvironment(),{onOutput=()=>{},signal}={}){
  const spec=commandSpec(command,args);
- try{return (await exec(spec.file,spec.args,{cwd,env,timeout:20*60_000,maxBuffer:8*1024*1024,windowsHide:true})).stdout.trim();}
- catch{throw Error(command==='git'?'Upstream fetch failed; check the configured repository, branch and network.':'Candidate validation failed during '+command+' '+args.slice(0,2).join(' ')+'. Existing release retained.');}
+ return new Promise((resolve,reject)=>{
+  const child=spawn(spec.file,spec.args,{cwd,env,windowsHide:true,stdio:['ignore','pipe','pipe'],signal,timeout:20*60_000});
+  let stdout='',failed=false;
+  for(const [stream,capture] of [[child.stdout,true],[child.stderr,false]]){
+   stream.setEncoding('utf8');stream.on('data',chunk=>{
+    onOutput(chunk);if(capture){stdout+=chunk;if(Buffer.byteLength(stdout)>8*1024*1024){failed=true;child.kill();stdout='';}}
+   });
+  }
+  child.once('error',()=>{failed=true;});
+  // Wait for close: output is drained and no candidate process is left running.
+  child.once('close',code=>{
+   if(code===0&&!failed)resolve(stdout.trim());
+   else reject(Object.assign(Error('Update command failed; inspect the local update log.'),{exitCode:Number.isInteger(code)?code:undefined}));
+  });
+ });
 }
 export async function currentRelease(root){
  const dir=await stateDirectory(root),pointer=await readJson(join(dir,'current.json'),null);
@@ -81,19 +93,32 @@ export async function prepareRelease(root,source,run=runCommand,onStage=async()=
   await run('git',['clone','--depth','1','--single-branch','--branch',source.branch,'--','https://github.com/'+source.repository+'.git','.'],stage);
   const sha=await run('git',['rev-parse','HEAD'],stage);if(!shaPattern.test(sha))throw Error('Invalid upstream commit.');
   const active=await currentRelease(root);
-  if(active.pointer?.sha===sha)return {unchanged:true,...active};
+  const reusable=await reusableArtifacts(active);
+  if(active.pointer?.sha===sha&&reusable)return {unchanged:true,...active};
   await onStage('protocol');
   const protocol=await readJson(join(stage,'update-protocol.json'),null);
-  if(protocol?.version!==1||protocol.stateChanges!=='explicit-only')throw Error('Upstream does not support the update protocol; manual upgrade required.');
-  await onStage('dependencies');
-  await run('npm',['ci','--no-audit','--no-fund'],stage);
-  await onStage('build');
-  await run('npm',['run','build'],stage);
-  await onStage('tests');
-  await run('npm',['test'],stage);
-  const directory=sha+'-'+randomUUID(),path=join(dir,'releases',directory),pointer={version:1,sha,directory,source:source.name,repository:source.repository,branch:source.branch,preparedAt:new Date().toISOString()};
+  if(protocol?.version!==1||protocol.stateChanges!=='explicit-only'||(protocol.host!==undefined&&protocol.host!==1))throw Error('Upstream does not support the update protocol; manual upgrade required.');
+  let files=['package.json'],clean=false;
+  if(reusable){
+   try{
+    clean=!(await run('git',['status','--porcelain','--untracked-files=no'],active.path));
+    files=changedTreeFiles(await run('git',['ls-tree','-rz','--full-tree','HEAD'],active.path),await run('git',['ls-tree','-rz','--full-tree','HEAD'],stage));
+   }catch{clean=false;}
+  }
+  const plan=updatePlan(files,{reusable:reusable&&clean});
+  await onStage('dependencies',{plan});
+  await copyArtifacts(active.path,stage,plan);
+  if(plan.dependencies)await run('npm',['ci','--prefer-offline','--no-audit','--no-fund'],stage);
+  if(plan.build){await onStage('build');await run('npm',['run','build'],stage);}
+  if(plan.tests){
+   await onStage('tests');
+   // Versioned managers require syntax validation as well as application tests.
+   if(protocol.host===1)await run(process.execPath,['scripts/check-host.mjs'],stage);
+   await run('npm',['test'],stage);
+  }
+  const directory=sha+'-'+randomUUID(),path=join(dir,'releases',directory),pointer={version:1,sha,directory,source:source.name,repository:source.repository,branch:source.branch,runtime:runtimeIdentity(),preparedAt:new Date().toISOString()};
   await atomicJson(join(stage,'.release.json'),pointer);await rename(stage,path);
-  return {path,pointer,unchanged:false};
+  return {path,pointer,plan,unchanged:false};
  }finally{await rm(stage,{recursive:true,force:true});}
 }
 

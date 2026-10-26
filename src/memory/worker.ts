@@ -16,6 +16,8 @@ export class MemoryWorker {
   private pausedUntil=0;
   private lastModel?:string;
   private pausedCode?:string;
+  private runtimeState?:string;
+  status():string|undefined{return this.runtimeState;}
   constructor(private readonly store:MemoryStore,private readonly runtime:ChatRuntime,private readonly canStart:()=>boolean=()=>true){}
   start():void { if(!this.stopped)return;this.stopped=false;this.schedule(); }
   private schedule():void {
@@ -33,20 +35,21 @@ export class MemoryWorker {
           if(this.pausedCode!=='QUOTA_UNAVAILABLE')this.pausedUntil=0;
         }
         this.lastModel=model;
-      } catch { return; }
+      } catch { this.runtimeState='MODEL_UNAVAILABLE';return; }
     }
     if(+now<this.pausedUntil)return;
     new MemoryRecent(this.store).sync();
     const job=this.store.claim(now);
     this.active=(async()=>{
       try {
-        if(!job){await new MemoryOrganizer(this.store).tick(this.runtime,now);return;}
+        if(!job){await new MemoryOrganizer(this.store).tick(this.runtime,now);this.runtimeState=undefined;return;}
         if(!this.runtime.classifyMemory)throw new MemoryError('CLASSIFIER_UNAVAILABLE');
         const turn=this.store.collect(job.assistant_rowid),revision=this.store.revision();
         const prepared=await prepareLongTurn(this.store,job,turn,this.runtime);
         if(!prepared.ready){this.store.yield(job);return;}
         const input=classificationInput(turn,this.store.topics(),revision,prepared.digest);
         const output=await this.runtime.classifyMemory(input);
+        this.runtimeState=undefined;
         const classification=parseClassification(output);
         // Optional reinforcement never blocks recording a delivered turn when unavailable.
         let evidence:unknown;
@@ -58,6 +61,7 @@ export class MemoryWorker {
         if(evidence)try{this.store.reinforce(turn,evidence);}catch{console.error('[memory] reinforcement_rejected');}
       } catch(error) {
         const code=error instanceof MemoryError?error.code:isSubscriptionUsageLimitError(error)?'QUOTA_UNAVAILABLE':'MODEL_UNAVAILABLE';
+        this.runtimeState=code;
         if(job&&code==='NO_USER_TURN'){this.store.finishEmpty(job);return;}
         const delay=job?this.store.retry(job,code,new Date()):60_000;
         // A missing model/quota should not probe once per queued turn.

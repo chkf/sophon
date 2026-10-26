@@ -1,6 +1,8 @@
 import { requestHostUpdate } from "./commands/update.js";
 import { MemoryRecent } from "./memory/recent.js";
 import { MemoryWorker } from "./memory/worker.js";
+import { prepareStartupMemory } from "./memory/startup.js";
+import { inspectMemory } from "./memory/migration.js";
 import { cleanupBackgroundArchives, cleanupConfirmedArchivesOnStartup } from "./runtime/siwc/background-cleanup.js";
 import { SerialQueue } from "./util/serial-queue.js";
 import { FileService } from "./files/service.js";
@@ -58,6 +60,27 @@ import {
 export type GatewayShutdownReason = "takeover" | "telegram-conflict" | "signal";
 
 export class GatewayService {
+  static async create(config:GatewayConfig,runtime:ManagedChatRuntime,requestShutdown:(reason:GatewayShutdownReason)=>void=()=>undefined):Promise<GatewayService>{
+    validateServeConfig(config);
+    await GatewayService.takeOverPreviousInstance(config);
+    const lock=await acquireInstanceLock(config.dataDir);
+    try{
+      let effective=config;
+      if(config.memoryGraphEnabled!==false){
+        if(!config.telegram?.ownerId)effective={...config,memoryGraphEnabled:false,memoryGraphState:'missing_owner'};
+        else{
+          try{await prepareStartupMemory(config.dataDir,config.telegram.ownerId,lock);effective={...config,memoryGraphEnabled:true};}
+          catch{
+            // Fail closed on damaged state; a failed optional snapshot must not block intact chat data.
+            await inspectMemory(config.dataDir);
+            effective={...config,memoryGraphEnabled:false,memoryGraphState:'preparation_failed'};
+            console.error('[memory] preparation_failed; normal chat may continue. Check disk space and data directory permissions.');
+          }
+        }
+      }
+      const service=new GatewayService(effective,runtime,requestShutdown);service.instanceLock=lock;return service;
+    }catch(error){await lock.release();throw error;}
+  }
   private readonly sessions: SessionStore;
   private readonly conversationQueue = new SerialQueue();
   private readonly voice: VoiceService;
@@ -187,7 +210,8 @@ export class GatewayService {
         tunnelReady: config.control.tunnel === "cloudflare" && process.env.SOPHON_MANAGED_HOST === "1" && !!controlTunnelUrl(process.env.SOPHON_CONTROL_TUNNEL_URL),
         data: new ControlData(config.dataDir, { sessions: this.sessions, knowledge: this.localKnowledge,
           context: this.gatewayContext, expressions: this.expressions, timezone: config.heartbeat.timezone,
-          memory: {ownerId: config.telegram?.ownerId, enabled: config.memoryGraphEnabled},
+          memory: {ownerId: config.telegram?.ownerId, enabled: config.memoryGraphEnabled,
+            runtimeStatus:()=>config.memoryGraphState??this.memoryWorker?.status()},
           editHistory: async (id, work) => { if(!runtime.editHistory)throw Error("历史编辑不可用。");await runtime.editHistory(id,work); } }),
         traces: this.taskTraces, host: new HostMonitor(config.dataDir),
         mutate: work => this.conversationQueue.run(async () => work()),
@@ -263,8 +287,10 @@ export class GatewayService {
   }
 
   async start(): Promise<void> {
-    await this.takeOverPreviousInstance();
-    this.instanceLock = await acquireInstanceLock(this.config.dataDir);
+    if(!this.instanceLock){
+      await GatewayService.takeOverPreviousInstance(this.config);
+      this.instanceLock = await acquireInstanceLock(this.config.dataDir);
+    }
     try {
       // The old Gateway is stopped; verify SQLite integrity before starting channels.
       await this.sessions.prepare();
@@ -340,18 +366,18 @@ export class GatewayService {
     if (errors.length) throw new AggregateError(errors, "Gateway cleanup failed");
   }
 
-  private localControlHost(): string {
-    const host = this.config.server.host;
+  private static localControlHost(config:GatewayConfig): string {
+    const host = config.server.host;
     if (host === "0.0.0.0" || host === "::" || host === "[::]") return "127.0.0.1";
     return host;
   }
 
-  private async takeOverPreviousInstance(): Promise<void> {
-    const owner = await readInstanceOwner(this.config.dataDir);
+  private static async takeOverPreviousInstance(config:GatewayConfig): Promise<void> {
+    const owner = await readInstanceOwner(config.dataDir);
     if (!owner || owner.pid === process.pid || !instanceOwnerAlive(owner)) return;
 
     const url =
-      "http://" + this.localControlHost() + ":" + this.config.server.port +
+      "http://" + GatewayService.localControlHost(config) + ":" + config.server.port +
       "/__gateway/takeover";
     let response: Response;
     try {
@@ -373,7 +399,7 @@ export class GatewayService {
       );
     }
 
-    const released = await waitForInstanceRelease(this.config.dataDir, owner.pid, 6_000);
+    const released = await waitForInstanceRelease(config.dataDir, owner.pid, 6_000);
     if (!released) {
       throw new Error(
         "The previous Gateway instance did not exit in time (pid=" + owner.pid + ").",

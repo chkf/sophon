@@ -68,7 +68,7 @@ npm run build
 npm start
 ```
 
-`npm start` 使用更新管理进程。管理员可发送 `/update` 从默认公共上游更新，或用 `/update sources` 查看自定义上游；配置、回退和首次升级步骤见 [更新指南](docs/updating.md)。
+`npm start` 使用更新管理进程。管理员可发送 `/update` 从默认公共上游更新；管理程序随版本一并升级，按变更执行验证并主动通知结果。用 `/update sources` 查看自定义上游；配置、回退和首次升级步骤见 [更新指南](docs/updating.md)。
 
 ## 配置与扩展
 
@@ -109,4 +109,4 @@ npm run build
 
 框架源码按 [MIT](LICENSE) 发布。依赖和可选组件的许可范围见 [第三方说明](THIRD_PARTY_NOTICES.md)。`package.json` 的 `private: true` 仅防止意外发布到 npm，不限制源码使用。
 
-可选的[记忆图与三日上下文窗口](docs/memory-graph.md)需要显式停机迁移和历史回填，默认关闭。
+[记忆图与三日上下文窗口](docs/memory-graph.md)默认启用，启动时自动备份并准备扩展与历史回填。分类需要 SIWC 并消耗所选模型额度；显式设置 `GATEWAY_MEMORY_GRAPH_ENABLED=false` 可关闭，旧配置的关闭选择会保留。

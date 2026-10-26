@@ -17,7 +17,7 @@ test("configured service exposes files and runs silent review while proactive me
   await initializeGateway(data);
   const settings = { GATEWAY_DATA_DIR: data, TELEGRAM_BOT_TOKEN: "70001:synthetic", TELEGRAM_OWNER_ID: "70001",
     GATEWAY_FILES_ENABLED: "true", GATEWAY_GENERATED_FILES_DIR: join(root, "documents"),
-    GATEWAY_RECENT_REVIEW_ENABLED: "true", GATEWAY_HEARTBEAT_ENABLED: "false" };
+    GATEWAY_RECENT_REVIEW_ENABLED: "true", GATEWAY_HEARTBEAT_ENABLED: "false", GATEWAY_MEMORY_GRAPH_ENABLED: "false" };
   const previous = { ...process.env };
   Object.assign(process.env, settings);
   t.after(() => { for (const key of Object.keys(settings)) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; } });

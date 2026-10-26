@@ -10,6 +10,12 @@ async function isolatedConfig(run: () => void) {
   finally { process.chdir(savedCwd); process.env = savedEnv; await rm(sandbox.root, { recursive: true, force: true }); }
 }
 
+test('memory graph defaults on and respects an explicit off setting',()=>isolatedConfig(()=>{
+  assert.equal(loadConfig().memoryGraphEnabled,true);
+  process.env.GATEWAY_MEMORY_GRAPH_ENABLED='false';assert.equal(loadConfig().memoryGraphEnabled,false);
+  process.env.GATEWAY_MEMORY_GRAPH_ENABLED='true';assert.equal(loadConfig().memoryGraphEnabled,true);
+}));
+
 test("control center is opt-in and accepts HTTPS or explicit local HTTP only", () => isolatedConfig(() => {
   assert.equal(loadConfig().control, undefined);
   for (const value of ["https://gateway.example/control/", "http://127.0.0.1:8790/control/", "http://localhost:8790/control/", "http://[::1]:8790/control/"]) {

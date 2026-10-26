@@ -29,8 +29,8 @@ export function bootstrapStatus(store:MemoryStore) {
    needsBootstrap:!state||missing>0||stale>0||failed>0,
    operations:Object.fromEntries((db.prepare('SELECT status,count(*) n FROM memory_operations WHERE owner_scope=? GROUP BY status').all(scope) as {status:string;n:number}[]).map(r=>[r.status,r.n]))};
 }
-/** Explicit stopped-host command: queue original owner exchanges; never call models while holding the lock. */
-export function beginBootstrap(store:MemoryStore,now=new Date()) {
+/** Queue original owner exchanges before service start; never call models while holding the lock. */
+export function beginBootstrap(store:MemoryStore,now=new Date(),{retryFailures=true}={}) {
  return transaction(store.db,()=>{
   const db=store.db,at=now.toISOString(),previous=bootstrapState(store);
   if(previous&&bootstrapStatus(store).ready){new MemoryRecent(store).migrate();return {...bootstrapStatus(store),enqueuedNow:0};}
@@ -44,7 +44,7 @@ export function beginBootstrap(store:MemoryStore,now=new Date()) {
    const existed=db.prepare('SELECT 1 FROM memory_jobs WHERE owner_scope=? AND operation_key=?').get(store.scope,'classify:'+rowid);
    store.enqueue(rowid,at,true);if(!existed)enqueued++;
   }
-  db.prepare("UPDATE memory_jobs SET status='pending',lease=NULL,attempts=0,error_code=NULL,run_after=?,updated_at=? WHERE owner_scope=? AND status IN ('failed','running')").run(at,at,store.scope);
+  if(retryFailures)db.prepare("UPDATE memory_jobs SET status='pending',lease=NULL,attempts=0,error_code=NULL,run_after=?,updated_at=? WHERE owner_scope=? AND status IN ('failed','running')").run(at,at,store.scope);
   const throughRowid=Number(db.prepare('SELECT COALESCE(MAX(rowid),0) n FROM messages WHERE conv_key=?').get(store.scope)!.n);
   putState(db,{key:key(store.scope),category:'metadata',value:JSON.stringify({version:1,scope:store.scope,startedAt:at,throughRowid,enqueued:anchors.length} satisfies BootstrapState)});
   new MemoryRecent(store).migrate();bumpMemoryRevision(db);

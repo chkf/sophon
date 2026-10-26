@@ -102,8 +102,8 @@ async function install(root,{binary,platform=process.platform,arch=process.arch,
  }finally{if(stage)await rm(stage,{recursive:true,force:true});await unlock();}
 }
 
-export async function prepareControlDependency(root,options={}){
- const {loadConfig}=await import(pathToFileURL(join(root,'dist/config/index.js')).href);
+export async function prepareControlDependency(root,{codeRoot=root,...options}={}){
+ const {loadConfig}=await import(pathToFileURL(join(codeRoot,'dist/config/index.js')).href);
  if(loadConfig().control?.tunnel!=='cloudflare')return;
  try{return await ensureCloudflared(root,{binary:process.env.GATEWAY_CLOUDFLARED_BIN?.trim()||undefined,...options});}
  catch(error){console.error('[host] optional cloudflared preparation failed ('+safeComponentCode(error)+'); Gateway update may continue.');}
