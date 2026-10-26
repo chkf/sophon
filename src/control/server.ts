@@ -74,7 +74,9 @@ export class ControlCenter {
     const code = this.auth.issueCode();
     const url = new URL(this.url.href);
     url.hash = new URLSearchParams({ login_code: code }).toString();
-    return { url: url.href, text: "Sophon 控制中心\n打开以下链接即可自动登录（5 分钟内有效）。\n\n备用登录码：\n" + code };
+    const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    const accessHint = local ? "\n当前链接仅供部署电脑本机访问。手机不能直接使用此地址；请先配置 HTTPS 代理或 Tailscale Serve，并修改 GATEWAY_CONTROL_PUBLIC_URL。步骤见 docs/control-center.md。\n" : "";
+    return { url: url.href, text: "Sophon 控制中心\n打开以下链接即可自动登录（5 分钟内有效）。" + accessHint + "\n\n备用登录码：\n" + code };
   }
 
   loginMessage(): string { const entry = this.loginEntry(); return entry.text + "\n" + entry.url; }

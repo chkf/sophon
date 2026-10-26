@@ -24,6 +24,7 @@ test("control entry is owner-only, local, and never becomes model history", asyn
     const owner = await invoke(inbound);
     assert.match(owner.text, /Sophon 控制中心/);
     assert.match(owner.text, /备用登录码/);
+    assert.match(owner.text, /手机不能直接使用此地址/);
     const other = await invoke({ ...inbound, senderId: "200", conversationId: "200" });
     assert.match(other.text, /管理员私聊/);
     assert.doesNotMatch(other.text, /[A-Za-z0-9_-]{43}/);

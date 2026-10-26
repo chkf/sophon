@@ -63,3 +63,23 @@ npm start
 突然断电或强制结束可能留下 `.sophon-updates/host.lock` 或 `update.lock`。先检查各目录中的 `owner.json` PID，并确认管理进程、Gateway 子进程和更新任务全部停止，再删除残留锁目录；不要在运行时删除锁。未消费的 `request.json` 会在下次启动时处理，不希望继续时在停机状态删除该文件。之后运行 `npm start`。
 
 发布目录不会自动清理，应预留依赖安装和测试所需空间。停机后可清理不被 `current.json` 与 `previous.json` 引用的发布目录和遗留 `staging-*`；保留当前及上一版本才能回退。不要删除自己的数据目录。
+
+## Windows 测试与更新排错
+
+使用 Node.js 24，在 PowerShell 中检查下列程序是否可用：
+
+```powershell
+node --version
+npm.cmd --version
+git --version
+ffmpeg -version
+ffprobe -version
+npm.cmd run typecheck
+npm.cmd test
+```
+
+如果执行策略阻止 `npm.ps1`，可直接使用 `npm.cmd`，无需更改系统执行策略。完整测试需要 ffmpeg 和 ffprobe；未安装时先安装并加入 PATH，再重新打开终端。更新管理进程也需重启才能继承新的 PATH。不要通过跳过整个测试套件来处理依赖缺失。
+
+Windows 普通账号可能没有创建符号链接的权限。相关用例仅在创建链接明确返回 Windows `EPERM` 时标记 skipped，并显示原因；普通文件、超限文件和目录越界检查仍执行。需要运行符号链接用例时可开启 Windows 开发者模式或使用具备该权限的测试环境。其他错误仍然使测试失败。
+
+如仍失败，请记录失败用例名称、错误码、Node.js 版本和运行命令；不要分享 `.env`、登录码或服务密钥。Linux 上测试通过不代表已经完成 Windows 真机验证。

@@ -89,3 +89,28 @@ npm run test:control-ui
 聊天历史按最新消息在前显示，原始消息索引仍用于定位。删除需要明确确认和当前消息版本，未结算交付会阻止删除；删除后保留筛选、分页和滚动位置。删除会更新历史索引、Recent 进度和上下文覆盖游标，并在自然重连时重建可见历史。已经进入活动连接、不可读压缩检查点或备份的内容不会因此被追溯抹除。
 
 记忆图页提供主题、节点、原文来源和回填状态的只读浏览。迁移、回填及分类模型设置分别通过 CLI 和 `/model` 完成。
+
+## 手机连接不上：先检查链接地址
+
+`127.0.0.1`、`localhost` 和 `[::1]` 始终指向打开浏览器的设备。电脑部署后把这种链接发送给手机，手机访问的是自己，而不是电脑。相同 Wi-Fi 也不会改变这一点。仅修改 `GATEWAY_CONTROL_PUBLIC_URL` 不会建立网络转发；目前也不能直接把它改成普通局域网 HTTP 地址。
+
+无需公网 IP 的一种方式是 Tailscale Serve：电脑与手机安装 Tailscale 并加入同一网络，手机保持连接。主机仍绑定 `127.0.0.1`，由 Serve 提供 HTTPS。在部署电脑的 PowerShell 或终端执行（端口对应 `GATEWAY_PORT`）：
+
+```sh
+tailscale serve --bg --https=443 --set-path=/control http://127.0.0.1:8790/control
+tailscale serve status
+```
+
+按 Tailscale 提示启用所需的 HTTPS 功能。将 status 显示的真实 HTTPS 主机名填入配置，路径保持 `/control/`：
+
+```dotenv
+GATEWAY_HOST=127.0.0.1
+GATEWAY_PORT=8790
+GATEWAY_CONTROL_PUBLIC_URL=https://your-device.your-network.ts.net/control/
+```
+
+这里的域名是占位符。重启 Gateway 后重新发送 `/status`，手机使用新链接；旧链接和旧登录码不能继续使用。Serve 仅配置 `/control` 路由，保留上游 `/control` 前缀，不要把整个 Gateway 端口作为根路径公开。检查已有 Serve 配置，避免遗留的根路径转发。此处使用 Serve，不需要 Funnel 或路由器端口映射。
+
+如果新链接依然无法连接，先在电脑上访问同一个 HTTPS 链接，再确认手机 Tailscale 已连接、电脑在线且未休眠、Serve 仍在运行、网络访问规则允许手机访问。如果页面返回“访问地址与控制中心配置不一致”，检查公开主机名与代理 Host；如果返回“请求来源不匹配”，检查是否从配置的同一 HTTPS 地址打开。不要删除 Host、Origin 或登录校验来绕过这些错误。
+
+命令依据：[Tailscale Serve CLI](https://tailscale.com/docs/reference/tailscale-cli/serve)、[Serve 功能与前置条件](https://tailscale.com/docs/features/tailscale-serve)。实际部署仍需在自己的电脑和手机验证。

@@ -83,18 +83,30 @@ test("uncertain sends remain consumed after restart and require a new user reque
   assert.equal(f.sent.length, 1);
 });
 
-test("existing binary files retain bytes while oversize and linked files are rejected", async t => {
+test("existing binary files retain bytes while oversize files are rejected", async t => {
   const f = await fixture(t);
   const path = join(f.root, "sample.bin");
   await writeFile(path, Buffer.from([0, 1, 2, 255]));
   await run(f.service, "telegram_send_document", { mode: "existing", path });
   assert.deepEqual(Buffer.from(f.sent[0]!.bytes), Buffer.from([0, 1, 2, 255]));
-  const linked = join(f.root, "linked.bin");
-  await symlink(path, linked);
-  await assert.rejects(run(f.service, "telegram_send_document", { mode: "existing", path: linked }, message("link-request")));
   await truncate(path, MAX_FILE_BYTES + 1);
   await assert.rejects(run(f.service, "telegram_send_document", { mode: "existing", path }, message("large-request")), /20 MiB/);
   assert.equal(f.sent.length, 1);
+});
+
+test("linked files are rejected when symbolic links are available", async t => {
+  const f = await fixture(t);
+  const path = join(f.root, "source.bin"), linked = join(f.root, "linked.bin");
+  await writeFile(path, "synthetic file");
+  try { await symlink(path, linked); }
+  catch (error) {
+    if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") {
+      t.skip("Symbolic-link privilege unavailable; enable Windows Developer Mode to run this case."); return;
+    }
+    throw error;
+  }
+  await assert.rejects(run(f.service, "telegram_send_document", { mode: "existing", path: linked }, message("link-request")));
+  assert.equal(f.sent.length, 0);
 });
 
 test("file tools are limited to the configured owner conversation", async t => {
