@@ -2,6 +2,7 @@ import {fileURLToPath} from 'node:url';
 import {resolve,join} from 'node:path';
 import {rm} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
+import {UpdateNotifications} from './notifications.mjs';
 import {GatewayProcess} from './supervisor.mjs';
 import {acquireLock,stateDirectory,readSources,selectSource,currentRelease,saveRelease,prepareRelease,runCommand,readJson,atomicJson,switchRelease,releaseFromPointer} from './releases.mjs';
 
@@ -11,7 +12,13 @@ let busy=false,closing=false,pending,active,started=false;
 const unlock=await acquireLock(root,'host',{role:'supervisor'});
 let finish;const finished=new Promise(resolve=>{finish=resolve;});
 const validate=release=>runCommand(process.execPath,[fileURLToPath(new URL('./check-release.mjs',import.meta.url)),release.path],root,process.env);
-const status=async(value)=>atomicJson(join(dir,'status.json'),{...value,at:new Date().toISOString()});
+const notifications=new UpdateNotifications(root);
+const status=async(value)=>{
+ const result={...value,at:new Date().toISOString()};
+ await atomicJson(join(dir,'status.json'),result);
+ await notifications.enqueue(result);
+ void notifications.flush();
+};
 const gateway=new GatewayProcess(root,{
  onUnexpectedExit:code=>{if(started&&!busy){console.error('[host] Gateway exited; host is stopping.');process.exitCode=code||1;finish();}},
  onRequest:(message,child)=>{void (async()=>{
@@ -36,7 +43,7 @@ async function queue(name,id=randomUUID()){
    const prior=rollback?await readJson(join(dir,'previous.json'),undefined):undefined;
    if(rollback&&prior===undefined)throw Error('No previous release.');
    const candidate=rollback?{...await releaseFromPointer(root,prior),unchanged:false}:await prepareRelease(root,source);
-   if(closing)return;
+   if(closing){await status({id,phase:'interrupted',source:source.name});return;}
    if(candidate.unchanged){await status({id,phase:'current',source:source.name,sha:active.pointer?.sha});return;}
    await status({id,phase:'switching',source:source.name,sha:candidate.pointer?.sha??"initial"});
    await switchRelease(active,candidate,{validate,stop:()=>gateway.stop(),start:r=>gateway.start(r),save:async pointer=>{
@@ -51,11 +58,13 @@ async function queue(name,id=randomUUID()){
    if(!gateway.child){process.exitCode=1;finish();}
   }finally{await releaseLock?.();busy=false;}
  })();
- return '已开始更新：'+source.name+'。验证通过后自动重启，使用 /update status 查看结果。';
+ return '已开始更新：'+source.name+'。验证通过后自动重启，成功或失败会主动通知。也可使用 /update status 查看进度。';
 }
-let timer;
+let timer,notificationTimer;
 const shutdown=()=>{closing=true;finish();};process.once('SIGINT',shutdown);process.once('SIGTERM',shutdown);
 try{
+ void notifications.flush();
+ notificationTimer=setInterval(()=>{void notifications.flush();},30_000);
  active=await currentRelease(root);
  try {await gateway.start(active);} catch {
   await gateway.stop();
@@ -66,13 +75,15 @@ try{
   await status({phase:'rolled_back',message:'新版本启动失败，已恢复原运行版本。'});
  }
  started=true;
+ const lastStatus=await readJson(join(dir,'status.json'),null);
+ if(['preparing','switching'].includes(lastStatus?.phase))await status({id:lastStatus.id,phase:'interrupted',source:lastStatus.source});
  timer=setInterval(()=>{if(closing)return;void (async()=>{
   const path=join(dir,'request.json'),request=await readJson(path,null);if(!request)return;
   await rm(path,{force:true});await queue(request.source,request.id);
  })().catch(()=>console.error('[host] local update request rejected.'));},1000);
  await finished;
 }finally{
- closing=true;clearInterval(timer);
+ closing=true;clearInterval(timer);clearInterval(notificationTimer);
  // Candidate validation may still be running; it must not publish after shutdown.
- try{await pending;}finally{await gateway.stop();await unlock();}
+ try{await pending;}finally{await gateway.stop();await notifications.chain;await unlock();}
 }

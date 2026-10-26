@@ -15,7 +15,11 @@ import type { ChatRequest } from "../runtime/types.js";
 
 test("Gateway advertises and executes file tools through the owner Telegram transport", async t => {
   const root = await mkdtemp(join(tmpdir(), "sophon-file-integration-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  let sessions: SessionStore | undefined;
+  t.after(async () => {
+    sessions?.close();
+    await rm(root, { recursive: true, force: true });
+  });
   const data = join(root, "state");
   await initializeGateway(data);
   let sent = 0;
@@ -29,8 +33,7 @@ test("Gateway advertises and executes file tools through the owner Telegram tran
       }, async getFile() { throw new Error("Unused fixture method"); }, async downloadFile() { throw new Error("Unused fixture method"); },
     } });
   const files = new FileService(data, join(root, "generated"), "70001", file => telegram.sendDocumentToOwner(file));
-  const sessions = new SessionStore(data);
-  t.after(() => sessions.close());
+  sessions = new SessionStore(data);
   const runtime = { async reply(request: ChatRequest) {
     assert.ok(request.tools?.some(tool => tool.name === "gateway_file_list"));
     const result = await request.executeTool!("telegram_send_document", { mode: "generate", filename: "result.csv", content: "label,value\nA,1\n" }) as any;
