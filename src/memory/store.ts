@@ -51,7 +51,7 @@ export class MemoryStore {
     });
   }
   retry(job:Job,code:string,now=new Date()):number {
-    const terminal=['NO_USER_TURN','SOURCE_CHANGED','INVALID_CLASSIFICATION','INVALID_JSON','TOPIC_INVALID','INVALID_MEMORY_OUTPUT','INVALID_REINFORCEMENT'].includes(code)&&job.attempts>=3;
+    const terminal=['NO_USER_TURN','SOURCE_CHANGED','INVALID_CLASSIFICATION','INVALID_JSON','TOPIC_INVALID','TOPIC_DIRECTORY_LIMIT','INVALID_MEMORY_OUTPUT','INVALID_REINFORCEMENT'].includes(code)&&job.attempts>=3;
     const delay=Math.min(6*60*60_000,60_000*2**Math.min(8,job.attempts-1));
     this.db.prepare(`UPDATE memory_jobs SET status=?,lease=NULL,error_code=?,run_after=?,updated_at=?
       WHERE id=? AND owner_scope=? AND lease=? AND status='running'`).run(terminal?'failed':'retry',code,new Date(+now+delay).toISOString(),now.toISOString(),job.id,this.scope,job.lease);

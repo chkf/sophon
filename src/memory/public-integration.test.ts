@@ -38,9 +38,12 @@ test('bootstrap covers complete exchanges, worker persists grounded topics and r
  await exchange(sessions);assert.equal(graph.context().ready,false);
  beginBootstrap(graph);assert.equal(bootstrapStatus(graph).ready,false);
  let calls=0;const worker=new MemoryWorker(graph,{reply:async()=>{throw Error('unused');},classifyMemory:async input=>{
-  calls++;assert.match(input,/下周整理文档索引/);return JSON.stringify(result);
+  calls++;assert.match(input,/下周整理文档索引/);
+  return JSON.stringify(JSON.parse(input).stage==='roots'?result:{...result,proposed_topics:[]});
  }});
- await worker.tick(new Date(Date.now()+1000));assert.equal(calls,1);assert.equal(bootstrapStatus(graph).ready,true);
+ await worker.tick(new Date(Date.now()+1000));assert.equal(calls,1);
+ assert.equal(graph.topics().length,0);assert.equal(bootstrapStatus(graph).ready,false);
+ await worker.tick(new Date(Date.now()+1000));assert.equal(calls,2);assert.equal(bootstrapStatus(graph).ready,true);
  assert.equal(graph.topics()[0].name,'文档整理');assert.equal(graph.context().ready,true);
  const ui=new ControlMemory(graph.db,{ownerId:owner,enabled:true},sessions);assert.equal(ui.overview().available,true);
  assert.equal(Number(graph.db.prepare('SELECT count(*) n FROM memory_sources').get()!.n),2);
@@ -127,4 +130,47 @@ test('recall instructions retain original-history access with and without graph 
  assert.equal(captured[1].tools.some((t:any)=>t.name==='gateway_memory_search'),false);
  assert.match(captured[1].instructions,/若本轮未提供记忆工具/);
  assert.ok(captured[1].tools.some((t:any)=>t.name==='gateway_read_history'));
+}));
+
+test('classification resumes root selection after worker restart and a final skip leaves no topics',()=>fixture(async(_root,sessions,graph)=>{
+ await exchange(sessions);beginBootstrap(graph);
+ const first=new MemoryWorker(graph,{reply:async()=>{throw Error('Unexpected chat call');},classifyMemory:async input=>{
+  assert.equal(JSON.parse(input).stage,'roots');return JSON.stringify(result);
+ }});
+ await first.tick(new Date(Date.now()+1000));await first.stop();
+ assert.equal(graph.topics().length,0);
+ const next=new MemoryWorker(graph,{reply:async()=>{throw Error('Unexpected chat call');},classifyMemory:async input=>{
+  assert.equal(JSON.parse(input).stage,'branches');
+  return JSON.stringify({schema_version:1,decision:'SKIP',labels:[],proposed_topics:[],relation_hints:[]});
+ }});
+ await next.tick(new Date(Date.now()+1000));await next.stop();
+ assert.equal(graph.topics().length,0);assert.equal(bootstrapStatus(graph).ready,true);
+ assert.equal(Number(graph.db.prepare('SELECT count(*) n FROM memory_nodes').get()!.n),0);
+ assert.equal((await sessions.view('telegram',owner)).history.count,2);
+}));
+
+test('topic directory edits invalidate saved routing before branch classification',()=>fixture(async(_root,sessions,graph)=>{
+ await exchange(sessions);beginBootstrap(graph);
+ let calls=0;
+ const worker=new MemoryWorker(graph,{reply:async()=>{throw Error('Unexpected chat call');},classifyMemory:async input=>{
+  calls++;assert.equal(JSON.parse(input).stage,'roots');return JSON.stringify(result);
+ }});
+ await worker.tick(new Date(Date.now()+1000));
+ // A synthetic directory insertion changes the routing snapshot without changing the source turn.
+ graph.db.prepare(`INSERT INTO memory_topics(id,owner_scope,name,normalized_name,description,mass_updated_at,created_at,updated_at)
+ VALUES(?,?,?,?,?,?,?,?)`).run('existing-root',graph.scope,'索引','索引','合成目录',at,at,at);
+ await worker.tick(new Date(Date.now()+1000));await worker.stop();
+ assert.equal(calls,2);assert.equal(graph.topics().length,1);
+ assert.equal(bootstrapStatus(graph).ready,false);
+}));
+
+test('invalid branch output retries without committing proposed root topics',()=>fixture(async(_root,sessions,graph)=>{
+ await exchange(sessions);beginBootstrap(graph);let calls=0;
+ const worker=new MemoryWorker(graph,{reply:async()=>{throw Error('Unexpected chat call');},classifyMemory:async()=>{
+  calls++;return JSON.stringify(calls===1?result:{...result,labels:[{topic_id:'unselected-topic',score:0.9}],proposed_topics:[]});
+ }});
+ await worker.tick(new Date(Date.now()+1000));await worker.tick(new Date(Date.now()+1000));await worker.stop();
+ assert.equal(graph.topics().length,0);
+ assert.equal(graph.db.prepare('SELECT status FROM memory_jobs').get()!.status,'retry');
+ assert.equal(bootstrapStatus(graph).ready,false);
 }));
