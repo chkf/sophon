@@ -1,3 +1,4 @@
+import {ControlTunnel} from './control-tunnel.mjs';
 import {fileURLToPath} from 'node:url';
 import {resolve,join} from 'node:path';
 import {rm} from 'node:fs/promises';
@@ -69,11 +70,17 @@ async function queue(name,id=randomUUID()){
  })();
  return '已开始更新：'+source.name+'。验证通过后自动重启，成功或失败会主动通知。也可使用 /update status 查看进度。';
 }
-let timer,notificationTimer;
+let timer,notificationTimer,tunnel;
 const shutdown=()=>{closing=true;finish();};process.once('SIGINT',shutdown);process.once('SIGTERM',shutdown);
 try{
  void notifications.flush();
  notificationTimer=setInterval(()=>{void notifications.flush();},30_000);
+ const {loadConfig,validateServeConfig}=await import('../../dist/config/index.js');
+ const hostConfig=loadConfig();validateServeConfig(hostConfig);
+ if(hostConfig.control?.tunnel==='cloudflare'){
+  tunnel=new ControlTunnel({...hostConfig.server,binary:process.env.GATEWAY_CLOUDFLARED_BIN?.trim()||'cloudflared',onUrl:url=>gateway.setControlUrl(url)});
+  try{await tunnel.start();}catch{await tunnel.stop();tunnel=undefined;console.error('[host] control tunnel could not start; Gateway will continue without a mobile URL.');}
+ }
  active=await currentRelease(root);
  try {await gateway.start(active);} catch {
   await gateway.stop();
@@ -94,5 +101,5 @@ try{
 }finally{
  closing=true;clearInterval(timer);clearInterval(notificationTimer);
  // Candidate validation may still be running; it must not publish after shutdown.
- try{await pending;}finally{await gateway.stop();await notifications.chain;await unlock();}
+ try{await pending;}finally{try{await gateway.stop();}finally{await tunnel?.stop();await notifications.chain;if(!gateway.child)await unlock();}}
 }

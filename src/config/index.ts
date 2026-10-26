@@ -28,7 +28,7 @@ export interface GatewayConfig {
   dataDir: string;
   files?: { enabled: boolean; generatedDir: string };
   recentReview?: { enabled: boolean };
-  control?: { publicUrl: string };
+  control?: { publicUrl: string; tunnel?: "cloudflare" };
   logDir?: string;
   siwcDevkitDir: string;
   model?: string;
@@ -100,9 +100,22 @@ export function controlPublicUrl(value: string): string {
   return url.href;
 }
 
+export function controlTunnelUrl(value: unknown): string | undefined {
+  if(typeof value !== "string") return undefined;
+  try {
+    const url = new URL(value);
+    if(url.protocol === "https:" && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.trycloudflare\.com$/.test(url.hostname) &&
+       !url.port && !url.username && !url.password && !url.search && !url.hash && url.pathname === "/control/") return url.href;
+  } catch {}
+  return undefined;
+}
+
 export function loadConfig(): GatewayConfig {
   loadLocalEnv();
 
+  const tunnel = optional("GATEWAY_CONTROL_TUNNEL") ?? "off";
+  if(!["off", "cloudflare"].includes(tunnel)) throw new Error("GATEWAY_CONTROL_TUNNEL must be off or cloudflare.");
+  const temporaryUrl = process.env.SOPHON_MANAGED_HOST === "1" ? controlTunnelUrl(optional("SOPHON_CONTROL_TUNNEL_URL")) : undefined;
   const telegramToken = optional("TELEGRAM_BOT_TOKEN");
   const telegramOwner = optional("TELEGRAM_OWNER_ID");
   if (["WECHAT_TOKEN", "WECHAT_APP_ID", "WECHAT_APP_SECRET", "WECHAT_OWNER_OPENID"].some(name => optional(name))) {
@@ -144,7 +157,7 @@ export function loadConfig(): GatewayConfig {
       generatedDir: resolve(optional("GATEWAY_GENERATED_FILES_DIR") ?? resolve(process.env.GATEWAY_DATA_DIR ?? "./data", "files/generated")),
     },
     recentReview: { enabled: bool("GATEWAY_RECENT_REVIEW_ENABLED", false) },
-    ...(optional("GATEWAY_CONTROL_PUBLIC_URL") ? { control: { publicUrl: controlPublicUrl(optional("GATEWAY_CONTROL_PUBLIC_URL")!) } } : {}),
+    ...(tunnel === "cloudflare" ? {control: {tunnel: "cloudflare" as const, publicUrl: temporaryUrl ?? "https://pending.trycloudflare.com/control/"}} : optional("GATEWAY_CONTROL_PUBLIC_URL") ? { control: { publicUrl: controlPublicUrl(optional("GATEWAY_CONTROL_PUBLIC_URL")!) } } : {}),
     ...(optional("GATEWAY_LOG_DIR") ? { logDir: resolve(optional("GATEWAY_LOG_DIR")!) } : {}),
     siwcDevkitDir: resolve(process.env.GATEWAY_SIWC_DEVKIT_DIR ?? "./vendor/siwc"),
     ...(model ? { model } : {}),

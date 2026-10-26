@@ -16,7 +16,7 @@ Self-hosted messaging gateway with local SQLite context, optional memory graph, 
 - 可选语音、图片生成和主动消息。
 - 内置 Core、Recent 和聊天历史工具。
 - 可选本地文件浏览、保存与发送、确认后修改或删除，以及独立的后台 Recent 整理。
-- 可选 [Sophon 控制中心](docs/control-center.md)：聊天历史与 Core/Recent 管理、上下文观察、主动任务调用轨迹和主机走势；与已有 slash 面板分工。
+- 可选 [Sophon 控制中心](docs/control-center.md)：聊天历史与 Core/Recent 管理、上下文观察、主动任务调用轨迹和主机走势；与已有 slash 面板分工。设置 `GATEWAY_CONTROL_TUNNEL=cloudflare` 后，`npm start` 自动生成临时手机访问网址，Telegram `/status` 获取入口（主机需安装 cloudflared）。
 
 当前是单用户、单实例框架。API、数据库格式和配置仍可能演进。主动消息默认关闭；没有内置个人资料、私人业务工作流或固定角色设定。
 

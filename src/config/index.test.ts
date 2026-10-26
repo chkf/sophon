@@ -138,3 +138,20 @@ test("proactive defaults adopt quiet 01:00–07:00, 60-minute cooldown and 8 att
     });
   }
 }));
+
+test("temporary control access needs no fixed URL and rejects unknown modes", () => isolatedConfig(() => {
+  process.env.GATEWAY_CONTROL_TUNNEL = "cloudflare";
+  process.env.GATEWAY_CONTROL_PUBLIC_URL = "invalid-obsolete-address";
+  process.env.TELEGRAM_BOT_TOKEN = "synthetic-token";
+  process.env.TELEGRAM_OWNER_ID = "70001";
+  const pending = loadConfig();
+  assert.equal(pending.control?.tunnel, "cloudflare");
+  assert.doesNotThrow(() => validateServeConfig(pending));
+  process.env.SOPHON_MANAGED_HOST = "1";
+  process.env.SOPHON_CONTROL_TUNNEL_URL = "https://neutral-example.trycloudflare.com/control/";
+  assert.equal(loadConfig().control?.publicUrl, process.env.SOPHON_CONTROL_TUNNEL_URL);
+  process.env.SOPHON_CONTROL_TUNNEL_URL = "https://neutral-example.trycloudflare.com.external.example/control/";
+  assert.equal(loadConfig().control?.publicUrl, "https://pending.trycloudflare.com/control/");
+  process.env.GATEWAY_CONTROL_TUNNEL = "unknown";
+  assert.throws(() => loadConfig(), /GATEWAY_CONTROL_TUNNEL/);
+}));

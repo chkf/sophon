@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { createHash } from "node:crypto";
+import { controlTunnelUrl } from "../config/index.js";
 import { ControlAuth, ControlRateLimiter } from "./auth.js";
 import { ControlData, ControlDataError } from "./data.js";
 import type { HostMonitor } from "./host.js";
@@ -9,6 +10,8 @@ import type { TaskTraceStore } from "../observability/store.js";
 
 interface ControlOptions {
   publicUrl: string;
+  temporary?: boolean;
+  tunnelReady?: boolean;
   data: ControlData;
   traces: TaskTraceStore;
   host: HostMonitor;
@@ -58,7 +61,8 @@ function safeName(name: string): string {
 /** Owner-only data/trace interface. It deliberately has no model or operational controls. */
 export class ControlCenter {
   readonly auth: ControlAuth;
-  private readonly url: URL;
+  private url: URL;
+  private tunnelReady = true;
   private readonly rate = new ControlRateLimiter();
   private readonly assets = new Map<string, Buffer>();
   private readonly pending = new Set<Promise<boolean>>();
@@ -67,19 +71,32 @@ export class ControlCenter {
 
   constructor(private readonly options: ControlOptions) {
     this.url = new URL(options.publicUrl);
+    this.tunnelReady = !options.temporary || options.tunnelReady === true;
     this.auth = new ControlAuth(this.url.protocol === "https:");
   }
 
   loginEntry(): { text: string; url: string } {
+    if(!this.tunnelReady) throw new Error("Control tunnel unavailable.");
     const code = this.auth.issueCode();
     const url = new URL(this.url.href);
     url.hash = new URLSearchParams({ login_code: code }).toString();
     const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-    const accessHint = local ? "\n当前链接仅供部署电脑本机访问。手机不能直接使用此地址；请先配置 HTTPS 代理或 Tailscale Serve，并修改 GATEWAY_CONTROL_PUBLIC_URL。步骤见 docs/control-center.md。\n" : "";
+    const accessHint = local ? "\n当前链接仅供部署电脑本机访问。手机不能直接使用此地址；请设置 GATEWAY_CONTROL_TUNNEL=cloudflare 并使用 npm start。步骤见 docs/control-center.md。\n" : "";
     return { url: url.href, text: "Sophon 控制中心\n打开以下链接即可自动登录（5 分钟内有效）。" + accessHint + "\n\n备用登录码：\n" + code };
   }
 
-  loginMessage(): string { const entry = this.loginEntry(); return entry.text + "\n" + entry.url; }
+  setTunnelUrl(value: unknown): void {
+    if(!this.options.temporary) return;
+    const valid = controlTunnelUrl(value);
+    if(valid === this.url.href && this.tunnelReady) return;
+    this.auth.revokeAll();
+    this.tunnelReady = Boolean(valid);
+    if(valid) this.url = new URL(valid);
+  }
+
+  loginMessage(): string {
+    if(!this.tunnelReady) return "控制中心临时网址尚未就绪。请使用 npm start 启动，并确认 cloudflared 已安装且网络可用；稍后重新发送 /status。";
+    const entry = this.loginEntry(); return entry.text + "\n" + entry.url; }
 
   start(): void { this.options.host.start(); }
   beginShutdown(): void {
@@ -98,6 +115,7 @@ export class ControlCenter {
   async handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
     const path = new URL(req.url ?? "/", "http://localhost").pathname;
     if (path !== "/control" && !path.startsWith("/control/")) return false;
+    if (!this.tunnelReady) { json(res, 503, {ok:false,error:{code:"tunnel_unavailable",message:"临时网址已失效，请重新发送 /status。"}}); return true; }
     if (this.closing) { json(res, 503, { ok: false, error: { code: "shutting_down", message: "服务正在关闭，请稍后重试。" } }); return true; }
     // Bound slow clients so shutdown can drain open uploads/downloads as well.
     req.setTimeout(15_000, () => req.destroy());
