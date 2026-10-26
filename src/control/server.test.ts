@@ -13,7 +13,7 @@ import { TaskTraceStore } from "../observability/store.js";
 async function fixture(run: (client: {
   control: ControlCenter; origin: string; data: ControlData; dataDir: string; server: Server;
   post: (action: string, input?: unknown, headers?: Record<string, string>) => Promise<Response>;
-}) => Promise<void>, beforeMutation?: () => Promise<void>): Promise<void> {
+}) => Promise<void>, beforeMutation?: () => Promise<void>, temporary = false): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "sophon-control-http-")), dataDir = join(root, "data");
   await initializeGateway(dataDir);
   let control: ControlCenter;
@@ -22,7 +22,7 @@ async function fixture(run: (client: {
   const address = server.address() as { port: number }, origin = "http://127.0.0.1:" + address.port;
   const traces = new TaskTraceStore(dataDir);
   const data = new ControlData(dataDir);
-  control = new ControlCenter({ publicUrl: origin + "/control/", data, traces,
+  control = new ControlCenter({ publicUrl: temporary ? "https://pending.trycloudflare.com/control/" : origin + "/control/", temporary, data, traces,
     host: new HostMonitor(dataDir), heartbeat: async () => ({ enabled: false, timezone: "UTC" }),
     mutate: async work => { await beforeMutation?.(); return work(); } });
   const post = (action: string, input: unknown = {}, headers: Record<string, string> = {}) => fetch(origin + "/control/api/" + action,
@@ -189,3 +189,37 @@ test("automatic login fragment is one-use and a newer entry invalidates an old c
   assert.equal((await post('login',{code})).status,200);
   assert.equal((await post('login',{code})).status,401);
 }));
+
+test("fixed address ignores tunnel changes", async () => {
+  await fixture(async ({ control, post, origin }) => {
+    // Existing fixed-address behavior must not accept unsolicited tunnel IPC.
+    control.setTunnelUrl("https://neutral-example.trycloudflare.com/control/");
+    assert.ok(control.loginEntry().url.startsWith(origin));
+    assert.equal((await post("session")).status, 200);
+  });
+});
+
+
+test("temporary URL changes revoke sessions and codes and enforce the new Host and Origin", () => fixture(async ({control,origin,post}) => {
+  assert.match(control.loginMessage(), /尚未就绪/);
+  assert.throws(() => control.loginEntry(), /unavailable/);
+  control.setTunnelUrl("https://first-example.trycloudflare.com/control/");
+  const oldCode = control.auth.issueCode(), session = control.auth.create();
+  control.setTunnelUrl("https://next-example.trycloudflare.com/control/");
+  assert.equal(control.auth.consumeCode(oldCode), false);
+  assert.equal(control.auth.get(session.id), undefined);
+  assert.ok(control.loginEntry().url.startsWith("https://next-example.trycloudflare.com/control/"));
+  assert.equal((await post("session")).status, 403);
+  const send = (requestOrigin: string) => new Promise<number>((resolve,reject) => {
+    const req = request(origin + "/control/api/session", {method:"POST", headers:{host:"next-example.trycloudflare.com",origin:requestOrigin,"content-type":"application/json"}}, res => {res.resume();res.on("end",()=>resolve(res.statusCode!));});
+    req.on("error",reject);req.end("{}");
+  });
+  assert.equal(await send("https://next-example.trycloudflare.com"), 200);
+  assert.equal(await send("https://first-example.trycloudflare.com"), 403);
+  control.setTunnelUrl(null, "download_failed");
+  assert.match(control.loginMessage(), /尚未就绪/);
+  assert.match(control.loginMessage(), /组件下载失败/);
+  control.setTunnelUrl(null, "synthetic-internal-detail");
+  assert.doesNotMatch(control.loginMessage(), /synthetic-internal-detail/);
+  assert.equal((await post("session")).status, 503);
+}, undefined, true));

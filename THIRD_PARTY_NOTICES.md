@@ -16,3 +16,8 @@ The lockfile records transitive dependency versions and license identifiers. Ins
 Optional Sign in with ChatGPT DevKit is **not included** in this source distribution. The pinned revision has a noncommercial license, separate from this repository's MIT license. See [optional SIWC](docs/optional-siwc.md) and its [upstream license](https://github.com/openai/sign-in-with-chatgpt-devkit/blob/f723814abdccec135b519c451fb6e1992ee5e933/LICENSE).
 
 Provider SDK source license does not grant service access, account eligibility, or rights to paid API usage.
+
+
+## cloudflared（可选下载）
+
+启用 Cloudflare 临时控制中心访问时可自动下载 Cloudflare 官方发布的 cloudflared。本仓库不包含其二进制；下载清单固定发布版本、文件大小和官方 SHA-256，见 `scripts/host/cloudflared-release.json`。cloudflared 由 Cloudflare 维护，采用 Apache-2.0 许可；源码与许可见 https://github.com/cloudflare/cloudflared 。手动安装的版本优先复用，Cloudflare 服务本身遵循其服务条款。

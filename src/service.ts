@@ -18,7 +18,7 @@ import { withTimeout } from "./util/timeout.js";
 import { createServer, type Server } from "node:http";
 import { join } from "node:path";
 import type { GatewayConfig } from "./config/index.js";
-import { validateServeConfig } from "./config/index.js";
+import { controlTunnelUrl, validateServeConfig } from "./config/index.js";
 import { TelegramAdapter } from "./channels/telegram/adapter.js";
 import type { InboundMessage } from "./channels/types.js";
 import type { ReplyOutcome } from "./channels/reply.js";
@@ -183,6 +183,8 @@ export class GatewayService {
         config.api?.apiKey, config.openrouter?.apiKey, config.voice?.apiKey].filter((value): value is string => Boolean(value)) });
       this.control = new ControlCenter({
         publicUrl: config.control.publicUrl,
+        temporary: config.control.tunnel === "cloudflare",
+        tunnelReady: config.control.tunnel === "cloudflare" && process.env.SOPHON_MANAGED_HOST === "1" && !!controlTunnelUrl(process.env.SOPHON_CONTROL_TUNNEL_URL),
         data: new ControlData(config.dataDir, { sessions: this.sessions, knowledge: this.localKnowledge,
           context: this.gatewayContext, expressions: this.expressions, timezone: config.heartbeat.timezone,
           memory: {ownerId: config.telegram?.ownerId, enabled: config.memoryGraphEnabled},
@@ -205,7 +207,7 @@ export class GatewayService {
         if (message.channel !== "telegram" || message.senderId !== config.telegram?.ownerId || message.conversationId !== config.telegram?.ownerId) {
           return "控制中心入口仅向已配置的管理员私聊提供。";
         }
-        return this.control?.loginMessage() ?? "控制中心未启用；请配置 GATEWAY_CONTROL_PUBLIC_URL。";
+        return this.control?.loginMessage() ?? "控制中心未启用；请配置 GATEWAY_CONTROL_TUNNEL=cloudflare 并使用 npm start。";
       }, async (message, args) => {
         if(message.channel!=="telegram" || message.senderId!==config.telegram?.ownerId || message.conversationId!==config.telegram?.ownerId)
           return "更新功能仅向已配置的管理员私聊提供。";
@@ -378,6 +380,8 @@ export class GatewayService {
       );
     }
   }
+
+  setControlTunnelUrl(value: unknown, reason?: unknown): void { this.control?.setTunnelUrl(value,reason); }
 
   private async startHttpServer(): Promise<void> {
     this.server = createServer(async (req, res) => {

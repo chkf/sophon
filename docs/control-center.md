@@ -2,37 +2,55 @@
 
 控制中心用于浏览数据和观察真实执行过程，包含五个页面：聊天历史、Core / Recent、上下文、主动任务和主机监控。聊天模型、语音、生图、主动渠道切换、诊断和日志继续使用已有 slash 面板；网页不提供这些操作的第二套入口。
 
-## 启用和登录
+## 手机访问：Cloudflare 临时网址
 
-默认关闭。设置 `GATEWAY_CONTROL_PUBLIC_URL` 后，控制中心复用 Gateway 的 HTTP 服务和现有主 SQLite，不新增数据库或生产依赖。先按 README 初始化数据目录；控制中心不会创建默认 Core 或自动迁移旧数据库。
+无需 Cloudflare 账号、域名、公网 IP 或手机端客户端。启用后，管理进程自动检查 `cloudflared`：优先使用 `GATEWAY_CLOUDFLARED_BIN` 指定的路径，其次使用 PATH 中已有的程序，均不存在时从 [Cloudflare 官方发布](https://github.com/cloudflare/cloudflared/releases)下载适配当前系统的文件。
 
-本机使用，或通过 SSH 转发到本机：
+自动下载使用仓库内固定版本和 SHA-256 清单，验证完整性并检查可执行性后才使用；失败或未完成文件不会成为有效组件。组件保存在原部署目录的 `.sophon-updates/bin/`，不修改系统 PATH、不需要管理员权限，也不会覆盖用户手动安装的版本。重复启动复用已校验的缓存。支持 Windows x64/32 位、Linux x64/32 位/ARM/ARM64、macOS Intel/Apple Silicon；其他平台需自行提供可运行的程序。
 
-```dotenv
-GATEWAY_HOST=127.0.0.1
-GATEWAY_PORT=8790
-GATEWAY_CONTROL_PUBLIC_URL=http://127.0.0.1:8790/control/
-```
+启动检查在后台运行，聊天无需等待下载。启用临时模式时，运行中的 `/update` 和停机命令 `npm run update` 都会补查组件，即使代码已经是最新版本也会检查。下载失败不会阻止代码更新；管理进程会重试，`/status` 显示对应提示。首次下载需要主机访问 GitHub 官方发布文件，自动下载超时为 120 秒。
 
-远程 HTTPS 使用自己的域名：
+需要使用自行安装的版本时，在 `.env` 填写完整路径，例如 `GATEWAY_CLOUDFLARED_BIN=C:/Tools/cloudflared.exe`。显式路径不可用时会报告配置错误，不擅自改用其他程序。不要把额外参数写入这个路径。组件缓存校验失败时，停机后删除 `.sophon-updates/bin/` 中对应的组件版本目录，再启动重新下载；不要删除 Gateway 发布目录或数据目录。
+
+在 `.env` 中设置：
 
 ```dotenv
+GATEWAY_CONTROL_TUNNEL=cloudflare
+GATEWAY_CONTROL_PUBLIC_URL=
 GATEWAY_HOST=127.0.0.1
 GATEWAY_PORT=8790
-GATEWAY_CONTROL_PUBLIC_URL=https://gateway.example.com/control/
 ```
 
-反向代理只转发 `/control/`（以及 `/control` 跳转），保留原始 Host 和 Origin。不要把 `/healthz` 或 `/__gateway/takeover` 暴露到公网。配置必须以 `/control/` 结尾；公网地址只支持 HTTPS，HTTP 仅支持显式 localhost / 127.0.0.1 / [::1]。启用时 Gateway 必须绑定回环地址。
+按 README 初始化数据并配置 Telegram 管理员，随后启动：
 
-构建、按既有方式重启后，在管理员 Telegram 私聊发送 `/status`，打开返回的网址并粘贴一次性登录码。登录码 5 分钟有效、只可使用一次；再次请求会撤销前一个未使用的码。入口命令不会调用模型或写入聊天历史。
+```sh
+npm run build
+npm start
+```
 
-登录会话 8 小时有效，保存在 HttpOnly / SameSite=Strict Cookie 中；HTTPS 使用 Secure 的 `__Host-` Cookie。登录码和会话只在进程内保存，重启后失效。所有数据接口检查精确 Origin 和 CSRF，不允许跨域访问。关闭方式是移除 `GATEWAY_CONTROL_PUBLIC_URL` 并重启。
+管理进程自动创建临时 HTTPS 网址。在 Telegram 管理员私聊发送 `/status`，手机打开返回的链接即可登录，无需手动复制网址到配置。启动后短时间内网址可能尚未可用，稍后重新请求即可。临时模式忽略旧的 `GATEWAY_CONTROL_PUBLIC_URL`。旧安装需手动更新原部署目录并构建、重启一次管理进程；仅更新发布目录不会升级旧引导程序。
+
+Gateway 更新重启时，管理进程会保留同一个隧道。隧道退出后会撤销当前入口并在 30 秒后重试；新隧道通常产生不同网址，地址变化会撤销旧会话与登录码，重新发送 `/status` 获取新入口。网络短暂断开但隧道进程仍在时，由 cloudflared 自身重连，网址可能保持不变。主机休眠、关机或管理进程停止期间无法访问。
+
+控制中心仍默认关闭，需显式设置上述开关。临时网址属于公网入口，所有数据仍需管理员一次性登录码；不要分享带登录凭据的链接。代理只允许 `/control` 和 `/control/` 下的 GET/POST 请求，拒绝内部健康和进程管理接口。保留精确 Host、Origin、CSRF 校验及 HTTPS Secure Cookie。隧道启用时仍要求 Gateway 绑定回环地址。
+
+组件准备失败、启动超时或网络失败时，聊天继续运行；`/status` 提示入口未就绪，不返回本机地址或失效网址。隧道管理仅支持 `npm start`，直接使用 `npm run serve` 不会启动隧道。管理进程使用独立空配置启动 cloudflared，不修改已有 Cloudflare 配置，也不传入应用密钥或隧道 Token。
+
+[Quick Tunnel 官方说明](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)：无可用性保证，每个隧道最多 200 个进行中请求，不支持 SSE。当前控制中心使用 HTTP 请求与轮询。链接刚生成时可能需要等候 DNS 与隧道连接建立；仍打不开时先确认主机在线、cloudflared 可执行和出站网络畅通，再重新请求 `/status`。自动下载仅在显式启用临时访问后进行；不会自动开启公网访问，也不会调用系统安装器。
+
+## 登录与兼容配置
+
+一次性登录码 5 分钟有效、只可使用一次，再次请求会撤销前一个未使用的码。链接自动登录，同时提供备用登录码。入口命令不会调用模型或写入聊天历史。登录会话 8 小时有效，使用 HttpOnly / SameSite=Strict Cookie；HTTPS 使用 Secure 的 `__Host-` Cookie。Gateway 重启或隧道地址变化后须重新登录。
+
+如果已有固定域名或只需本机访问，仍可设置 `GATEWAY_CONTROL_TUNNEL=off` 并指定 `GATEWAY_CONTROL_PUBLIC_URL`。例如本机使用 `http://127.0.0.1:8790/control/`，固定域名使用 `https://gateway.example.com/control/`，反向代理只转发控制中心路径并保留 Host 和 Origin。关闭控制中心：设置 `GATEWAY_CONTROL_TUNNEL=off`、清空 `GATEWAY_CONTROL_PUBLIC_URL` 并重启。
+
+控制中心复用现有 SQLite，不新增业务数据库、不创建默认 Core、不自动迁移旧数据。原有手动 Tailscale 手机访问流程由此临时隧道流程替代；已有外部代理需由部署者自行停止或移除，更新代码不会改动它们。
 
 ## 页面行为
 
 ### 聊天历史
 
-按会话、日期和关键字分页浏览 SQLite 原文，搜索结果可以打开前后文。仅提供读取，不修改或删除原始聊天。日期按 `GATEWAY_TIMEZONE` 解释。Telegram 与微信使用实际会话映射，不预设渠道分工。
+按会话、日期和关键字分页浏览 SQLite 原文，搜索结果可以打开前后文。可按确认流程删除指定消息。日期按 `GATEWAY_TIMEZONE` 解释。Telegram 与微信使用实际会话映射，不预设渠道分工。
 
 附件从所选消息的已保存引用读取，只能访问数据目录内的媒体文件；不存在、越界、符号链接和超过 32 MiB 的附件会明确拒绝。没有任意目录浏览或路径下载接口。
 
@@ -89,28 +107,3 @@ npm run test:control-ui
 聊天历史按最新消息在前显示，原始消息索引仍用于定位。删除需要明确确认和当前消息版本，未结算交付会阻止删除；删除后保留筛选、分页和滚动位置。删除会更新历史索引、Recent 进度和上下文覆盖游标，并在自然重连时重建可见历史。已经进入活动连接、不可读压缩检查点或备份的内容不会因此被追溯抹除。
 
 记忆图页提供主题、节点、原文来源和回填状态的只读浏览。迁移、回填及分类模型设置分别通过 CLI 和 `/model` 完成。
-
-## 手机连接不上：先检查链接地址
-
-`127.0.0.1`、`localhost` 和 `[::1]` 始终指向打开浏览器的设备。电脑部署后把这种链接发送给手机，手机访问的是自己，而不是电脑。相同 Wi-Fi 也不会改变这一点。仅修改 `GATEWAY_CONTROL_PUBLIC_URL` 不会建立网络转发；目前也不能直接把它改成普通局域网 HTTP 地址。
-
-无需公网 IP 的一种方式是 Tailscale Serve：电脑与手机安装 Tailscale 并加入同一网络，手机保持连接。主机仍绑定 `127.0.0.1`，由 Serve 提供 HTTPS。在部署电脑的 PowerShell 或终端执行（端口对应 `GATEWAY_PORT`）：
-
-```sh
-tailscale serve --bg --https=443 --set-path=/control http://127.0.0.1:8790/control
-tailscale serve status
-```
-
-按 Tailscale 提示启用所需的 HTTPS 功能。将 status 显示的真实 HTTPS 主机名填入配置，路径保持 `/control/`：
-
-```dotenv
-GATEWAY_HOST=127.0.0.1
-GATEWAY_PORT=8790
-GATEWAY_CONTROL_PUBLIC_URL=https://your-device.your-network.ts.net/control/
-```
-
-这里的域名是占位符。重启 Gateway 后重新发送 `/status`，手机使用新链接；旧链接和旧登录码不能继续使用。Serve 仅配置 `/control` 路由，保留上游 `/control` 前缀，不要把整个 Gateway 端口作为根路径公开。检查已有 Serve 配置，避免遗留的根路径转发。此处使用 Serve，不需要 Funnel 或路由器端口映射。
-
-如果新链接依然无法连接，先在电脑上访问同一个 HTTPS 链接，再确认手机 Tailscale 已连接、电脑在线且未休眠、Serve 仍在运行、网络访问规则允许手机访问。如果页面返回“访问地址与控制中心配置不一致”，检查公开主机名与代理 Host；如果返回“请求来源不匹配”，检查是否从配置的同一 HTTPS 地址打开。不要删除 Host、Origin 或登录校验来绕过这些错误。
-
-命令依据：[Tailscale Serve CLI](https://tailscale.com/docs/reference/tailscale-cli/serve)、[Serve 功能与前置条件](https://tailscale.com/docs/features/tailscale-serve)。实际部署仍需在自己的电脑和手机验证。
