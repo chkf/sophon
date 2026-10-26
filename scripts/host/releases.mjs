@@ -74,17 +74,22 @@ export async function releaseFromPointer(root,pointer){
 export async function saveRelease(root,pointer){const dir=await stateDirectory(root);await atomicJson(join(dir,'current.json'),pointer);}
 
 /** Only public GitHub repository coordinates from local configuration reach git. */
-export async function prepareRelease(root,source,run=runCommand){
+export async function prepareRelease(root,source,run=runCommand,onStage=async()=>{}){
  const dir=await stateDirectory(root),stage=await mkdtemp(join(dir,'releases','staging-'));
  try{
+  await onStage('fetch');
   await run('git',['clone','--depth','1','--single-branch','--branch',source.branch,'--','https://github.com/'+source.repository+'.git','.'],stage);
   const sha=await run('git',['rev-parse','HEAD'],stage);if(!shaPattern.test(sha))throw Error('Invalid upstream commit.');
   const active=await currentRelease(root);
   if(active.pointer?.sha===sha)return {unchanged:true,...active};
+  await onStage('protocol');
   const protocol=await readJson(join(stage,'update-protocol.json'),null);
   if(protocol?.version!==1||protocol.stateChanges!=='explicit-only')throw Error('Upstream does not support the update protocol; manual upgrade required.');
+  await onStage('dependencies');
   await run('npm',['ci','--no-audit','--no-fund'],stage);
+  await onStage('build');
   await run('npm',['run','build'],stage);
+  await onStage('tests');
   await run('npm',['test'],stage);
   const directory=sha+'-'+randomUUID(),path=join(dir,'releases',directory),pointer={version:1,sha,directory,source:source.name,repository:source.repository,branch:source.branch,preparedAt:new Date().toISOString()};
   await atomicJson(join(stage,'.release.json'),pointer);await rename(stage,path);
@@ -101,6 +106,6 @@ export async function switchRelease(previous,candidate,{validate,stop,start,save
   // stop must confirm process exit. If it fails, never launch a second writer.
   await stop();
   await start(previous);await save(previous.pointer);
-  throw Error('New release failed to start; previous code restarted. User data was not restored or migrated.');
+  throw Object.assign(Error('New release failed to start; previous code restarted. User data was not restored or migrated.'),{rolledBack:true});
  }
 }

@@ -89,3 +89,12 @@ test('build environment preserves Windows system key casing and command extensio
  assert.equal(env.ComSpec,'C:\\Windows\\System32\\cmd.exe');assert.equal(env.PATHEXT,'.COM;.EXE;.BAT;.CMD');assert.equal(env.SystemDrive,'C:');
  assert.equal(env.NODE_OPTIONS,undefined);assert.equal(env.GATEWAY_API_KEY,undefined);
 });
+
+test('candidate validation reports a structured failing stage without publishing a release',()=>fixture(async root=>{
+ const stages=[];
+ await assert.rejects(prepareRelease(root,selectSource(sources),async(command,args,cwd)=>{
+  if(command==='npm'&&args[0]==='test')throw Error('synthetic test failure');return fakeBuild(command,args,cwd);
+ },async stage=>{stages.push(stage);}));
+ assert.deepEqual(stages,['fetch','protocol','dependencies','build','tests']);
+ assert.equal((await currentRelease(root)).pointer,null);
+}));
