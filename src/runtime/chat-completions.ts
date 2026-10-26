@@ -201,6 +201,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
   async resetSession(): Promise<void> { /* Stateless HTTP: shared transcript is the recovery source. */ }
   async commitSession(): Promise<void> { /* Assistant commits are owned by Gateway delivery acknowledgements. */ }
   reply(request: ChatRequest): Promise<ChatResponse> {
+    if(request.purpose === "memory_classify") return Promise.reject(new Error("记忆分类仅通过独立 SIWC 入口执行。"));
     return this.exclusive(() => this.run(request));
   }
   private usage(raw: any): ChatUsage {
@@ -276,7 +277,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
       if(globalStart>0 && !request.ephemeral) {
         const indexStart = Math.max(0, globalStart - 40);
         const older = request.history ? await request.history.readRange(indexStart, globalStart - indexStart) : all.slice(indexStart,start);
-        messages.push({role:"system",content:"较早聊天未全部发送。以下是原文摘录索引，不是事实总结；需要细节时调用 gateway_read_history。\n"+older.map((m,i)=>"["+(indexStart+i)+"] "+m.role+"："+m.content.slice(0,120)).join("\n")});
+        messages.push({role:"system",content:"较早聊天未全部发送。以下是原文摘录索引，不是事实总结；本轮提供记忆工具时，先参考相关记忆线索并按需搜索、展开记忆。核对原话、准确时间、矛盾或补足记忆缺漏时，可调用 gateway_read_history；本轮没有记忆工具时按需查历史。\n"+older.map((m,i)=>"["+(indexStart+i)+"] "+m.role+"："+m.content.slice(0,120)).join("\n")});
       }
       for(let i=start;i<all.length;i++) {
         const entry=all[i]!;

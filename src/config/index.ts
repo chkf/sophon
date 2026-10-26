@@ -24,6 +24,7 @@ export interface HeartbeatConfig {
 }
 
 export interface GatewayConfig {
+  memoryGraphEnabled?: boolean;
   dataDir: string;
   files?: { enabled: boolean; generatedDir: string };
   recentReview?: { enabled: boolean };
@@ -136,6 +137,7 @@ export function loadConfig(): GatewayConfig {
       webSearch: bool("OPENROUTER_WEB_SEARCH", false),
       heartbeat: bool("OPENROUTER_HEARTBEAT_ENABLED", false),
     },
+    memoryGraphEnabled: bool("GATEWAY_MEMORY_GRAPH_ENABLED", false),
     dataDir: resolve(process.env.GATEWAY_DATA_DIR ?? "./data"),
     files: {
       enabled: bool("GATEWAY_FILES_ENABLED", false),

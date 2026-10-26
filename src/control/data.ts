@@ -1,3 +1,4 @@
+import { ControlMemory, type ControlMemoryOptions } from './memory.js';
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
@@ -7,8 +8,8 @@ import type { ChannelName } from "../channels/types.js";
 import { LocalCoreContextProvider, renderRecentSummary } from "../core/context.js";
 import { executeLocalContextTool, LOCAL_CONTEXT_TOOL_NAMES } from "../core/tools.js";
 import { LocalKnowledgeStore, type RecentEntry } from "../knowledge/store.js";
-import { personaInstruction, PersonaStore } from "../persona/store.js";
-import { SessionStore, type SessionMessage } from "../sessions/store.js";
+import { expressionInstruction, ExpressionStore } from "../expression/store.js";
+import { SessionStore, messageRevision, type SessionMessage } from "../sessions/store.js";
 import { mainPath, openDatabase, schemaVersion } from "../state/database.js";
 import { readContextObservation } from "./context-observation.js";
 
@@ -26,11 +27,13 @@ export interface ControlHistoryQuery extends ControlPage {
   from?: string;
   to?: string;
   around?: number;
+  expectedRevision?: string;
 }
 export interface ControlAttachmentQuery {
   conversationKey: string;
   messageIndex: number;
   attachmentIndex: number;
+  expectedRevision?: string;
 }
 export interface ControlAttachment {
   /** The caller streams this already-open descriptor and closes it afterwards. */
@@ -102,6 +105,7 @@ function safeInteger(value: unknown): number | null {
 
 /** Content operations for the authenticated owner. No provider requests or arbitrary file/state browsing. */
 export class ControlData {
+  readonly memory: ControlMemory;
   private readonly db: DatabaseSync;
   private readonly sessions: SessionStore;
   private readonly knowledge: LocalKnowledgeStore;
@@ -109,14 +113,18 @@ export class ControlData {
   private readonly ownsSessions: boolean;
   private readonly ownsKnowledge: boolean;
   private readonly timezone: string;
+  private readonly editHistory?: (sessionId: string, work: () => Promise<void>) => Promise<void>;
 
   constructor(private readonly rootDir: string, options: {
+    memory?: ControlMemoryOptions;
     sessions?: SessionStore;
     knowledge?: LocalKnowledgeStore;
     context?: LocalCoreContextProvider;
-    personas?: PersonaStore;
+    expressions?: ExpressionStore;
     timezone?: string;
+    editHistory?: (sessionId: string, work: () => Promise<void>) => Promise<void>;
   } = {}) {
+    this.editHistory = options.editHistory;
     this.timezone = options.timezone ?? "UTC";
     // Validate without reading any production credentials or contacting a provider.
     new Intl.DateTimeFormat("en", { timeZone: this.timezone }).format();
@@ -126,11 +134,12 @@ export class ControlData {
       this.sessions = options.sessions ?? new SessionStore(rootDir);
       this.knowledge = options.knowledge ?? new LocalKnowledgeStore(rootDir, "formal");
     } catch (error) { this.db.close(); throw error; }
+    this.memory = new ControlMemory(this.db, options.memory, this.sessions);
     this.ownsSessions = !options.sessions;
     this.ownsKnowledge = !options.knowledge;
-    const personas = options.personas ?? new PersonaStore(rootDir);
+    const expressions = options.expressions ?? new ExpressionStore(rootDir);
     this.localContext = options.context ?? new LocalCoreContextProvider(rootDir,
-      () => renderRecentSummary(this.knowledge.listRecent()), () => personas.snapshot(),
+      () => renderRecentSummary(this.knowledge.listRecent()), () => expressions.snapshot(),
       () => this.knowledge.getRecentRevision());
   }
 
@@ -185,11 +194,11 @@ export class ControlData {
   }
 
   private message(message: SessionMessage, index: number, channel: ChannelName) {
-    return { index, ...(message.id ? { id: message.id } : {}), role: message.role, content: message.content, at: message.at,
+    return { index, revision: messageRevision(message), ...(message.id ? { id: message.id } : {}), role: message.role, content: message.content, at: message.at,
       channel: message.source?.channel ?? channel, ...(message.origin ? { origin: message.origin } : {}),
       ...(message.partial !== undefined ? { partial: message.partial } : {}),
       attachments: (message.attachments ?? []).map((attachment, attachmentIndex) => ({ index: attachmentIndex,
-        kind: attachment.kind, fileName: safeName(attachment.fileName, "attachment-" + (attachmentIndex + 1)),
+        expectedRevision: messageRevision(message), kind: attachment.kind, fileName: safeName(attachment.fileName, "attachment-" + (attachmentIndex + 1)),
         mimeType: SAFE_IMAGE_MIMES.has(attachment.mimeType ?? "") ? attachment.mimeType : "application/octet-stream" })) };
   }
 
@@ -203,21 +212,57 @@ export class ControlData {
     if (input.around !== undefined) {
       const around = number(input.around, 0, Number.MAX_SAFE_INTEGER);
       if (around >= conv.count) throw missing("找不到此消息。");
+      if (input.expectedRevision !== undefined) {
+        const target = (await this.sessions.readRange(conv.channel, conv.conversationId, around, 1))[0];
+        if (!target || messageRevision(target) !== input.expectedRevision) throw new ControlDataError("revision_conflict", 409, "消息位置已变化，请刷新。");
+      }
       offset = Math.max(0, around - Math.floor(limit / 2));
     }
     if (!filtered) {
-      const messages = await this.sessions.readRange(conv.channel, conv.conversationId, offset, limit);
-      return { conversationKey: conv.key, items: messages.map((item, index) => this.message(item, offset + index, conv.channel)),
+      // Offsets count from the newest message; stored indices stay chronological
+      // so attachments and context links continue to address the original row.
+      const context = input.around !== undefined;
+      const end = Math.max(0, conv.count - offset);
+      const start = context ? offset : Math.max(0, end - limit);
+      const messages = await this.sessions.readRange(conv.channel, conv.conversationId, start, context ? limit : end - start);
+      return { conversationKey: conv.key, items: messages.map((item, index) => this.message(item, start + index, conv.channel)).reverse(),
         total: conv.count, nextOffset: offset + messages.length < conv.count ? offset + messages.length : null, offset, filtered };
     }
     const view = await this.sessions.view(conv.channel, conv.conversationId);
-    const result = await view.history.search(query, offset, limit, undefined, { from, to });
-    const items = await Promise.all(result.entries.map(async entry => {
+    const dates = { from, to };
+    const { total } = await view.history.search(query, 0, 0, undefined, dates);
+    const end = Math.max(0, total - offset), start = Math.max(0, end - limit);
+    const result = await view.history.search(query, start, end - start, undefined, dates);
+    const items = await Promise.all(result.entries.reverse().map(async entry => {
       const message = (await this.sessions.readRange(conv.channel, conv.conversationId, entry.index, 1))[0];
       if (!message) throw missing("消息在读取时发生变化，请刷新。");
       return this.message(message, entry.index, conv.channel);
     }));
-    return { conversationKey: conv.key, items, total: result.total, nextOffset: result.nextOffset, offset, filtered };
+    return { conversationKey: conv.key, items, total, nextOffset: offset + items.length < total ? offset + items.length : null, offset, filtered };
+  }
+
+  async deleteHistory(input: { conversationKey: string; messageIndex: number; expectedRevision: string; confirm: boolean }) {
+    if (input.confirm !== true) throw invalid("删除聊天记录需要确认。");
+    const conv = this.conversation(input.conversationKey);
+    const index = number(input.messageIndex, -1, Number.MAX_SAFE_INTEGER);
+    if (index < 0) throw invalid();
+    const expected = text(input.expectedRevision, 64);
+    if (!/^[a-f0-9]{64}$/.test(expected)) throw invalid("请先读取要删除的消息。");
+    const current = (await this.sessions.readRange(conv.channel, conv.conversationId, index, 1))[0];
+    if (!current) throw missing();
+    if (messageRevision(current) !== expected) throw new ControlDataError("revision_conflict", 409, "消息已变化，请刷新后重新确认。");
+    if (!this.editHistory) throw new ControlDataError("history_edit_unavailable", 503, "历史编辑尚未就绪，未删除记录。");
+    try {
+      await this.editHistory(this.sessions.sessionKey(conv.channel, conv.conversationId), async () => {
+        const result = await this.sessions.deleteMessage(conv.channel, conv.conversationId, index, expected);
+        if (result === "missing") throw missing();
+        if (result === "conflict") throw new ControlDataError("revision_conflict", 409, "消息已变化，请刷新后重新确认。");
+      });
+    } catch (error) {
+      if (error instanceof ControlDataError) throw error;
+      throw new ControlDataError("history_edit_blocked", 409, "当前回复尚未结算或历史编辑失败，未删除记录，请稍后重试。");
+    }
+    return { deleted: true, messageIndex: index };
   }
 
   async attachment(input: ControlAttachmentQuery): Promise<ControlAttachment> {
@@ -226,6 +271,8 @@ export class ControlData {
     const attachmentIndex = number(input.attachmentIndex, -1, 1000);
     if (index < 0 || attachmentIndex < 0 || index >= conv.count) throw missing();
     const message = (await this.sessions.readRange(conv.channel, conv.conversationId, index, 1))[0];
+    if (input.expectedRevision !== undefined && (!message || messageRevision(message) !== input.expectedRevision))
+      throw new ControlDataError("revision_conflict", 409, "附件所属消息已变化，请刷新。");
     const attachment = message?.attachments?.[attachmentIndex];
     if (!attachment) throw missing("附件不存在。");
     const mediaRoot = resolve(this.rootDir, "media"), candidate = resolve(attachment.path);
@@ -369,8 +416,8 @@ export class ControlData {
     return { available: snapshot?.available === true, loadedAt: snapshot?.loadedAt ?? null,
       local: snapshot?.available && snapshot.data ? {
         core: snapshot.data.core, recentDirectory: snapshot.data.recent, guidance: snapshot.data.guidance,
-        persona: snapshot.data.persona ? { active: snapshot.data.persona.active, instruction: personaInstruction(snapshot.data.persona) } : null,
-        revisions: { core: snapshot.data.coreRevision, recent: snapshot.data.recentRevision, persona: snapshot.data.personaRevision ?? null },
+        expression: snapshot.data.expression ? { showStageDirections: snapshot.data.expression.showStageDirections, instruction: expressionInstruction(snapshot.data.expression) } : null,
+        revisions: { core: snapshot.data.coreRevision, recent: snapshot.data.recentRevision, expression: snapshot.data.expressionRevision ?? null },
       } : null,
       recent: { totalCount: counts.total, activeCount: counts.active ?? 0 }, checkpoints,
       lastRequest,

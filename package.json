@@ -22,7 +22,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node scripts/run-tests.mjs",
     "test:control-ui": "node scripts/control-ui-smoke.mjs",
-    "sessions": "node --import tsx scripts/session-storage.mjs"
+    "sessions": "node --import tsx scripts/session-storage.mjs",
+    "memory": "node --import tsx scripts/memory-graph.mjs"
   },
   "engines": {
     "node": ">=22.16.0"
@@ -41,7 +42,7 @@
     "typescript": "^5.9.0"
   },
   "license": "MIT",
-  "description": "Self-hosted messaging gateway with local SQLite context, configurable personas and provider routing.",
+  "description": "Self-hosted messaging gateway with local SQLite context, memory graph and provider routing.",
   "repository": {
     "type": "git",
     "url": "https://github.com/chkf/sophon.git"

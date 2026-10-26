@@ -9,7 +9,7 @@ import { ProviderRuntime } from "./providers.js";
 import { ProviderDeliveryStore } from "./delivery-store.js";
 import { SessionStore } from "../sessions/store.js";
 import { DeliveryCoordinator } from "../delivery/coordinator.js";
-import { PersonaStore } from "../persona/store.js";
+import { ExpressionStore } from "../expression/store.js";
 import { migrateState } from "../state/migration.js";
 import { migrateSchemaDatabase } from "../state/schema.js";
 import { mainPath, openDatabase } from "../state/database.js";

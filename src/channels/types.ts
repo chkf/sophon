@@ -18,7 +18,7 @@ export interface TelegramNativeReply {
 
 export interface TelegramSticker {
   fileId: string; accountId: string; chatId: string;
-  emoji?: string; setName?: string; format: "static" | "animated" | "video";
+  emoji?: string; setName?: string; format: "static" | "animated" | "video" | "gif" | "gif_document" | "mp4_document";
 }
 
 export interface Attachment {

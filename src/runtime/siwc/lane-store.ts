@@ -1,3 +1,4 @@
+import { validMemoryRebase } from "./memory-rebase.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { mkdir, rename } from "node:fs/promises";
@@ -14,6 +15,7 @@ export class LaneStore {
     if (state && (![1, 2].includes(state.version) || typeof state.model !== "string" || !Array.isArray(state.contextItems) ||
       (state.historyCursor !== undefined && (!Number.isSafeInteger(state.historyCursor) || state.historyCursor < 0)) ||
       (state.attachmentCursor !== undefined && (!Number.isSafeInteger(state.attachmentCursor) || state.attachmentCursor < 0)) ||
+      (state.historyRebuildPending !== undefined && typeof state.historyRebuildPending !== "boolean") ||
       (state.coverageVerified !== undefined && typeof state.coverageVerified !== "boolean") ||
       (state.pendingDeliveryItems !== undefined && (!Array.isArray(state.pendingDeliveryItems) ||
         state.pendingDeliveryItems.some(item => !item || typeof item !== "object" || Array.isArray(item)))) ||
@@ -29,6 +31,7 @@ export class LaneStore {
         (state.lastCompactedAt !== undefined && !Number.isFinite(Date.parse(state.lastCompactedAt))) ||
         (cp && (cp.version !== 1 || cp.sessionId !== sessionId || cp.model !== state.model ||
           !Number.isSafeInteger(cp.coveredThroughSeq) || cp.coveredThroughSeq < 0 ||
+          (cp.replayFromSeq !== undefined && (!Number.isSafeInteger(cp.replayFromSeq) || cp.replayFromSeq < 0 || cp.replayFromSeq > cp.coveredThroughSeq)) ||
           !Number.isFinite(Date.parse(cp.at)) || !["seven_days", "capacity"].includes(cp.reason) ||
           !/^[a-f0-9]{64}$/.test(cp.id) || !/^[a-f0-9]{64}$/.test(cp.sha256) ||
           !hasCompaction(state.contextItems))) ||
@@ -53,6 +56,7 @@ export class LaneStore {
         }
       }
     }
+    if(state?.memoryRebase&&!state.historyRebuildPending&&!validMemoryRebase(state.memoryRebase,state.contextItems,state.historyCursor))throw new Error("Invalid memory rebase checkpoint.");
     return state;
   }
   write(sessionId: string, state: PersistedLaneState): Promise<void> { return writeJsonAtomic(this.path(sessionId), state); }
@@ -93,7 +97,9 @@ export class LaneStore {
     const canonicalCompactedAt = lane.pendingDeliveryItems
       ? lane.pendingDeliveryLastCompactedAt : lane.lastCompactedAt;
     return this.write(lane.sessionId, { version: 2, sessionId: lane.sessionId, model: lane.model,
+      memoryRebase:lane.memoryRebase,
       controlRevision: lane.controlRevision,
+      ...(lane.historyRebuildPending ? { historyRebuildPending: true } : {}),
       ...(lane.historyCursor !== undefined ? { historyCursor: lane.historyCursor } : {}),
       ...(lane.attachmentCursor !== undefined ? { attachmentCursor: lane.attachmentCursor } : {}),
       ...(lane.coverageVerified === false ? { coverageVerified: false } : {}),
@@ -117,6 +123,6 @@ export class LaneStore {
       state.checkpoint?.id ?? state.controlRevision ?? "", reason])).digest("hex");
     const path = join(this.dataDir, "runtime", "context", identity + ".json");
     const existing = await readJsonFile<PersistedLaneState | undefined>(path, undefined);
-    if (!existing) await writeJsonAtomic(path, state);
+    if (!existing) await writeJsonAtomic(path, {...state,archiveReason:reason});
   }
 }

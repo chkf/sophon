@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../sessions/store.js";
-import { PersonaStore } from "../persona/store.js";
+import { ExpressionStore } from "../expression/store.js";
 import { LocalKnowledgeStore, RecentDeletedError, RECENT_DELETED_KEY } from "../knowledge/store.js";
 import { executeLocalKnowledgeTool, localKnowledgeTools } from "../knowledge/tools.js";
 import { mainPath, openDatabase, getState, schemaVersion } from "../state/database.js";
@@ -31,7 +31,7 @@ async function fixture(run: (root: string) => Promise<void>) {
         at: new Date(Date.UTC(2026, 9, 20, 0, seq)).toISOString(),
       }]);
     } finally { sessions.close(); }
-    const personas = new PersonaStore(root);
+    const personas = new ExpressionStore(root);
     const saved = {...fixturePresets, custom:["CALM","SMART"]};
     delete saved.formal;
     await writeLegacyPersonaFixture(root,"custom",saved);
@@ -204,12 +204,12 @@ test("Recent revision tracks deletion outside the displayed excerpt and same-tur
   } finally { knowledge.close(); }
 }));
 
-test("Core and Persona tools persist validated CAS updates and refresh the assembled formal context", () => fixture(async root => {
-  const knowledge = new LocalKnowledgeStore(root, "formal"), personas = new PersonaStore(root);
+test("Core tools and expression settings persist validated CAS updates and refresh the assembled formal context", () => fixture(async root => {
+  const knowledge = new LocalKnowledgeStore(root, "formal"), personas = new ExpressionStore(root);
   const provider = new LocalCoreContextProvider(root, () => knowledge.listRecent().map(item => item.body).join("\n"), () => personas.snapshot());
   try {
     const before = await provider.load();
-    assert.equal(before.available, true); assert.equal(before.data!.persona!.active, "custom");
+    assert.equal(before.available, true); assert.equal(before.data!.expression!.showStageDirections, false);
     const current = (await contextTool(root, "formal", "gateway_core_read", {})) as any;
     const revised = await contextTool(root, "formal", "gateway_core_write", { body: "# Synthetic Core\n新的合成指令。", expected_revision: current.core.revision }) as any;
     assert.equal(revised.updated.revision, current.core.revision + 1);
@@ -217,24 +217,16 @@ test("Core and Persona tools persist validated CAS updates and refresh the assem
     await assert.rejects(contextTool(root, "formal", "gateway_core_write", { body: " \u0000", expected_revision: revised.updated.revision }), /Core/);
     await assert.rejects(contextTool(root, "ephemeral", "gateway_core_read", {}), /临时/);
     await assert.rejects(contextTool(root, "ephemeral", "gateway_persona_write", {}), /临时/);
-    const initialPersona = (await contextTool(root, "formal", "gateway_persona_read", {})) as any;
-    assert.equal(initialPersona.persona.presets.formal, undefined);
-    const presets = { ...initialPersona.persona.presets, custom: ["CLEAR", "CALM"] };
-    const next = await contextTool(root, "formal", "gateway_persona_write", { active: "custom", presets, expected_revision: initialPersona.persona.revision }) as any;
-    assert.equal(next.updated.revision, initialPersona.persona.revision + 1);
-    assert.deepEqual((await new PersonaStore(root).snapshot()).presets.custom, ["CLEAR", "CALM"]);
-    await assert.rejects(contextTool(root, "formal", "gateway_persona_write", { active: "custom", presets, expected_revision: initialPersona.persona.revision }), /revision/);
-    await assert.rejects(contextTool(root, "formal", "gateway_persona_write", { active: "custom", presets: { custom: ["CALM"] }, expected_revision: next.updated.revision }), /缺失/);
+    await assert.rejects(contextTool(root, "formal", "gateway_persona_read", {}), /未知/);
+    await personas.setShowStageDirections(true);
     const after = await provider.load();
     assert.equal(after.available, true); assert.notEqual(after.data!.coreRevision, before.data!.coreRevision);
-    assert.notEqual(after.data!.personaRevision, before.data!.personaRevision);
-    assert.match(renderLocalPolicy(after), /新的合成指令/); assert.match(renderLocalPolicy(after), /CLEAR, CALM/);
+    assert.notEqual(after.data!.expressionRevision, before.data!.expressionRevision);
+    assert.match(renderLocalPolicy(after), /新的合成指令/); assert.match(renderLocalPolicy(after), /心理和动作描写已开启/);
     knowledge.deleteRecent([{ id: "recent:legacy", expectedRevision: 1 }]);
     const cleaned = await provider.load();
     assert.doesNotMatch(cleaned.data!.recent, /旧的合成话题/);
     assert.notEqual(cleaned.data!.recentRevision, after.data!.recentRevision);
-    await personas.select("default");
-    await assert.rejects(contextTool(root, "formal", "gateway_persona_write", { active: "custom", presets, expected_revision: next.updated.revision }), /revision/);
     const db = openDatabase(mainPath(root));
     try { db.exec("DELETE FROM context WHERE kind='core'"); } finally { db.close(); }
     assert.equal((await provider.load()).available, false, "retained old Core file is never used");

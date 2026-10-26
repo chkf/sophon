@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { SessionStore } from "./sessions/store.js";
-import { CORE_KEY, PERSONA_KEY, createStateSchema, mainPath, openDatabase, putState } from "./state/database.js";
+import { CORE_KEY, createStateSchema, mainPath, openDatabase, putState } from "./state/database.js";
 import { migrateSchemaDatabase, validateSixSchema } from "./state/schema.js";
 
 const DEFAULT_CORE = [
@@ -28,10 +28,7 @@ export async function initializeGateway(dataDir: string): Promise<void> {
   try {
     createStateSchema(db);
     putState(db, { key: CORE_KEY, value: DEFAULT_CORE });
-    putState(db, { key: PERSONA_KEY, value: JSON.stringify({
-      version: 2, active: "default", presets: { default: ["CLEAR", "HELPFUL", "ACCURATE"] },
-      showStageDirections: false,
-    }) });
+    putState(db, {key:"runtime/expression.json", value:JSON.stringify({showStageDirections:false})});
     db.prepare("INSERT INTO gateway_state_meta VALUES(1,1,?)").run(new Date().toISOString());
     migrateSchemaDatabase(db, root);
     validateSixSchema(db);

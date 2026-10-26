@@ -7,7 +7,7 @@ const READ_BATCH = 256;
 const MESSAGE_OVERHEAD_TOKENS = 48;
 const MEDIA_RESERVE_TOKENS = 4096;
 
-function messageTokens(message: ChatMessage): number {
+export function messageTokens(message: ChatMessage): number {
   return estimatedTextTokens(message.content) + MESSAGE_OVERHEAD_TOKENS +
     (message.attachments?.length ?? 0) * MEDIA_RESERVE_TOKENS;
 }

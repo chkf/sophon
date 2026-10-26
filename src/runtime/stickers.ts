@@ -1,61 +1,100 @@
 import type { InboundMessage, TelegramSticker, PlatformMessageFragment } from "../channels/types.js";
 import type { RuntimeHistory, RuntimeTool } from "./types.js";
 import type { SessionMessage } from "../sessions/types.js";
+import type { SessionStore, TelegramReactionEntry } from "../sessions/store.js";
 
 export function validSticker(value: TelegramSticker | undefined, chatId: string, accountId?: string): value is TelegramSticker {
   return Boolean(value && accountId && /^telegram-bot:[1-9][0-9]*$/.test(accountId) &&
     value.accountId === accountId && value.chatId === chatId &&
     typeof value.fileId === "string" && /^[A-Za-z0-9_-]{1,512}$/.test(value.fileId) &&
-    ["static", "animated", "video"].includes(value.format));
+    ["static", "animated", "video", "gif", "gif_document", "mp4_document"].includes(value.format));
 }
 export const STICKER_TOOL: RuntimeTool = {
   name: "gateway_sticker", readOnly: true, replaySafe: true,
-  description: "查找或选择本 TG 私聊收到过的表情包。list 返回当前消息与最近 50 条历史中的贴纸；可用 history_index 查指定历史条目。select 用返回的 key 登记本轮一个贴纸，由 Gateway 实际发送，不在工具调用时发消息。每轮先 list 再 select；不接受自造 ID。",
+  description: "查找或选择本 TG 私聊收到过的贴纸和 GIF。list 返回当前、近期历史和主库目录的真实素材及备注；query 可按备注等搜索，history_index 可查指定历史条目。select 用 list 返回的 key 登记本轮一个素材，由 Gateway 实际发送。",
   parameters: { type: "object", properties: {
     action: { type: "string", enum: ["list", "select"] },
-    history_index: { type: "integer", minimum: 0 }, key: { type: "string" },
+    history_index: { type: "integer", minimum: 0 }, key: { type: "string" }, query: { type: "string" },
   }, required: ["action"], additionalProperties: false },
+};
+export const STICKER_NOTE_TOOL: RuntimeTool = {
+  name: "gateway_sticker_note", readOnly: false, replaySafe: false,
+  description: "给 gateway_sticker.list 返回的真实贴纸或 GIF 保存或更正简短使用备注。只写确实看见的内容或用户明确说明的含义；多帧预览以外的动作不得推断。",
+  parameters: { type: "object", properties: {
+    key: { type: "string" }, note: { type: "string", minLength: 1, maxLength: 280 },
+  }, required: ["key", "note"], additionalProperties: false },
 };
 export class StickerTurn {
   private readonly catalog = new Map<string, TelegramSticker>();
   private readonly count: number;
   private selection?: TelegramSticker;
-  constructor(private readonly history: RuntimeHistory, private readonly inbound: InboundMessage) { this.count = history.count; }
+  constructor(private readonly history: RuntimeHistory, private readonly inbound: InboundMessage,
+    private readonly saved?: Pick<SessionStore, "listTelegramReactions" | "setTelegramReactionNote">) { this.count = history.count; }
   get prepared(): TelegramSticker | undefined { return this.selection; }
-  async execute(args: Record<string, unknown>): Promise<unknown> {
+  private account(): string {
     const account = this.inbound.platformMessages?.[0]?.accountId;
     if (this.inbound.channel !== "telegram" || this.inbound.senderId !== this.inbound.conversationId || !account)
-      throw new Error("贴纸工具仅支持当前 Telegram 私聊。");
-    if (!args || Object.keys(args).some(k => !["action", "history_index", "key"].includes(k))) throw new Error("贴纸参数无效。");
+      throw new Error("表情包工具仅支持当前 Telegram 私聊。");
+    return account;
+  }
+  async note(args: Record<string, unknown>): Promise<unknown> {
+    const account = this.account();
+    if (!args || Object.keys(args).some(k => !["key", "note"].includes(k)) ||
+      typeof args.key !== "string" || typeof args.note !== "string") throw new Error("备注参数无效。");
+    const chosen = this.catalog.get(args.key);
+    if (!validSticker(chosen, this.inbound.conversationId, account)) throw new Error("请先 list，再给真实表情包写备注。");
+    if (!this.saved) throw new Error("表情包备注存储未启用。");
+    const updated = await this.saved.setTelegramReactionNote(account, this.inbound.conversationId, chosen.fileId, args.note);
+    return { status: "saved", note: updated.note, format: updated.sticker.format };
+  }
+  async execute(args: Record<string, unknown>): Promise<unknown> {
+    const account = this.account();
+    if (!args || Object.keys(args).some(k => !["action", "history_index", "key", "query"].includes(k))) throw new Error("贴纸参数无效。");
     if (args.action === "select") {
-      if (args.history_index !== undefined || typeof args.key !== "string") throw new Error("请选择 list 返回的 key。");
+      if (args.history_index !== undefined || args.query !== undefined || typeof args.key !== "string") throw new Error("请选择 list 返回的 key。");
       const chosen = this.catalog.get(args.key);
-      if (!validSticker(chosen, this.inbound.conversationId, account)) throw new Error("请先 list，再选择真实贴纸。");
-      if (this.selection && this.selection.fileId !== chosen.fileId) throw new Error("每轮只能选择一个贴纸。");
+      if (!validSticker(chosen, this.inbound.conversationId, account)) throw new Error("请先 list，再选择真实表情包。");
+      if (this.selection && this.selection.fileId !== chosen.fileId) throw new Error("每轮只能选择一个表情包。");
       this.selection = chosen;
-      return { status: "selected", note: "已登记贴纸；实际送达由 Gateway 确认。" };
+      return { status: "selected", note: "已登记表情包；实际送达由 Gateway 确认。" };
     }
-    if (args.action !== "list" || args.key !== undefined) throw new Error("请选择 list 或 select。");
+    if (args.action !== "list" || args.key !== undefined || (args.query !== undefined && (typeof args.query !== "string" || args.query.length > 100)))
+      throw new Error("请选择 list 或 select。");
     const index = args.history_index;
     if (index !== undefined && (typeof index !== "number" || !Number.isSafeInteger(index) || index < 0 || index >= this.count))
       throw new Error("历史索引超出本轮范围。");
+    const entries = new Map<string, TelegramSticker>();
     const collect = (fragments: PlatformMessageFragment[], prefix: string) => {
       for (const [i, f] of fragments.entries()) {
         if (f.accountId !== account || f.conversationId !== this.inbound.conversationId || f.direction !== "inbound") continue;
         for (const [j, a] of (f.attachments ?? []).entries()) {
-          if (validSticker(a.sticker, this.inbound.conversationId, account)) this.catalog.set(prefix + ":" + i + ":" + j, a.sticker);
+          if (validSticker(a.sticker, this.inbound.conversationId, account)) entries.set(prefix + ":" + i + ":" + j, a.sticker);
         }
       }
     };
     collect(this.inbound.platformMessages ?? [], "current");
     const start = typeof index === "number" ? index : Math.max(0, this.count - 50);
-    const entries = await this.history.readRange(start, typeof index === "number" ? 1 : this.count - start);
-    for (const [i, entry] of entries.entries()) {
+    const recent = await this.history.readRange(start, typeof index === "number" ? 1 : this.count - start);
+    for (const [i, entry] of recent.entries()) {
       const message = entry as SessionMessage;
       if (message.role !== "user" || message.source?.channel !== "telegram" || message.source.senderId !== this.inbound.senderId) continue;
       collect(message.source.platformMessages ?? [], "history:" + (start + i));
     }
-    return { stickers: [...this.catalog].map(([key, s]) => ({ key, emoji: s.emoji, set_name: s.setName, format: s.format })),
-      note: "仅包含本会话真实收到的贴纸；更早的贴纸可指定 history_index 查找。" };
+    const persisted: TelegramReactionEntry[] = await this.saved?.listTelegramReactions(account, this.inbound.conversationId, undefined, 5000) ?? [];
+    const descriptions = new Map(persisted.map(entry => [entry.sticker.fileId, entry.note]));
+    const seen = new Set([...entries.values()].map(item => item.fileId));
+    for (const [i, entry] of persisted.entries()) {
+      if (!validSticker(entry.sticker, this.inbound.conversationId, account) || seen.has(entry.sticker.fileId)) continue;
+      entries.set("saved:" + i, entry.sticker);
+      seen.add(entry.sticker.fileId);
+    }
+    const query = typeof args.query === "string" ? args.query.trim().toLowerCase() : "";
+    const visible = [...entries].filter(([, s]) => !query || [descriptions.get(s.fileId), s.emoji, s.setName, s.format]
+      .some(value => value?.toLowerCase().includes(query))).slice(0, 50);
+    this.catalog.clear();
+    for (const [key, sticker] of visible) this.catalog.set(key, sticker);
+    return { stickers: visible.map(([key, s]) => ({ key, kind: s.format.startsWith("gif") || s.format === "mp4_document" ? "gif" : "sticker",
+      emoji: s.emoji, set_name: s.setName, format: s.format, note: descriptions.get(s.fileId) })),
+      note: "仅包含本私聊真实收到的素材；GIF 和视频贴纸的多帧预览可能不完整，更早的贴纸可指定 history_index 查找。" };
   }
 }

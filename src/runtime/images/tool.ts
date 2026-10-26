@@ -13,7 +13,7 @@ export class ImageTool {
     this.definition = {
       name: IMAGE_TOOL,
       description: (autonomous ? "用户已授权主动生图：可以在日常聊天中自由生成图片，让交流更有趣，不必等待用户要求。" : "按本轮用户要求生成或编辑一张图片。") +
-        "只有图片生成走付费 OpenRouter。提示词只写必要的视觉内容，不复制聊天历史、Gateway 规则、Core、Persona 或 Recent。不要制造真实经历。每轮最多一次尝试，失败不得重试。",
+        "只有图片生成走付费 OpenRouter。提示词只写必要的视觉内容，不复制聊天历史、Gateway 规则、Core 或 Recent。不要制造真实经历。每轮最多一次尝试，失败不得重试。",
       parameters: { type: "object", properties: { prompt: { type: "string" },
         use_input_image: { type: "boolean" } },
         required: ["prompt"], additionalProperties: false },

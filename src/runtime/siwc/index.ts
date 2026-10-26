@@ -1,8 +1,12 @@
+import { memoryTaskRequest, type MemoryTask } from "../../memory/tasks.js";
+import { classificationRequest, LUNA_MODEL } from "../../memory/classifier.js";
+import { MemoryError } from "../../memory/validation.js";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type {
   ChatRequest,
   ChatResponse,
+  ContextMaintenanceRequest,
   ManagedChatRuntime,
   RuntimeModel,
   RuntimeModelSelection,
@@ -45,7 +49,9 @@ async function prepareModelCall<T>(prepare: () => Promise<T>): Promise<T> {
 
 export class SiwcRuntime implements ManagedChatRuntime {
   private readonly modelStatePath: string;
+  private readonly memoryModelPath: string;
   private readonly statefulResponses: StatefulResponsesBridge;
+  private readonly memoryResponses: StatefulResponsesBridge;
 
   constructor(
     private readonly client: SiwcClient,
@@ -54,8 +60,10 @@ export class SiwcRuntime implements ManagedChatRuntime {
     private readonly credentialEncryption: CredentialEncryptionAdapter,
     private readonly preferredModel?: string,
   ) {
+    this.memoryModelPath = resolve(dataDir, "runtime", "memory-model.json");
     this.modelStatePath = resolve(dataDir, "runtime", "model.json");
     this.statefulResponses = new StatefulResponsesBridge(dataDir);
+    this.memoryResponses = new StatefulResponsesBridge(dataDir);
   }
 
   signIn(options?: { reconsent?: boolean }): Promise<RuntimeSession> {
@@ -111,7 +119,11 @@ export class SiwcRuntime implements ManagedChatRuntime {
   }
 
   async close(): Promise<void> {
-    await this.statefulResponses.close();
+    await Promise.all([this.statefulResponses.close(),this.memoryResponses.close()]);
+  }
+
+  async editHistory(sessionId: string, work: () => Promise<void>): Promise<void> {
+    return this.statefulResponses.editHistory(sessionId, work);
   }
 
   async resetSession(sessionId: string, deliveryId?: string): Promise<void | boolean> {
@@ -122,11 +134,46 @@ export class SiwcRuntime implements ManagedChatRuntime {
     return this.statefulResponses.commitSession(sessionId, deliveredText, deliveryId);
   }
 
+  maintainContext(request: ContextMaintenanceRequest) {
+    return this.statefulResponses.maintainContext(request, async () => {
+      const model = (await this.getModelSelection()).resolvedModel;
+      if (!model) throw new Error("SIWC maintenance model unavailable.");
+      return { model, accessToken: await readActiveAccessToken(this.storageDir, this.credentialEncryption) };
+    });
+  }
+
+  listMemoryModels(): Promise<RuntimeModel[]> { return this.listModels(); }
+  async getMemoryModel(): Promise<string> {
+    const state = await readJsonFile<{model:string}>(this.memoryModelPath, {model:LUNA_MODEL});
+    if (typeof state.model !== "string" || !state.model.trim() || state.model.length>200) throw new MemoryError("INVALID_MODEL_SETTING");
+    return state.model;
+  }
+  async selectMemoryModel(model: string): Promise<string> {
+    if (!(await this.listModels()).some(item=>item.id===model)) throw new MemoryError("CLASSIFIER_UNAVAILABLE");
+    await writeJsonAtomic(this.memoryModelPath, {model});
+    return model;
+  }
+  async runMemoryTask(task: MemoryTask,input: string): Promise<string> {
+    return (await this.reply(memoryTaskRequest(task,input))).text;
+  }
+  async classifyMemory(input: string): Promise<string> {
+    return (await this.reply(classificationRequest(input))).text;
+  }
+
   async reply(request: ChatRequest): Promise<ChatResponse> {
     const messages = requestMessages(request);
     if (request.purpose === "chat") request = withHistoryTool(request, request.history ?? historyFromMessages(messages.slice(0, -1)));
+    if (request.purpose === "memory_classify" && (!request.ephemeral || !request.stateful || request.history ||
+      request.context || request.memory || request.tools?.length || request.executeTool || request.attachments?.length || request.deferAssistantCommit || request.testModel))
+      throw new MemoryError("INVALID_MEMORY_REQUEST");
     const selected = await prepareModelCall(async () => {
       const models = await this.listModels();
+      if (request.purpose === "memory_classify" && !["fuse","verify"].includes(request.memoryTask ?? "")) {
+        const id = await this.getMemoryModel();
+        const classifier = models.find(model => model.id === id);
+        if (!classifier) throw new MemoryError("CLASSIFIER_UNAVAILABLE");
+        return classifier;
+      }
       const selection = await this.modelSelection(models);
       const model = models.find((model) => model.id === (request.purpose === "diagnostic" && request.ephemeral && request.testModel ? request.testModel : selection.resolvedModel));
       if (!model) throw new Error("No ChatGPT models are available for the selected profile.");
@@ -141,15 +188,17 @@ export class SiwcRuntime implements ManagedChatRuntime {
     if (request.stateful || background) {
       const accessToken = await prepareModelCall(() => readActiveAccessToken(this.storageDir, this.credentialEncryption));
       const sessionId = background ? "background:" + randomUUID() : request.sessionId;
+      const responseBridge=request.purpose==="memory_classify"?this.memoryResponses:this.statefulResponses;
       try {
-      const result = await this.statefulResponses.reply({
-        ...(request.purpose === "recent_review" ? { webSearchAllowed: false } : {}),
+      const result = await responseBridge.reply({
+        ...(request.memory && request.purpose === "chat" && !request.ephemeral ? {memory:request.memory} : {}),
+        ...(["recent_review", "memory_classify"].includes(request.purpose) ? { webSearchAllowed: false } : {}),
         ...(request.trace ? { trace: request.trace } : {}),
         accessToken,
         model: selected.id,
         sessionId,
         messages,
-        ...(request.ephemeral ? { ephemeral: true } : {}),
+        ...(background || request.ephemeral ? { ephemeral: true } : {}),
         ...(request.history ? { history: request.history } : {}),
         ...(request.deliveryId ? { deliveryId: request.deliveryId } : {}),
         ...(request.deferAssistantCommit ? { deferAssistantCommit: true } : {}),
@@ -181,10 +230,10 @@ export class SiwcRuntime implements ManagedChatRuntime {
         usage: result.usage,
         compacted: result.compacted,
         ...(result.compaction ? { compaction: result.compaction } : {}),
-        contextEffect: result.compacted ? "checkpoint_compacted" : "none",
+        contextEffect: result.compacted ? "checkpoint_compacted" : result.historyWindowed ? "history_windowed" : "none",
       };
       } finally {
-        if (background) await this.statefulResponses.resetSession(sessionId);
+        if (background) await responseBridge.resetSession(sessionId);
       }
     }
 

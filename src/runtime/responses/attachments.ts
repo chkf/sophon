@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { extname } from "node:path";
 import type { RuntimeAttachment } from "../types.js";
+import { animationPreview } from "../../media/animation-preview.js";
 
 function mimeFor(path: string, supplied?: string): string {
   if (supplied) return supplied;
@@ -34,6 +35,13 @@ export async function attachmentPart(attachment: RuntimeAttachment): Promise<Rec
     return { type: "input_image", image_url: data, detail: "auto" };
   }
   if (attachment.kind === "file") {
+    // Telegram may display a silent MP4 as a GIF while delivering it as a document.
+    // Responses rejects video/mp4 input_file; pass a bounded visual preview instead.
+    if (mime.toLowerCase() === "video/mp4" || extname(attachment.path).toLowerCase() === ".mp4") {
+      const preview = await animationPreview(attachment.path);
+      if (!preview) throw Object.assign(new Error("MP4 动图预览失败，请重新发送或换成 GIF。"), { code: "attachment_unreadable" });
+      return { type: "input_image", image_url: "data:image/png;base64," + Buffer.from(preview).toString("base64"), detail: "auto" };
+    }
     return {
       type: "input_file",
       filename: attachment.fileName || "attachment" + extname(attachment.path),

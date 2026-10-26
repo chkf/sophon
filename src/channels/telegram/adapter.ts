@@ -1,3 +1,4 @@
+import { animationPreview } from "../../media/animation-preview.js";
 import { displayText, spokenText, visibleSegments } from "../../runtime/reply-segments.js";
 import { deliverReplySegments } from "./delivery.js";
 import { TelegramPanels } from "./panels.js";
@@ -686,6 +687,7 @@ export class TelegramAdapter implements ProactiveSender {
       const textPreview = "Telegram 贴纸" + (sticker.emoji ? " " + sticker.emoji : "") +
         (sticker.set_name ? "，贴纸集：" + sticker.set_name : "") +
         (format === "static" ? "（静态图片）" : "（动态贴纸；仅提供静态预览，无法据此判断完整动作）");
+      if (format === "video") return this.collectMovingReaction(sticker, metadata, "Telegram 视频贴纸", sticker.thumbnail);
       const file = format === "static" ? sticker : sticker.thumbnail;
       const base: Attachment = { kind: "image", sticker: metadata, remoteId: sticker.file_id, textPreview };
       if (!file) return [{ ...base, error: "此动态贴纸没有可用预览，不能读取画面。" }];
@@ -700,6 +702,24 @@ export class TelegramAdapter implements ProactiveSender {
           ...(format === "static" ? { mimeType: "image/webp" } : {}) });
         return [{ ...saved, ...base }];
       } catch { return [{ ...base, error: "贴纸预览下载失败，不能读取画面。" }]; }
+    }
+    if (message.animation) {
+      const file = message.animation;
+      const metadata = { fileId: file.file_id, accountId: telegramAccountId(this.config.token) ?? "",
+        chatId: String(message.chat.id), format: "gif" } as const;
+      return this.collectMovingReaction(file, metadata, "Telegram GIF", file.thumbnail);
+    }
+    if (message.document && (message.document.mime_type?.toLowerCase() === "image/gif" || /\.gif$/i.test(message.document.file_name ?? ""))) {
+      const file = message.document;
+      const metadata = { fileId: file.file_id, accountId: telegramAccountId(this.config.token) ?? "",
+        chatId: String(message.chat.id), format: "gif_document" } as const;
+      return this.collectMovingReaction(file, metadata, "GIF 文件", file.thumbnail);
+    }
+    if (message.document && (message.document.mime_type?.toLowerCase() === "video/mp4" || /\.mp4$/i.test(message.document.file_name ?? ""))) {
+      const file = message.document;
+      const metadata = { fileId: file.file_id, accountId: telegramAccountId(this.config.token) ?? "",
+        chatId: String(message.chat.id), format: "mp4_document" } as const;
+      return this.collectMovingReaction(file, metadata, "MP4 动图或视频文件", file.thumbnail);
     }
     const candidates: Array<{ kind: AttachmentKind; file: TelegramFile | TelegramPhoto }> = [];
     const photo = largestPhoto(message.photo);
@@ -732,5 +752,36 @@ export class TelegramAdapter implements ProactiveSender {
       }
     }
     return attachments;
+  }
+
+  private async collectMovingReaction(file: TelegramFile, sticker: NonNullable<Attachment["sticker"]>,
+    label: string, thumbnail?: TelegramPhoto): Promise<Attachment[]> {
+    const base: Attachment = { kind: "image", sticker, remoteId: file.file_id,
+      textPreview: label + "（尝试读取按时间顺序排列的多帧预览）" };
+    const maxBytes = this.config.maxMediaBytes ?? 20 * 1024 * 1024;
+    try {
+      const info = await this.api.getFile(file.file_id);
+      if (!info.file_path || (info.file_size ?? file.file_size ?? 0) > maxBytes) throw new Error("Animation unavailable or too large.");
+      const bytes = await this.api.downloadFile(info.file_path, maxBytes);
+      const original = await this.config.mediaStore.save({ channel: "telegram", kind: "video", bytes,
+        fileName: file.file_name ?? basename(info.file_path), mimeType: file.mime_type, remoteId: file.file_id });
+      const frames = await animationPreview(original.localPath!, file.duration);
+      if (frames) {
+        const preview = await this.config.mediaStore.save({ channel: "telegram", kind: "image", bytes: frames,
+          fileName: "animation-preview.png", mimeType: "image/png" });
+        return [{ ...preview, ...base }];
+      }
+    } catch { /* A Telegram thumbnail can still show one frame. */ }
+    if (thumbnail) {
+      try {
+        const info = await this.api.getFile(thumbnail.file_id);
+        if (!info.file_path || (info.file_size ?? thumbnail.file_size ?? 0) > maxBytes) throw new Error("Thumbnail unavailable.");
+        const bytes = await this.api.downloadFile(info.file_path, maxBytes);
+        const preview = await this.config.mediaStore.save({ channel: "telegram", kind: "image", bytes,
+          fileName: basename(info.file_path) || "thumbnail.jpg" });
+        return [{ ...preview, ...base, textPreview: label + "（仅提供静态预览，无法判断完整动作）" }];
+      } catch { /* Keep source metadata without claiming to have viewed it. */ }
+    }
+    return [{ ...base, error: "动图预览不可用，不能读取画面。" }];
   }
 }

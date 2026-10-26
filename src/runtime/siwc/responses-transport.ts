@@ -24,6 +24,9 @@ class ModelApiError extends Error {
   }
 }
 
+/** Any stateful response can compact; allow ten minutes without a stream event. */
+export const SIWC_RESPONSE_IDLE_TIMEOUT_MS = 10 * 60_000;
+
 const TRANSIENT_RETRY_DELAYS_MS = [1_500, 4_000] as const;
 function errorLike(error: unknown): ModelApiErrorLike {
   return error && typeof error === "object" ? error as ModelApiErrorLike : {};

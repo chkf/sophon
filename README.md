@@ -4,7 +4,7 @@
 
 可自行部署的消息网关框架：连接 Telegram 与可选微信 iLink，管理模型接入、会话历史和本地上下文。默认提供中性的助手配置，身份、风格和服务由使用者自行设置。
 
-Self-hosted messaging gateway with local SQLite context, configurable personas, durable delivery and provider routing. Framework source is MIT licensed; optional components keep their own licenses.
+Self-hosted messaging gateway with local SQLite context, optional memory graph, durable delivery and provider routing. Framework source is MIT licensed; optional components keep their own licenses.
 
 ## 能力与范围
 
@@ -14,7 +14,7 @@ Self-hosted messaging gateway with local SQLite context, configurable personas, 
 - SQLite 会话历史、全文检索、Core 与 Recent 上下文、可编辑的表达风格。
 - 通用 OpenAI 兼容 API（自定义地址、密钥、模型）；可选 OpenRouter 专用模式与 ChatGPT 登录适配器。
 - 可选语音、图片生成和主动消息。
-- 内置 Core、Persona、Recent 和聊天历史工具。
+- 内置 Core、Recent 和聊天历史工具。
 - 可选本地文件浏览、保存与发送、确认后修改或删除，以及独立的后台 Recent 整理。
 - 可选 [Sophon 控制中心](docs/control-center.md)：聊天历史与 Core/Recent 管理、上下文观察、主动任务调用轨迹和主机走势；与已有 slash 面板分工。
 
@@ -50,7 +50,7 @@ npm run gateway:check
 npm run serve
 ```
 
-`init` 只创建全新的数据目录，写入中性 Core 和默认风格，并初始化 SQLite；如果目录已存在会停止，避免覆盖。运行后可通过 Telegram `/persona` 面板管理表达风格。Core 可导出为 Markdown 后编辑并重新导入：
+`init` 只创建全新的数据目录，写入中性 Core 和独立描写设置，并初始化 SQLite；如果目录已存在会停止，避免覆盖。运行后可通过 Telegram `/expression` 面板控制心理和动作描写。Core 可导出为 Markdown 后编辑并重新导入：
 
 ```sh
 mkdir private
@@ -76,7 +76,7 @@ npm start
 
 **默认使用 SQLite，不需要另外安装数据库服务。** `npm run init` 会在默认的 `data/sessions/gateway.sqlite` 建立数据库，保存身份指令、人格风格、话题记忆、聊天历史和已登记的运行状态。媒体文件与凭据等仍可能存放在数据目录的其他位置。
 
-身份、人设和记忆如何配置，见 [存储与人格配置指南](docs/personalization.md)，包含 Telegram 面板步骤和可编辑的 [Core 示例](examples/core.example.md)。
+Core、描写和记忆如何配置，见 [存储与表达设置指南](docs/personalization.md)，包含 Telegram 面板步骤和可编辑的 [Core 示例](examples/core.example.md)。
 
 - **主动消息**：显式启用 `GATEWAY_HEARTBEAT_ENABLED=true` 后才运行。通用 API 还需设置 `GATEWAY_API_HEARTBEAT_ENABLED=true`，OpenRouter 则设置 `OPENROUTER_HEARTBEAT_ENABLED=true`；频率、静默时间和时区由环境变量控制。
 - **ChatGPT 登录**：可选，安装方式和非商业许可限制见 [SIWC 说明](docs/optional-siwc.md)。默认安装不下载该组件。
@@ -99,10 +99,12 @@ npm test
 npm run build
 ```
 
-测试使用隔离的临时目录及合成数据，无需私有仓库或真实服务凭据。测试名称、示例对话、Persona 关键词和预期结果统一使用中性的任务、文档或消息内容；角色描写用例使用翻页、查看文档等普通动作，不复制实际聊天或个人设定。真实 Telegram、微信、付费模型及 SIWC 登录需使用自己的账号另行验证。
+测试使用隔离的临时目录及合成数据，无需私有仓库或真实服务凭据。测试名称、示例对话、表达设置和预期结果统一使用中性的任务、文档或消息内容；角色描写用例使用翻页、查看文档等普通动作，不复制实际聊天或个人设定。真实 Telegram、微信、付费模型及 SIWC 登录需使用自己的账号另行验证。
 
 框架没有内置跨仓库自动更新或个人服务器部署操作。使用 Git 更新源码前先备份，检查变更与数据库兼容性。
 
 ## 许可证
 
 框架源码按 [MIT](LICENSE) 发布。依赖和可选组件的许可范围见 [第三方说明](THIRD_PARTY_NOTICES.md)。`package.json` 的 `private: true` 仅防止意外发布到 npm，不限制源码使用。
+
+可选的[记忆图与三日上下文窗口](docs/memory-graph.md)需要显式停机迁移和历史回填，默认关闭。

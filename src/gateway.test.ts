@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Gateway, explicitImageRequest } from "./gateway.js";
 import { localContext } from "./core/context-fixture.js";
-import { PersonaStore } from "./persona/store.js";
+import { ExpressionStore } from "./expression/store.js";
 import { SessionStore } from "./sessions/store.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -336,11 +336,11 @@ test("Gateway explicitly covers trailing unanswered historical user messages", a
   assert.doesNotMatch(requests[1].turnInstructions, /还有 2 条用户消息/);
 });
 
-test("Gateway applies each selected Persona per turn without resetting shared chat history", async () => {
+test("Gateway changes expression settings without resetting shared chat history", async () => {
   const dir = await mkdtemp(join(tmpdir(), "gateway-persona-turn-"));
   try {
     await seedPersonaDatabase(dir);
-    const personas = new PersonaStore(dir);
+    const personas = new ExpressionStore(dir);
     const history: any[] = [];
     const requests: any[] = [];
     const gateway = new Gateway({
@@ -361,11 +361,11 @@ test("Gateway applies each selected Persona per turn without resetting shared ch
       text, receivedAt: "2026-10-13T13:00:00Z", attachments: [],
     });
     await gateway.handle(inbound("1", "记录这个测试话题"));
-    await personas.select("formal");
+    await personas.setShowStageDirections(true);
     await gateway.handle(inbound("2", "继续"));
-    await personas.select("casual");
+    await personas.setShowStageDirections(true);
     await gateway.handle(inbound("3", "继续"));
-    await personas.select("default");
+    await personas.setShowStageDirections(false);
     await gateway.handle(inbound("4", "最后一问"));
 
     assert.equal(requests.length, 4);
@@ -373,10 +373,10 @@ test("Gateway applies each selected Persona per turn without resetting shared ch
       Array(4).fill("telegram:123"), "Persona switching must not fork sessions");
     assert.ok(requests.every(request => !request.instructions.includes("表达风格")),
       "Persona must not be frozen in local Core instructions");
-    for (const [index, expected] of ["default", "formal", "casual", "default"].entries()) {
-      assert.match(requests[index].turnInstructions, new RegExp("当前模式：" + expected + "；"));
+    for (const [index, expected] of ["关闭", "开启", "开启", "关闭"].entries()) {
+      assert.match(requests[index].turnInstructions, new RegExp("心理和动作描写已" + expected));
       assert.match(requests[index].turnInstructions, /当前渠道本地时间/);
-      assert.match(requests[index].turnInstructions, /自然遵循当前表达风格/);
+      assert.doesNotMatch(requests[index].turnInstructions, /CLEAR|HELPFUL/);
     }
     assert.deepEqual(history.map(entry => entry.content),
       ["记录这个测试话题", "继续", "继续", "最后一问"]);

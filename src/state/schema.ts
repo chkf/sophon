@@ -1,3 +1,4 @@
+import { MEMORY_KEY, MEMORY_TABLES, MEMORY_V1_TABLES, memoryMarker, validateMemorySchema } from "../memory/schema.js";
 import type { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { CORE_KEY, PERSONA_KEY, PERSONA_META_KEY, SCHEMA_KEY, MIGRATION_KEY, ROOTS_KEY, ILINK_KEY, ILINK_RECEIPT_KEY, ROUTES_KEY,
@@ -81,8 +82,8 @@ export function inspectSchemaMigration(db: DatabaseSync): SchemaPreview {
     throw new StateError("待合并旧表包含未知字段或不兼容结构。");
   const state = db.prepare("SELECT key,value,updated_at FROM gateway_state").all() as {key:string;value:string;updated_at:string}[];
   const core = state.find(row=>row.key===CORE_KEY), persona = state.find(row=>row.key===PERSONA_KEY);
-  if (!core || !persona) throw new StateError("正式 Core 或 Persona 缺失；请先恢复完整状态。");
-  validateCoreBody(core.value); validatePersonaDocument(json(persona.value));
+  if (!core) throw new StateError("正式 Core 缺失；请先恢复完整状态。");
+  validateCoreBody(core.value); if(persona) validatePersonaDocument(json(persona.value));
   for (const row of state) {
     if (!managedKey(row.key)) throw new StateError("集中状态包含未登记的文档键。");
     if (typeof row.updated_at !== "string" || !row.updated_at) throw new StateError("状态更新时间缺失。");
@@ -188,12 +189,14 @@ export function migrateSchemaDatabase(db: DatabaseSync, root: string, at = new D
     if(ilink&&getState(db,ILINK_KEY)?.value!==ilink.payload) throw new StateError("密文迁移回读不一致。");
     const core=state.find(row=>row.key===CORE_KEY)!;
     if(db.prepare("SELECT body FROM context WHERE kind='core' AND id='main'").get()?.body!==core.value) throw new StateError("Core 迁移回读不一致。");
+    if(state.some(row=>row.key===PERSONA_KEY)) {
     const expectedPersona=validatePersonaDocument(json(state.find(row=>row.key===PERSONA_KEY)!.value));
     const actualPersona=readPersonaDocument(db)!;
     if(actualPersona.version!==expectedPersona.version||actualPersona.active!==expectedPersona.active||
       JSON.stringify(Object.keys(actualPersona.presets).sort())!==JSON.stringify(Object.keys(expectedPersona.presets).sort())||
       Object.keys(expectedPersona.presets).some(id=>JSON.stringify(actualPersona.presets[id])!==JSON.stringify(expectedPersona.presets[id])))
       throw new StateError("Persona 迁移回读不一致。");
+    }
     for(const name of RETIRED_TABLES) if(tableExists(db,name)) db.exec(`DROP TABLE "${name}"`);
     validateSixSchema(db); integrity(db);
     return preview;
@@ -201,11 +204,12 @@ export function migrateSchemaDatabase(db: DatabaseSync, root: string, at = new D
 }
 export function validateSixSchema(db: DatabaseSync): void {
   if(schemaVersion(db)!==2) throw new StateError("不是六表格式。");
-  checkTableSet(db,[...SIX_TABLES,...ftsTables]);
+  const memory=validateMemorySchema(db);
+  checkTableSet(db,[...SIX_TABLES,...ftsTables,...(memory?(memoryMarker(db)!.version===1?MEMORY_V1_TABLES:MEMORY_TABLES):[])]);
   const core=db.prepare("SELECT body FROM context WHERE kind='core' AND id='main'").get() as {body:string}|undefined;
   if(!core||countKind(db,"core")!==1) throw new StateError("正式 Core 缺失或重复。");
   validateCoreBody(core.body);
-  if(!readPersonaDocument(db)) throw new StateError("正式 Persona 缺失。");
+  if(countKind(db,"persona")) readPersonaDocument(db);
   if(db.prepare("SELECT 1 FROM context WHERE revision<1 OR typeof(revision)<>'integer' OR id='' OR body IS NULL OR updated_at IS NULL OR (kind='persona' AND selected IS NULL) LIMIT 1").get())
     throw new StateError("上下文身份或修订信息损坏。");
   if(db.prepare("SELECT 1 FROM conversations WHERE recent_review_through_seq>=count OR recent_review_through_seq < -1 OR (recent_review_through_seq<>-1 AND recent_review_updated_at IS NULL) LIMIT 1").get())
@@ -261,7 +265,9 @@ export function assertDeletionMetadata(db:DatabaseSync,forDowngrade=false):void 
 /** Convert only an isolated copy. The original v2 database remains authoritative and untouched. */
 export function downgradeSchemaDatabase(db:DatabaseSync,at=new Date().toISOString()):void {
   transaction(db,()=>{
-    validateSixSchema(db); assertDeletionMetadata(db,true); assertIlinkReceiptMetadata(db,true);
+    validateSixSchema(db);
+    if(getState(db,MEMORY_KEY)) throw new StateError("旧格式不能表示记忆图；请保留完整快照并使用支持扩展的版本。");
+    assertDeletionMetadata(db,true); assertIlinkReceiptMetadata(db,true);
     if(db.prepare("SELECT 1 FROM channel_events WHERE channel<>'wechat' LIMIT 1").get()) throw new StateError("目标旧格式不能表示这些渠道事件。");
     if(db.prepare("SELECT 1 FROM context WHERE kind='recent' AND conversation_state NOT IN ('Pending','Ongoing','Done') LIMIT 1").get())
       throw new StateError("目标旧格式不能表示未知 Recent 沟通状态。");
@@ -270,7 +276,7 @@ export function downgradeSchemaDatabase(db:DatabaseSync,at=new Date().toISOStrin
       throw new StateError("目标旧格式不能表示新增状态条目。");
     const core=db.prepare("SELECT body,updated_at FROM context WHERE kind='core' AND id='main'").get() as {body:string;updated_at:string};
     const persona=readPersonaDocument(db)!;
-    const personaAt=getState(db,PERSONA_META_KEY)!.updated_at;
+    const personaAt=getState(db,PERSONA_META_KEY)?.updated_at ?? at;
     const ilink=getState(db,ILINK_KEY);
     const routeRows=json(getState(db,ROUTES_KEY)!.value) as {route:string;target:string;owner:string}[];
     const rootRows=json(getState(db,ROOTS_KEY)!.value) as string[];
@@ -317,7 +323,7 @@ export function downgradeSchemaDatabase(db:DatabaseSync,at=new Date().toISOStrin
       ALTER TABLE gateway_state DROP COLUMN encoding;
       DROP TABLE context; DROP TABLE channel_events; DROP TABLE voice_records;`);
     db.prepare("INSERT INTO gateway_state(key,value,updated_at) VALUES(?,?,?)").run(CORE_KEY,core.body,core.updated_at);
-    db.prepare("INSERT INTO gateway_state(key,value,updated_at) VALUES(?,?,?)").run(PERSONA_KEY,JSON.stringify(persona),personaAt);
+    if(persona) db.prepare("INSERT INTO gateway_state(key,value,updated_at) VALUES(?,?,?)").run(PERSONA_KEY,JSON.stringify(persona),personaAt);
     db.prepare("INSERT INTO gateway_state_meta(id,version,migrated_at) VALUES(1,1,?)").run(object(meta)&&typeof meta.previousMigratedAt==="string"?meta.previousMigratedAt:at);
     integrity(db);
     if(schemaVersion(db)!==1)throw new StateError("旧格式转换校验失败。");

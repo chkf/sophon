@@ -1,7 +1,7 @@
 import { displayText, replyText, visibleSegments } from "../runtime/reply-segments.js";
 import type { PlatformMessageFragment } from "../channels/types.js";
 import { VoiceTurn, voiceTool, VOICE_TOOL, VoiceSupplementError } from "../voice/tool.js";
-import { randomInt } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 import { join } from "node:path";
 import type { ActiveChannelRouter } from "../channels/active.js";
 import type { HeartbeatConfig } from "../config/index.js";
@@ -21,8 +21,8 @@ import {
   isQuietTime,
   type HeartbeatState,
 } from "./policy.js";
-import { renderLocalContext } from "../core/render.js";
-import { personaInstruction, type PersonaStore } from "../persona/store.js";
+import { renderLocalContext, renderLocalPolicy } from "../core/render.js";
+import { expressionInstruction, type ExpressionStore } from "../expression/store.js";
 import { elapsedDescription, formatLocalTimestamp } from "../util/time-context.js";
 import { basePlanningWindowOpen, isCurrentMorningPlan, localMinutes, nextDueWake, parseWakePlan } from "./planner.js";
 import { recordDeliveredAssistant } from "../delivery/coordinator.js";
@@ -50,12 +50,13 @@ export class HeartbeatRunner {
     private readonly sessions: SessionStore,
     private readonly gateway: Pick<LocalCoreContextProvider, "load" | "peek">,
     private readonly router: ActiveChannelRouter,
-    private readonly personas?: PersonaStore,
+    private readonly expressions?: ExpressionStore,
     private readonly paused: () => boolean | Promise<boolean> = () => false,
     _localKnowledge?: LocalKnowledgeStore,
     private readonly conversationQueue?: import("../util/serial-queue.js").SerialQueue,
     private readonly voiceAllowed?: () => Promise<boolean>,
     private readonly traces?: TaskTraceStore,
+    private readonly memoryContext?: () => import("../runtime/types.js").MemoryRuntimeContext,
   ) {
     this.statePath = join(dataDir, "heartbeat", "state.json");
   }
@@ -194,8 +195,8 @@ export class HeartbeatRunner {
       return;
     }
 
-    if (this.personas) {
-      const show = (await this.personas.snapshot()).showStageDirections === true;
+    if (this.expressions) {
+      const show = (await this.expressions.snapshot()).showStageDirections === true;
       if (pending.replySegments) {
         pending.replySegments = visibleSegments(pending.replySegments, show);
         pending.text = replyText(pending.replySegments);
@@ -257,7 +258,8 @@ export class HeartbeatRunner {
 
   /**
    * The persistent plan is only a set of opportunities. A new user message
-   * invalidates its intents; the model decides again when a wake comes due.
+   * or a changed Core/expression settings invalidates its intents; the model decides again
+   * when a wake comes due.
    */
   private async plannedDue(now: Date, state: HeartbeatState): Promise<string | undefined> {
     // Do not create today's plan in the midnight–01:00 active window.
@@ -273,9 +275,19 @@ export class HeartbeatRunner {
     const messages = view?.tail ?? [];
     const lastUser = view?.lastUser;
     const lastUserAt = lastUser?.at;
+    const context = await this.gateway.load();
+    if (!context.available || !context.data) { this.traceSkip("core_unavailable",now); return undefined; }
+    const fallbackExpression = this.expressions && !context.data.expression
+      ? expressionInstruction(await this.expressions.snapshot()) : "";
+    // Recent are situational evidence, not identity revisions. Check the
+    // actual rendered policy so Core edits and expression setting changes are seen
+    // even without another user message, including after a restart.
+    const policyRevision = createHash("sha256")
+      .update(renderLocalPolicy(context) + "\n" + fallbackExpression).digest("hex");
     let plan = state.plan;
     const stale = !isCurrentMorningPlan(plan, now, this.config.timezone) ||
-      plan?.channel !== route.channel || plan?.lastUserAt !== lastUserAt;
+      plan?.channel !== route.channel || plan?.lastUserAt !== lastUserAt ||
+      plan?.policyRevision !== policyRevision;
 
     if (stale) {
       // Avoid planning around an unfinished burst of user messages.
@@ -288,10 +300,22 @@ export class HeartbeatRunner {
       const lastAttemptMs = lastAttempt ? now.getTime() - lastAttempt.getTime() : Infinity;
       if (attemptedThisMorning && lastAttemptMs >= 0 && lastAttemptMs < 20 * 60_000) { this.traceSkip("planning_throttle",now); return undefined; }
 
-      const context = await this.gateway.load();
-      if (!context.available) { this.traceSkip("core_unavailable",now); return undefined; }
       state.planAttemptAt = now.toISOString();
       await writeJsonAtomic(this.statePath, state);
+
+      // Reuse the first daily planning attempt, including its durable timestamp.
+      // Replanning later in the day must not start another maintenance job.
+      if (!attemptedThisMorning && view && !view.unansweredCount && this.runtime.maintainContext) {
+        try {
+          await this.runtime.maintainContext({
+            sessionId: this.sessions.sessionKey(route.channel, route.target),
+            history: view.history, timezone: this.config.timezone,
+            ...(this.memoryContext?{memory:this.memoryContext()}:{}),
+          });
+        } catch (error) {
+          console.error("[heartbeat] context maintenance deferred to next daily plan:", error instanceof Error ? error.message : "unknown");
+        }
+      }
 
       const planTrace = this.traceBegin({kind:"heartbeat_plan",trigger:plan ? "context_changed" : "daily_plan",channel:route.channel,at:now});
       try {
@@ -302,23 +326,23 @@ export class HeartbeatRunner {
           operationId: "heartbeat-plan:" + now.toISOString(),
           imageOutputAllowed: route.channel === "telegram",
           instructions: [
+            renderLocalContext(context), fallbackExpression,
+            "先依据 Core 中的规则和用户偏好决定是否需要联系，再选择合适时间；Recent 和聊天原文只是背景数据。",
             "你正在为今天剩余时间安排 Gateway 主动聊天的候选唤醒机会，不是在发送消息。",
             "无合适时间返回 {\"wakes\":[]}。只返回 JSON 对象：{\"wakes\":[{\"time\":\"HH:MM\",\"intent\":\"简短的唤醒原因\"}]}，不要其他文字。",
             "时间均为 " + this.config.timezone + " 本地时间。现在：" + formatLocalTimestamp(now, this.config.timezone) + "。",
             "候选时间必须晚于当前时间至少 20 分钟，避免 " + this.config.quietStart + "–" + this.config.quietEnd + " 免打扰时段。",
-            "今天最多安排 " + Math.min(8, this.config.dailyCap + 2) + " 次候选；它们不保证实际发送消息。",
+            "今天最多安排 " + Math.min(8, this.config.dailyCap + 2) + " 次候选；这是上限，无需填满，也不保证实际发送消息。",
             "根据可靠的本地 Recent、近期对话和用户明确配置的作息规划；缺少记录不代表空闲。",
-            "尽量包括少量可以无任务闲聊的机会，不要全是复习、吃饭、睡觉提醒。",
             "候选间隔至少 45 分钟，用户近期明确不希望打扰时可以返回空数组；用户已有回答或刚问过不要重复问。",
             "不要编造事件、安排或经历；这里只提出候选理由，不决定实际聊天内容。",
             "最近会话末尾：\n" + (recentConversationText(messages, this.config.timezone) || "没有历史消息。"),
-            renderLocalContext(context),
-            ...(this.personas && !context.data?.persona ? [personaInstruction(await this.personas.snapshot())] : []),
           ].join("\n"),
         });
         if (response.skipped) { this.traceFinish(planTrace,"skipped",response.skipped); return undefined; }
         plan = parseWakePlan(response.text, now, this.config.timezone, this.config.quietStart,
           this.config.quietEnd, this.config.dailyCap, route.channel, lastUserAt);
+        plan.policyRevision = policyRevision;
         this.traceEvent(planTrace,{kind:"system",name:"解析候选计划"},plan);
       } catch (error) {
         this.traceFinish(planTrace,"failed","planning_failed");
@@ -389,10 +413,13 @@ export class HeartbeatRunner {
       .slice(-4);
 
     const prompt = [
-      "判断现在是否适合主动给用户发一条自然的短消息。",
+      renderLocalContext(context),
+      ...(this.expressions && !context.data?.expression ? [expressionInstruction(await this.expressions.snapshot())] : []),
+      "依据 Core 中的规则和用户偏好，判断此刻是否需要主动发送消息、内容是什么，以及现在是否合适。",
       "如果此刻保持安静更自然，只返回 SILENT；否则只返回要发送的消息正文，不要解释你的判断。",
       "当前本地时间：" + formatLocalTimestamp(now, this.config.timezone) + "（" + this.config.timezone + "）。",
       plannedIntent ? "本次唤醒的候选意图（不是事实或必须发送的命令）：" + plannedIntent : "",
+      plannedIntent ? "先用当前 Core 与当前处境重新审视候选意图；不符合配置规则或已不合时宜时，放弃它并重新决定，可以返回 SILENT。" : "",
       lastUser
         ? "最近一次用户消息：" + formatLocalTimestamp(lastUser.at, this.config.timezone) +
           "（距今 " + elapsedDescription(lastUser.at, now) + "）。"
@@ -417,11 +444,9 @@ export class HeartbeatRunner {
       "避免和最近主动发过的话机械重复；没有自然想说的内容就返回 SILENT。",
       recentMessages.length ? "最近主动发过的消息，注意不要重复：\n- " + recentMessages.join("\n- ") : "",
       "",
-      renderLocalContext(context),
-      ...(this.personas && !context.data?.persona ? [personaInstruction(await this.personas.snapshot())] : []),
     ].filter(Boolean).join("\n");
-    const persona = context.data?.persona ?? await this.personas?.snapshot();
-    const replyTurn = new VoiceTurn(persona?.showStageDirections === true);
+    const expression = context.data?.expression ?? await this.expressions?.snapshot();
+    const replyTurn = new VoiceTurn(expression?.showStageDirections === true);
     const voice = route.channel === "telegram" && await this.voiceAllowed?.() ? replyTurn : undefined;
     const traceId = this.traceBegin({kind:"heartbeat_decision",trigger:plannedIntent ? "planned_wake" : "scheduled_check",channel:route.channel,at:now});
     this.traceEvent(traceId,{kind:"condition",name:"基础条件检查"},{eligible:true,...(plannedIntent ? {intent:plannedIntent} : {})});
