@@ -38,19 +38,21 @@ for (const provider of ["api", "openrouter"] as const) test(`${provider} persist
 }));
 test("Gateway advertises sticker selection and returns its verified metadata with an empty text response", () => fixture(async root => {
   const sessions = new SessionStore(root);
-  const runtime = { async reply(request: ChatRequest) {
-    assert.ok(request.tools!.some(tool => tool.name === "gateway_sticker"));
-    const result = await request.executeTool!("gateway_sticker", { action: "list" }) as { stickers: { key: string }[] };
-    await request.executeTool!("gateway_sticker", { action: "select", key: result.stickers[0]!.key });
-    assert.deepEqual(request.getPreparedSticker!(), sticker);
-    return { text: "" };
-  } };
-  const gateway = new Gateway(runtime, sessions, new LocalCoreContextProvider(root));
-  const inbound: InboundMessage = { channel: "telegram", conversationId: "70001", senderId: "70001", messageId: "1", receivedAt: "2030-01-01T00:00:00Z", text: "发送文档图标", attachments: [],
-    platformMessages: [{ accountId: sticker.accountId, conversationId: "70001", direction: "inbound", messageId: "1", text: "", attachments: [{ kind: "image", sticker }] }] };
-  const result = await gateway.handle(inbound);
-  assert.equal(result.kind, "model_reply");
-  if (result.kind === "model_reply") { assert.equal(result.text, ""); assert.deepEqual(result.sticker, sticker); }
+  try {
+    const runtime = { async reply(request: ChatRequest) {
+      assert.ok(request.tools!.some(tool => tool.name === "gateway_sticker"));
+      const result = await request.executeTool!("gateway_sticker", { action: "list" }) as { stickers: { key: string }[] };
+      await request.executeTool!("gateway_sticker", { action: "select", key: result.stickers[0]!.key });
+      assert.deepEqual(request.getPreparedSticker!(), sticker);
+      return { text: "" };
+    } };
+    const gateway = new Gateway(runtime, sessions, new LocalCoreContextProvider(root));
+    const inbound: InboundMessage = { channel: "telegram", conversationId: "70001", senderId: "70001", messageId: "1", receivedAt: "2030-01-01T00:00:00Z", text: "发送文档图标", attachments: [],
+      platformMessages: [{ accountId: sticker.accountId, conversationId: "70001", direction: "inbound", messageId: "1", text: "", attachments: [{ kind: "image", sticker }] }] };
+    const result = await gateway.handle(inbound);
+    assert.equal(result.kind, "model_reply");
+    if (result.kind === "model_reply") { assert.equal(result.text, ""); assert.deepEqual(result.sticker, sticker); }
+  } finally { sessions.close(); }
 }));
 test("SIWC accepts a sticker-only result without requiring visible text", () => fixture(async root => {
   let requests = 0;
