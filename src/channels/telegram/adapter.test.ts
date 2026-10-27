@@ -810,6 +810,61 @@ test("Telegram auto-deletes slash command input immediately and tool reply after
   }
 });
 
+test("Telegram retries failed command deletion and resumes failed reply deletion after restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sophon-telegram-delete-retry-"));
+  try {
+    const attempts = new Map<number, number>();
+    const deleted: number[] = [];
+    const api: TelegramApiClient = {
+      async call<T>(method: string, body: Record<string, unknown>): Promise<T> {
+        if (method === "sendChatAction") return true as T;
+        if (method === "sendMessage") return { message_id: 900 } as T;
+        if (method === "deleteMessage") {
+          const id = Number(body.message_id);
+          const count = (attempts.get(id) ?? 0) + 1;
+          attempts.set(id, count);
+          if (count === 1) throw new Error("synthetic network failure");
+          deleted.push(id);
+          return true as T;
+        }
+        throw new Error("unexpected Telegram API call: " + method);
+      },
+      async getFile() { return {}; },
+      async downloadFile() { return new Uint8Array(); },
+    };
+    const config = {
+      token: "test-token", ownerId: "123", dataDir: root,
+      mediaStore: { save: async () => { throw new Error("media not expected"); } } as never,
+      commandReplyAutoDeleteMs: 20, api,
+    };
+    const adapter = new TelegramAdapter(config);
+    const internal = adapter as any;
+    internal.handler = async () => "更新状态";
+    internal.running = true;
+    await internal.processUpdate({ update_id: 1, message: {
+      message_id: 21, date: 1, text: "/update status",
+      from: { id: 123 }, chat: { id: 123, type: "private" },
+    } });
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.ok(deleted.includes(21), "incoming command should be retried");
+    assert.equal(attempts.get(900), 1, "reply deletion should fail once before restart");
+    const statePath = join(root, "channels", "telegram.json");
+    assert.ok(JSON.parse(await readFile(statePath, "utf8")).commandReplyDeletions.some((entry: any) => entry.messageIds.includes(900)));
+    await adapter.stop();
+    const restarted = new TelegramAdapter(config);
+    const resumed = restarted as any;
+    resumed.state = await resumed.store.load();
+    resumed.running = true;
+    resumed.resumeCommandReplyDeletions();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.ok(deleted.includes(900), "reply deletion should resume from durable state");
+    assert.equal(JSON.parse(await readFile(statePath, "utf8")).commandReplyDeletions, undefined);
+    await restarted.stop();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Telegram keeps a model-failed inbound batch durable and retries it without losing the update", async () => {
   const root = await mkdtemp(join(tmpdir(), "sophon-telegram-inbound-retry-"));
   try {

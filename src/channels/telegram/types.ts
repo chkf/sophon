@@ -54,6 +54,7 @@ export interface TelegramCommandReplyDeletion {
   chatId: string;
   messageIds: number[];
   expiresAtMs: number;
+  deleteBeforeMs?: number;
 }
 
 export interface TelegramState {

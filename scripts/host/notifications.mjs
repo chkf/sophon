@@ -3,6 +3,9 @@ import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {atomicJson,readJson,stateDirectory} from './releases.mjs';
 
+const NOTICE_LIFETIME_MS=60_000;
+const TELEGRAM_DELETE_LIMIT_MS=48*60*60_000;
+
 export function updateResultText(result){
  const title={prepared:'版本已准备，本次未重启；下次启动时验证生效。',unhealthy:'版本检查或切换已完成，但当前服务健康检查未通过。请检查 /logs。',completed:result.source==='rollback'?'代码回退完成，服务已启动。':result.plan?.restart===false?'更新成功，仅文档变化，服务无需重启。':'更新成功，新版本已启动并通过健康检查。',current:'已是所选上游的最新版本，无需更新。',interrupted:'上次更新中断，未能确认完成。请用 /update status 查看状态。',failed:'更新失败，请用 /update status 查看状态。',rolled_back:'新版本启动失败，已恢复原运行版本。'}[result.phase];
  if(!title)return null;
@@ -26,12 +29,27 @@ export async function sendOwnerNotification(root,text,request=fetch){
  if(!response.ok)throw Error('Notification delivery failed.');
  const payload=await response.json();
  if(!payload.ok||!Number.isSafeInteger(payload.result?.message_id)||payload.result.message_id<=0)throw Error('Notification delivery failed.');
+ return {chatId:String(telegram.ownerId),messageId:payload.result.message_id,sentAtMs:Date.now()};
+}
+
+export async function deleteOwnerNotification(root,receipt,request=fetch){
+ const {loadConfig}=await import(pathToFileURL(join(root,'dist/config/index.js')).href);
+ const {telegram}=loadConfig();
+ if(!telegram?.token)throw Error('Notification channel unavailable.');
+ const response=await request('https://api.telegram.org/bot'+telegram.token+'/deleteMessage',{
+  method:'POST',headers:{'content-type':'application/json'},
+  body:JSON.stringify({chat_id:receipt.chatId,message_id:receipt.messageId}),signal:AbortSignal.timeout(10_000),
+ });
+ const payload=await response.json();
+ // Telegram cannot delete messages older than 48 hours or already removed by the owner.
+ if(response.status===400||payload.error_code===400)return;
+ if(!response.ok||!payload.ok||payload.result!==true)throw Error('Notification deletion failed.');
 }
 
 /** Durable outbox. Only a confirmed send removes an item; ambiguous failures may repeat. */
 export class UpdateNotifications {
- constructor(root,send=text=>sendOwnerNotification(root,text)){
-  this.root=root;this.send=send;this.chain=Promise.resolve();
+ constructor(root,send=text=>sendOwnerNotification(root,text),{remove=receipt=>deleteOwnerNotification(root,receipt),now=Date.now,deleteAfterMs=NOTICE_LIFETIME_MS}={}){
+  this.root=root;this.send=send;this.remove=remove;this.now=now;this.deleteAfterMs=deleteAfterMs;this.chain=Promise.resolve();
  }
  serial(work){
   const next=this.chain.then(work);
@@ -39,6 +57,7 @@ export class UpdateNotifications {
   return this.chain;
  }
  async path(){return join(await stateDirectory(this.root),'notifications.json');}
+ async deletionPath(){return join(await stateDirectory(this.root),'notification-deletions.json');}
  enqueue(result){return this.serial(async()=>{
   const text=updateResultText(result);if(!text)return;
   const path=await this.path(),items=await readJson(path,[]);
@@ -46,9 +65,24 @@ export class UpdateNotifications {
   if(!items.some(item=>item.id===id))await atomicJson(path,[...items,{id,text}]);
  });}
  flush(){return this.serial(async()=>{
+  const deletionPath=await this.deletionPath(),deletions=await readJson(deletionPath,[]);
+  let checked=0;
+  for(const entry of [...deletions]){
+   if(checked>=10||entry.deleteAtMs>this.now())continue;
+   checked++;
+   if(this.now()-entry.sentAtMs<TELEGRAM_DELETE_LIMIT_MS){
+    try{await this.remove(entry);}catch{console.error('[host] update notification deletion pending; will retry.');continue;}
+   }
+   deletions.splice(deletions.indexOf(entry),1);await atomicJson(deletionPath,deletions);
+  }
   const path=await this.path(),items=await readJson(path,[]);
   for(let count=0;items.length&&count<10;count++){
-   await this.send(items[0].text);items.shift();await atomicJson(path,items);
+   const receipt=await this.send(items[0].text);
+   if(receipt&&Number.isSafeInteger(receipt.messageId)&&receipt.messageId>0){
+    deletions.push({...receipt,deleteAtMs:this.now()+this.deleteAfterMs});
+    await atomicJson(deletionPath,deletions);
+   }
+   items.shift();await atomicJson(path,items);
   }
  });}
 }
