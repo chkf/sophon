@@ -34,6 +34,7 @@ export interface HeartbeatState {
   sentToday: number;
   lastSentAt?: string;
   nextCheckAt?: string;
+  intervalRevision?: string;
   planAttemptAt?: string;
   plan?: DailyWakePlan;
   pending?: HeartbeatPendingSend;

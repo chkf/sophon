@@ -28,7 +28,7 @@ export const CORE_KEY = "core/core.md";
 export const MAIN_DATABASE = "sessions/gateway.sqlite";
 export const DOCUMENTS = [CORE_KEY, "runtime/persona.json", "runtime/expression.json", "runtime/provider.json", "runtime/model.json",
   "runtime/api-model.json", "runtime/memory-model.json", "runtime/memory-prompts.json", "runtime/openrouter-model.json", "runtime/openrouter-images.json", "voice/settings.json",
-  "channels/active.json", "channels/telegram.json", "heartbeat/state.json", "heartbeat/settings.json",
+  "channels/active.json", "channels/telegram.json", "heartbeat/state.json", "heartbeat/settings.json", "heartbeat/reminders.json",
   "runtime/media-exploration-v3-state.json"];
 const dynamicDocument = /^(?:runtime\/(?:context|provider\.json\.deliveries|api-turns|openrouter-turns|openrouter-image-turns)|media\/exploration-drafts)\/[a-f0-9]{64}\.json(?:\.[a-f0-9-]+\.legacy-recovery)?$/;
 export function managedKey(key: string): boolean { return DOCUMENTS.includes(key) || dynamicDocument.test(key); }

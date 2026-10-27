@@ -11,7 +11,7 @@ export const TELEGRAM_COMMANDS = [
   { command: "retry", description: "重试失败的待回复消息" },
   { command: "expression", description: "开启或关闭心理和动作描写" },
   { command: "model", description: "Provider/聊天模型/生图设置" },
-  { command: "proactive", description: "选择 Telegram/微信/关闭主动消息" },
+  { command: "proactive", description: "主动模式开关与 Telegram/微信渠道" },
   { command: "logs", description: "查看最近 15 分钟日志" },
   { command: "test", description: "打开诊断面板" },
   { command: "status", description: "打开 Sophon 控制中心" },

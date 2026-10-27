@@ -1,3 +1,4 @@
+import { ReminderError, type ReminderStore } from "../reminders/store.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
@@ -16,6 +17,7 @@ interface ControlOptions {
   traces: TaskTraceStore;
   calls?: TaskTraceStore;
   host: HostMonitor;
+  reminders?: ReminderStore;
   heartbeat: () => Promise<Record<string, unknown>>;
   mutate: <T>(work: () => Promise<T> | T) => Promise<T>;
 }
@@ -231,7 +233,14 @@ export class ControlCenter {
           if (input.before !== undefined && (typeof input.before !== "string" || !/^tr_\d{13}_[a-f0-9-]{36}$/.test(input.before))) {
             throw new HttpError(400, "invalid_cursor", "任务分页游标无效。");
           }
-          data = { ...this.options.traces.list(input as never), retentionDay:this.options.traces.retentionDay(), heartbeat: await this.options.heartbeat() }; break;
+          data = { ...this.options.traces.list(input as never), retentionDay:this.options.traces.retentionDay(), heartbeat: await this.options.heartbeat(), reminders: await this.options.reminders?.list() ?? [] }; break;
+        }
+        case "reminder-cancel": {
+          if(!this.options.reminders)throw new HttpError(404,"reminders_unavailable","提醒功能不可用。");
+          if(typeof input.id!=="string"||!/^rem_[a-f0-9]{32}$/.test(input.id))throw new HttpError(400,"invalid_reminder","提醒标识无效。");
+          try{data=await mutate(()=>this.options.reminders!.cancel(input.id));}
+          catch(error){if(error instanceof ReminderError)throw new HttpError(409,"reminder_conflict",error.message);throw error;}
+          break;
         }
         case "task": {
           if (typeof input.id !== "string" || input.id.length > 160) throw new HttpError(400, "invalid_task", "任务标识无效。");

@@ -29,3 +29,5 @@
 .injection-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .injection-table th, .injection-table td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .injection-table td:nth-child(2) { white-space: nowrap; }
+
+.reminder-panel{padding:16px;margin-bottom:16px}.reminder-item{padding:12px 0;border-top:1px solid var(--line);overflow-wrap:anywhere}.reminder-item button{margin-left:12px}.reminder-item p{white-space:pre-wrap}
