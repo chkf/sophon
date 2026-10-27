@@ -46,6 +46,15 @@ test('launcher loads the next manager and commits only after its readiness',()=>
  assert.equal((await readJson(join(dir,'previous.json'))).sha,a.pointer.sha);
  assert.equal(await readJson(join(dir,'host.lock/owner.json'),null),null);
 }));
+test('launcher resumes after a stopped supervisor leaves its host lock',()=>fixture(async root=>{
+ const dir=await stateDirectory(root),lock=join(dir,'host.lock');
+ await mkdir(lock);
+ await atomicJson(join(lock,'owner.json'),{role:'supervisor',pid:2_147_483_647,startedAt:new Date(0).toISOString()});
+ let started=false;
+ await launchHost(root,{load:async()=>({runManager:async({onReady})=>{started=true;await onReady();}})});
+ assert.equal(started,true);
+ assert.equal(await readJson(join(lock,'owner.json'),null),null);
+}));
 test('module load failure and health failure restore the previous complete manager',()=>fixture(async root=>{
  for(const stage of ['import','health']){
   const a=await release(root,'a'),b=await release(root,'b'),dir=await stateDirectory(root),loaded=[];

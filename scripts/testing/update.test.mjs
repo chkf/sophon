@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,writeFile,readFile,rm,readdir,symlink} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {validateSources,readSources,selectSource,buildEnvironment,prepareRelease,currentRelease,saveRelease,acquireLock,stateDirectory,switchRelease,releaseFromPointer} from '../host/releases.mjs';
+import {validateSources,readSources,selectSource,buildEnvironment,prepareRelease,currentRelease,saveRelease,acquireLock,stateDirectory,switchRelease,releaseFromPointer,atomicJson,readJson} from '../host/releases.mjs';
 import {GatewayProcess} from '../host/supervisor.mjs';
 async function fixture(run){const root=await mkdtemp(join(tmpdir(),'public-updater-'));try{await run(root);}finally{await rm(root,{recursive:true,force:true});}}
 const sources={default:'official',sources:{official:{repository:'chkf/sophon',branch:'main'},custom:{repository:'example-account/sophon',branch:'feature/updates'}}};
@@ -61,6 +61,35 @@ test('unknown update protocol stops before dependency installation',()=>fixture(
 }));
 test('update lock excludes parallel mutation and is reusable after release',()=>fixture(async root=>{
  const unlock=await acquireLock(root,'update');await assert.rejects(acquireLock(root,'update'),/lock exists/);await unlock();await (await acquireLock(root,'update'))();
+}));
+test('host startup reclaims a lock left by a stopped supervisor',()=>fixture(async root=>{
+ const dir=await stateDirectory(root),lock=join(dir,'host.lock');await mkdir(lock);
+ await atomicJson(join(lock,'owner.json'),{role:'supervisor',pid:2_147_483_647,startedAt:new Date(0).toISOString()});
+ const unlock=await acquireLock(root,'host',{role:'supervisor'},{reclaimStale:true});
+ assert.equal((await readJson(join(lock,'owner.json'))).pid,process.pid);
+ await unlock();assert.equal(await readJson(join(lock,'owner.json'),null),null);
+}));
+test('host startup preserves live and uncertain owners',()=>fixture(async root=>{
+ const dir=await stateDirectory(root),lock=join(dir,'host.lock');await mkdir(lock);
+ for(const owner of [
+  {role:'supervisor',pid:process.pid,startedAt:new Date().toISOString()},
+  {role:'offline-update',pid:2_147_483_647,startedAt:new Date(0).toISOString()},
+  {role:'supervisor',pid:0,startedAt:new Date(0).toISOString()},
+ ]){
+  await atomicJson(join(lock,'owner.json'),owner);
+  await assert.rejects(acquireLock(root,'host',{role:'supervisor'},{reclaimStale:true}),/lock exists/);
+  assert.deepEqual(await readJson(join(lock,'owner.json')),owner);
+ }
+}));
+test('concurrent stale host recovery grants only one lock',()=>fixture(async root=>{
+ const dir=await stateDirectory(root),lock=join(dir,'host.lock');await mkdir(lock);
+ await atomicJson(join(lock,'owner.json'),{role:'supervisor',pid:2_147_483_647,startedAt:new Date(0).toISOString()});
+ const results=await Promise.allSettled([
+  acquireLock(root,'host',{role:'supervisor'},{reclaimStale:true}),
+  acquireLock(root,'host',{role:'supervisor'},{reclaimStale:true}),
+ ]);
+ assert.equal(results.filter(result=>result.status==='fulfilled').length,1);
+ await results.find(result=>result.status==='fulfilled').value();
 }));
 test('invalid pointer cannot escape the release directory',()=>fixture(async root=>{
  await assert.rejects(releaseFromPointer(root,{version:1,sha:'a'.repeat(40),directory:'../elsewhere'}),/pointer/);

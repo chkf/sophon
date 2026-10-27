@@ -16,7 +16,7 @@ export async function managerModule(root,release){
 
 /** A small stable launcher keeps ownership while operational code follows the release. */
 export async function launchHost(root,{signal,load=managerModule,notify}={}){
- const dir=await stateDirectory(root),unlock=await acquireLock(root,'host',{role:'supervisor'});
+ const dir=await stateDirectory(root),unlock=await acquireLock(root,'host',{role:'supervisor'},{reclaimStale:true});
  let unsafe=false;
  try{
   let release=await currentRelease(root),transaction=await readJson(join(dir,'activation.json'),null);
