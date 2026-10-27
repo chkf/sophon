@@ -5,7 +5,7 @@ import {randomUUID} from 'node:crypto';
 import {ensureCloudflared,prepareControlDependency} from './cloudflared-install.mjs';
 import {ControlTunnel} from './control-tunnel.mjs';
 import {checkGatewayHealth,releaseRevision} from './health.mjs';
-import {UpdateNotifications,sendOwnerNotification} from './notifications.mjs';
+import {UpdateNotifications,sendOwnerNotification,deleteOwnerNotification} from './notifications.mjs';
 import {GatewayProcess} from './supervisor.mjs';
 import {createUpdateJournal,statusText,saveUpdateStatus} from './update-journal.mjs';
 import {acquireLock,stateDirectory,readSources,selectSource,saveRelease,prepareRelease,runCommand,readJson,atomicJson,releaseFromPointer} from './releases.mjs';
@@ -16,7 +16,7 @@ export async function runManager({root,release,signal,verify=false,onReady=async
  let busy=false,closing=false,pending,started=false,reload=false,active=release,tunnel,timer,notificationTimer;
  let finish;const finished=new Promise(resolve=>{finish=resolve;});
  const stop=()=>{closing=true;finish();};signal?.addEventListener('abort',stop,{once:true});
- const notices=new UpdateNotifications(root,text=>sendOwnerNotification(active.path,text));
+ const notices=new UpdateNotifications(root,text=>sendOwnerNotification(active.path,text),{remove:receipt=>deleteOwnerNotification(active.path,receipt)});
  const status=async value=>{
   const result={...value,at:new Date().toISOString()};
   await saveUpdateStatus(root,result);await notices.enqueue(result);void notices.flush();

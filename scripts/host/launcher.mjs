@@ -2,7 +2,7 @@ import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {rm} from 'node:fs/promises';
 import {acquireLock,atomicJson,currentRelease,readJson,releaseFromPointer,saveRelease,stateDirectory} from './releases.mjs';
-import {UpdateNotifications,sendOwnerNotification} from './notifications.mjs';
+import {UpdateNotifications,sendOwnerNotification,deleteOwnerNotification} from './notifications.mjs';
 import {releaseRevision} from './health.mjs';
 import {saveUpdateStatus} from './update-journal.mjs';
 
@@ -33,7 +33,7 @@ export async function launchHost(root,{signal,load=managerModule,notify}={}){
       await saveRelease(root,release.pointer);
       const result={id:transaction.id,at:new Date().toISOString(),phase:recovering?'rolled_back':'completed',source:transaction.source,beforeSha:transaction.beforeSha,sha:await releaseRevision(release),stage:transaction.stage,plan:transaction.plan};
       await saveUpdateStatus(root,result);
-      const notices=new UpdateNotifications(root,notify??(text=>sendOwnerNotification(release.path,text)));
+      const notices=new UpdateNotifications(root,notify??(text=>sendOwnerNotification(release.path,text)),{remove:receipt=>deleteOwnerNotification(release.path,receipt)});
       await notices.enqueue(result);
       await rm(join(dir,'activation.json'),{force:true});
       await notices.flush();
@@ -51,7 +51,7 @@ export async function launchHost(root,{signal,load=managerModule,notify}={}){
      if(transaction){
       const result={id:transaction.id,at:new Date().toISOString(),phase:'failed',source:transaction.source,beforeSha:transaction.beforeSha,stage:unsafe?'shutdown':error.stage??'startup'};
       await saveUpdateStatus(root,result);
-      const notices=new UpdateNotifications(root,notify??(text=>sendOwnerNotification(root,text)));
+      const notices=new UpdateNotifications(root,notify??(text=>sendOwnerNotification(root,text)),{remove:receipt=>deleteOwnerNotification(root,receipt)});
       await notices.enqueue(result);await notices.flush();
      }
      throw error;

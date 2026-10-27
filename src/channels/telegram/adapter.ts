@@ -18,7 +18,7 @@ import type { RuntimeImage } from "../../runtime/types.js";
 import { basename } from "node:path";
 import type { Attachment, AttachmentKind, InboundHandler, InboundMessage, ProactiveSender, ProactiveDelivery } from "../types.js";
 import type { ReplyOutcome } from "../reply.js";
-import { TelegramBotApi } from "./api.js";
+import { TelegramBotApi, TelegramBotApiError } from "./api.js";
 import { telegramAccountId, nativeReplyParameters } from "../../runtime/native-reply.js";
 import type { TelegramNativeReply } from "../types.js";
 
@@ -192,16 +192,28 @@ export class TelegramAdapter implements ProactiveSender {
     return this.config.commandReplyAutoDeleteMs ?? 60_000;
   }
 
-  private async deleteMessage(chatId: string, messageId: string | number): Promise<void> {
-    await this.api.call("deleteMessage", {
-      chat_id: chatId,
-      message_id: Number(messageId),
-    }).catch((error) => {
+  private async deleteMessage(chatId: string, messageId: string | number): Promise<boolean> {
+    try {
+      const removed = await this.api.call<boolean>("deleteMessage", {
+        chat_id: chatId,
+        message_id: Number(messageId),
+      });
+      if (removed !== true) throw new Error("Telegram did not confirm message deletion.");
+      return true;
+    } catch (error) {
+      if (error instanceof TelegramBotApiError && error.errorCode === 400) return true;
       console.error(
         "[telegram] auto-delete failed:",
         error instanceof Error ? error.message : error,
       );
-    });
+      return false;
+    }
+  }
+
+  private async deleteCommandMessage(chatId: string, messageId: string): Promise<void> {
+    if (await this.deleteMessage(chatId, messageId)) return;
+    const id = Number(messageId);
+    if (Number.isSafeInteger(id) && id > 0) await this.scheduleCommandReplyDeletion(chatId, [id], Math.min(30_000, this.commandReplyAutoDeleteMs()));
   }
 
   // Preserve deletion deadlines across /update: it restarts the Gateway process.
@@ -209,7 +221,7 @@ export class TelegramAdapter implements ProactiveSender {
     for (const entry of this.state.commandReplyDeletions ?? []) this.armCommandReplyDeletion(entry);
   }
 
-  private armCommandReplyDeletion(entry: TelegramCommandReplyDeletion): void {
+  private armCommandReplyDeletion(entry: TelegramCommandReplyDeletion, retryDelayMs = 0): void {
     if (!Number.isFinite(entry.expiresAtMs) || !entry.messageIds?.length ||
         !entry.messageIds.every(id => Number.isSafeInteger(id) && id > 0)) return;
     const key = entry.chatId + ":" + entry.messageIds.join(",");
@@ -219,17 +231,24 @@ export class TelegramAdapter implements ProactiveSender {
       this.commandReplyTimers.delete(key);
       for (const id of entry.messageIds) this.panels.forget(entry.chatId, id);
       void (async () => {
-        await Promise.all(entry.messageIds.map(id => this.deleteMessage(entry.chatId, id)));
-        await this.store.mutate(() => {
-          const remainder = (this.state.commandReplyDeletions ?? []).filter(item =>
-            item.chatId !== entry.chatId || item.expiresAtMs !== entry.expiresAtMs ||
-            item.messageIds[0] !== entry.messageIds[0]);
-          if (remainder.length) this.state.commandReplyDeletions = remainder;
-          else delete this.state.commandReplyDeletions;
+        const outcomes = await Promise.all(entry.messageIds.map(id => this.deleteMessage(entry.chatId, id)));
+        const failed = entry.messageIds.filter((_, index) => !outcomes[index]);
+        const retry = failed.length > 0 && Date.now() < (entry.deleteBeforeMs ?? entry.expiresAtMs + 48*3600_000);
+        const retained = await this.store.mutate(() => {
+          const entries = this.state.commandReplyDeletions ?? [];
+          if (!entries.includes(entry)) return false;
+          if (retry) entry.messageIds = failed;
+          else {
+            const remainder = entries.filter(item => item !== entry);
+            if (remainder.length) this.state.commandReplyDeletions = remainder;
+            else delete this.state.commandReplyDeletions;
+          }
+          return retry;
         });
+        if (retained && this.running) this.armCommandReplyDeletion(entry, 30_000);
       })().catch(error => console.error("[telegram] auto-delete bookkeeping failed:",
         error instanceof Error ? error.message : error));
-    }, Math.max(0, entry.expiresAtMs - Date.now()));
+    }, Math.max(retryDelayMs, entry.expiresAtMs - Date.now(), 0));
     this.commandReplyTimers.set(key, timer);
     timer.unref?.();
   }
@@ -238,6 +257,7 @@ export class TelegramAdapter implements ProactiveSender {
     if (!messageIds.length) return;
     const entry: TelegramCommandReplyDeletion = {
       chatId, messageIds, expiresAtMs: Date.now() + durationMs,
+      deleteBeforeMs: Date.now() + 48*3600_000,
     };
     await this.store.mutate(() => {
       // Rendering a panel refreshes its one durable deadline, not an earlier timer.
@@ -520,7 +540,7 @@ export class TelegramAdapter implements ProactiveSender {
     const command = inbound.text.trim().match(/^\/([a-z]+)(?:@[a-z0-9_]+)?\s*$/i)?.[1]?.toLowerCase();
     if (command && this.config.onPanel) {
       const view=await this.config.onPanel(command,inbound);
-      if(view) {await this.panels.open(inbound.conversationId,view);await this.deleteMessage(inbound.conversationId,inbound.messageId);return;}
+      if(view) {await this.panels.open(inbound.conversationId,view);await this.deleteCommandMessage(inbound.conversationId,inbound.messageId);return;}
     }
 
     if (inbound.senderId === this.config.ownerId &&
@@ -540,7 +560,7 @@ export class TelegramAdapter implements ProactiveSender {
         outcome === "resumed" ? "已恢复待回复消息。" : outcome === "busy"
           ? "模型仍在处理这条消息，不会重复发起请求。" : "没有可重试的待回复消息。").catch(() => []);
       await this.scheduleCommandReplyDeletion(inbound.conversationId, sent);
-      if (autoDeleteCommand) await this.deleteMessage(inbound.conversationId, inbound.messageId);
+      if (autoDeleteCommand) await this.deleteCommandMessage(inbound.conversationId, inbound.messageId);
       return;
     }
 
@@ -615,7 +635,7 @@ export class TelegramAdapter implements ProactiveSender {
           });
         }
         if (autoDeleteCommand) {
-          await this.deleteMessage(inbound.conversationId, inbound.messageId);
+          await this.deleteCommandMessage(inbound.conversationId, inbound.messageId);
         }
         return;
       }
@@ -623,15 +643,14 @@ export class TelegramAdapter implements ProactiveSender {
       if (autoDeleteCommand) {
         try {
           const sentMessageIds = await this.delivery.sendTextCollectMessageIds(inbound.conversationId, reply);
-          await this.deleteMessage(inbound.conversationId, inbound.messageId);
           await this.scheduleCommandReplyDeletion(inbound.conversationId, sentMessageIds);
         } catch (error) {
           console.error(
             "[telegram] slash command reply delivery failed:",
             error instanceof Error ? error.message : error,
           );
-          await this.deleteMessage(inbound.conversationId, inbound.messageId);
         }
+        await this.deleteCommandMessage(inbound.conversationId, inbound.messageId);
         return;
       }
 
