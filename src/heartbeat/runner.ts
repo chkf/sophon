@@ -59,6 +59,7 @@ export class HeartbeatRunner {
     private readonly memoryContext?: () => import("../runtime/types.js").MemoryRuntimeContext,
     private readonly mcp?: import("../mcp/client.js").ProactiveMcpSource,
     private readonly proactiveAuthorized?: () => Promise<boolean>,
+    private readonly intervalSettings?: () => Promise<import("./settings.js").ProactiveInterval>,
   ) {
     this.statePath = join(dataDir, "heartbeat", "state.json");
   }
@@ -120,9 +121,10 @@ export class HeartbeatRunner {
     const now = new Date();
     const state = await this.loadState(now);
     const nextCheckTime = state.nextCheckAt ? new Date(state.nextCheckAt).getTime() : Number.NaN;
-    const latestAllowed = now.getTime() + this.config.maxIntervalMinutes * 60_000;
+    const interval=await this.intervalSettings?.() ?? this.config;
+    const latestAllowed = now.getTime() + interval.maxIntervalMinutes * 60_000;
     if (!this.config.planningEnabled && (!Number.isFinite(nextCheckTime) || nextCheckTime > latestAllowed)) {
-      state.nextCheckAt = this.nextCheck(now).toISOString();
+      state.nextCheckAt = this.nextCheck(now,interval).toISOString();
       await writeJsonAtomic(this.statePath, state);
     }
     this.schedule();
@@ -146,9 +148,9 @@ export class HeartbeatRunner {
     this.timer.unref?.();
   }
 
-  private nextCheck(now: Date): Date {
-    const min = this.config.minIntervalMinutes * 60_000;
-    const max = this.config.maxIntervalMinutes * 60_000;
+  private nextCheck(now: Date, interval: Pick<HeartbeatConfig,"minIntervalMinutes"|"maxIntervalMinutes"> = this.config): Date {
+    const min = interval.minIntervalMinutes * 60_000;
+    const max = interval.maxIntervalMinutes * 60_000;
     const delay = max === min ? min : randomInt(min, max + 1);
     return new Date(now.getTime() + delay);
   }
@@ -385,13 +387,18 @@ export class HeartbeatRunner {
       await this.flushPending(state, now);
       return;
     }
+    const interval=await this.intervalSettings?.();
+    if(interval && state.intervalRevision!==interval.revision && !this.config.planningEnabled){
+      state.nextCheckAt=this.nextCheck(now,interval).toISOString();state.intervalRevision=interval.revision;
+      await writeJsonAtomic(this.statePath,state);
+    }
     let plannedIntent: string | undefined;
     if (this.config.planningEnabled) {
       plannedIntent = await this.plannedDue(now, state);
       if (!plannedIntent) return;
     } else {
       if (state.nextCheckAt && new Date(state.nextCheckAt) > now) return;
-      state.nextCheckAt = this.nextCheck(now).toISOString();
+      state.nextCheckAt = this.nextCheck(now,interval).toISOString();
       await writeJsonAtomic(this.statePath, state);
     }
 

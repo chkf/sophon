@@ -15,7 +15,7 @@ export class CommandPanels {
     private readonly logDir:string,private readonly timezone:string,private readonly credits:()=>Promise<string>,
     private readonly weixin?:{choose:()=>Promise<PanelView>;panel:()=>Promise<PanelView>},
     private readonly voice?:{open:()=>Promise<PanelView>},
-    private readonly proactiveSettings?:{enabled:()=>Promise<boolean>;setEnabled:(enabled:boolean)=>Promise<void>}) {}
+    private readonly proactiveSettings?:{enabled:()=>Promise<boolean>;setEnabled:(enabled:boolean)=>Promise<void>;interval?:()=>Promise<import("../heartbeat/settings.js").ProactiveInterval>;setInterval?:(min:number,max:number)=>Promise<void>}) {}
   async open(command:string,_message:InboundMessage):Promise<PanelView|undefined> {
     if(!["model","expression","proactive","test","logs"].includes(command))return undefined;
     if(command==="model")return this.model();
@@ -88,10 +88,18 @@ export class CommandPanels {
   async proactive():Promise<PanelView> {
     const active=await this.channels.getActive();
     const enabled=await this.proactiveSettings?.enabled();
+    const interval=await this.proactiveSettings?.interval?.();
+    const intervalRows=interval&&this.proactiveSettings?.setInterval ? [[button("主动检查间隔",()=>this.proactiveInterval())]] : [];
     const toggle=this.proactiveSettings ? [[button(enabled?"关闭主动模式":"开启主动模式（允许后台模型调用）",async()=>{
       await this.proactiveSettings!.setEnabled(!enabled);return this.proactive();
     })]] : [];
-    return {text:(enabled===undefined?"":"主动模式："+(enabled?"已开启":"已关闭")+"\n")+"主动消息渠道\n开启后允许当前 Provider 的后台文字调用，可能消耗额度；时间限制及工具授权仍有效。\n渠道为关闭时不会运行主动判断。普通聊天不受影响。",rows:toggle.concat((["telegram","wechat","off"] as const).map(c=>[button((c===active?"✓ ":"")+({telegram:"Telegram",wechat:"微信",off:"关闭"}[c]),async()=>{if(c==="wechat"&&this.weixin)return this.weixin.choose();await this.channels.setActive(c);return this.proactive();})]).concat(this.weixin?[[button("微信管理 / 重新绑定",()=>this.weixin!.panel())]]:[]))};
+    return {text:(enabled===undefined?"":"主动模式："+(enabled?"已开启":"已关闭")+"\n")+(interval?"检查间隔："+interval.minIntervalMinutes+"–"+interval.maxIntervalMinutes+" 分钟（非每日规划模式）\n":"")+"主动消息渠道\n开启后允许当前 Provider 的后台文字调用，可能消耗额度；时间限制及工具授权仍有效。\n明确创建的定时提醒独立执行，不受此开关影响。普通聊天不受影响。",rows:toggle.concat(intervalRows).concat((["telegram","wechat"] as const).map(c=>[button((c===active?"✓ ":"")+({telegram:"Telegram",wechat:"微信",off:"关闭"}[c]),async()=>{if(c==="wechat"&&this.weixin)return this.weixin.choose();await this.channels.setActive(c);return this.proactive();})]).concat(this.weixin?[[button("微信管理 / 重新绑定",()=>this.weixin!.panel())]]:[]))};
+  }
+  async proactiveInterval():Promise<PanelView>{
+    const interval=await this.proactiveSettings!.interval!();
+    return {text:`主动检查间隔：${interval.minIntervalMinutes}–${interval.maxIntervalMinutes} 分钟\n每次在范围内随机安排下一次检查，不保证发送消息。保存后下一次调度检查会重新计时，无需重启。仅影响非每日规划模式；独立提醒按指定时间执行。`,rows:[
+      ...[[30,60],[60,120],[120,240],[240,480]].map(([min,max])=>[button(`${min}–${max} 分钟`,async()=>{await this.proactiveSettings!.setInterval!(min!,max!);return this.proactiveInterval();})]),
+      [button("返回",()=>this.proactive())]]};
   }
   async expression():Promise<PanelView> {
     const state=await this.expressions.snapshot();

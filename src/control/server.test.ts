@@ -1,3 +1,4 @@
+import { ReminderStore } from "../reminders/store.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer, request, type Server } from "node:http";
@@ -23,7 +24,7 @@ async function fixture(run: (client: {
   const traces = new TaskTraceStore(dataDir);
   const data = new ControlData(dataDir);
   control = new ControlCenter({ publicUrl: temporary ? "https://pending.trycloudflare.com/control/" : origin + "/control/", temporary, data, traces,
-    host: new HostMonitor(dataDir), heartbeat: async () => ({ enabled: false, timezone: "UTC" }),
+    host: new HostMonitor(dataDir), heartbeat: async () => ({ enabled: false, timezone: "UTC" }), reminders: new ReminderStore(dataDir),
     mutate: async work => { await beforeMutation?.(); return work(); } });
   const post = (action: string, input: unknown = {}, headers: Record<string, string> = {}) => fetch(origin + "/control/api/" + action,
     { method: "POST", headers: { origin, "content-type": "application/json", ...headers }, body: JSON.stringify(input) });
@@ -234,4 +235,20 @@ test('graph prompt writes require owner session and CSRF and enforce revision co
  assert.equal((await post('graph-prompt-save',{id:'digest',expectedRevision:revision,content:'输出带引用的合成摘要。'},headers)).status,200);
  assert.equal((await post('graph-prompt-save',{id:'digest',expectedRevision:revision,reset:true},headers)).status,409);
  assert.equal((await post('graph-prompt-save',{id:'digest',expectedRevision:revision+1,reset:true},headers)).status,200);
+}));
+
+
+test("control lists future reminders and protects cancellation with owner login and CSRF",()=>fixture(async({control,post,dataDir})=>{
+ const store=new ReminderStore(dataDir);
+ const task=await store.create({text:'Review sample document',dueAt:new Date(Date.now()+86400_000).toISOString(),timezone:'UTC',channel:'telegram',target:'70001',source:'sample'});
+ assert.equal((await post('reminder-cancel',{id:task.id})).status,401);
+ const login=await post('login',{code:control.auth.issueCode()});
+ const cookie=login.headers.get('set-cookie')!.split(';')[0],csrf=(await login.json()).data.csrfToken;
+ assert.equal((await post('reminder-cancel',{id:task.id},{cookie})).status,403);
+ const headers={cookie,'x-control-csrf':csrf};
+ const tasks=(await (await post('tasks',{},headers)).json()).data;
+ assert.equal(tasks.reminders[0].id,task.id);assert.equal(tasks.reminders[0].status,'pending');
+ assert.equal((await post('reminder-cancel',{id:task.id},headers)).status,200);
+ assert.equal((await store.list())[0]!.status,'cancelled');
+ assert.equal((await post('reminder-cancel',{id:'invalid'},headers)).status,400);
 }));

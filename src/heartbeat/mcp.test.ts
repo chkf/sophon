@@ -34,3 +34,18 @@ test('scheduled decision can choose MCP then stay silent; repeated and unauthori
   await runner.tick(new Date('2026-01-16T10:00:00Z'));assert.equal(discoveries,1);
  }finally{sessions.close();await rm(root,{recursive:true,force:true});}
 });
+
+test('changing interval reschedules the next check without restarting or running an immediate model call',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'sophon-interval-runner-'));const sessions=new SessionStore(root);
+ const {readJsonFile}=await import('../util/atomic-json.js');
+ let interval={minIntervalMinutes:60,maxIntervalMinutes:60,revision:'first'};
+ try{
+  const runner=new HeartbeatRunner(root,{enabled:true,timezone:'UTC',quietStart:'01:00',quietEnd:'07:00',cooldownMinutes:0,dailyCap:8,minIntervalMinutes:60,maxIntervalMinutes:120},
+   {reply:async()=>assert.fail('must wait for next check')} as never,sessions,{} as never,{} as never,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,async()=>interval);
+  await runner.tick(new Date('2026-01-15T10:00:00Z'));
+  assert.equal((await readJsonFile<any>(join(root,'heartbeat/state.json'),{})).nextCheckAt,'2026-01-15T11:00:00.000Z');
+  interval={minIntervalMinutes:30,maxIntervalMinutes:30,revision:'changed'};
+  await runner.tick(new Date('2026-01-15T10:01:00Z'));
+  assert.equal((await readJsonFile<any>(join(root,'heartbeat/state.json'),{})).nextCheckAt,'2026-01-15T10:31:00.000Z');
+ }finally{sessions.close();await rm(root,{recursive:true,force:true});}
+});

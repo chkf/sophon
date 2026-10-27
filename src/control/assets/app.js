@@ -10,11 +10,11 @@
   let hostResize;
   const state = { authenticated: false, csrf: '', page: 'tasks', epoch: 0, dirty: false, saving: false, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     call: { selected: null, open: new Set() },
-    task: { runs: [], nextBefore: null, selected: null, open: new Set(), filter: 'all', heartbeat: null },
+    task: { reminders: [], runs: [], nextBefore: null, selected: null, open: new Set(), filter: 'all', heartbeat: null },
     history: { conversations: [], nextConversations: null, key: '', query: '', from: '', to: '', offset: 0, around: null },
     graph: { topic: null, topicOffset: 0, offset: 0, query: "", status: "active", selected: null },
     memory: { tab: 'core', selected: null, entries: [], nextOffset: null, query: '', archived: false }, pollBusy: false };
-  const pages = { graph: ["记忆图", "按主题浏览记忆与原始记录。"], tasks: ['主动任务', '按配置时区显示当天任务，查看每一步真实执行。'], history: ['聊天历史', '最新消息在前，翻阅对话、搜索原文与关联附件。'], memory: ['Core / Recent', '管理稳定指令与持续话题。'], context: ['上下文', '查看本地上下文的组成与可恢复检查点。'], host: ['主机监控', '资源走势与当前进程，来自真实采样。'] };
+  const pages = { graph: ["记忆图", "按主题浏览记忆与原始记录。"], tasks: ['主动任务', '查看已安排的提醒，以及当天主动聊天的执行记录。'], history: ['聊天历史', '最新消息在前，翻阅对话、搜索原文与关联附件。'], memory: ['Core / Recent', '管理稳定指令与持续话题。'], context: ['上下文', '查看本地上下文的组成与可恢复检查点。'], host: ['主机监控', '资源走势与当前进程，来自真实采样。'] };
   const statusNames = { running: '运行中', completed: '已完成', silent: '保持静默', skipped: '已跳过', failed: '失败', delivered: '确认送达', delivery_unknown: '交付不确定', interrupted: '已中断', acknowledged: '已确认', started: '进行中', pending: '待处理', unknown: '未知' };
   const taskNames = { chat: "正式会话 · 调用流程", heartbeat_plan: 'Heartbeat · 计划生成', heartbeat_decision: 'Heartbeat · 主动判断', heartbeat_delivery: 'Heartbeat · 消息交付', heartbeat_check: 'Heartbeat · 条件检查' };
   const triggerNames = { inbound_message: "收到聊天消息", scheduler_gate: '调度条件检查', pending_delivery: '待交付消息', context_changed: '上下文变化', daily_plan: '每日计划', planned_wake: '计划唤醒', scheduled_check: '定时检查' };
@@ -138,7 +138,7 @@
     if (epoch !== state.epoch) return;
     state.task.runs = append ? [...state.task.runs, ...result.runs.filter(run => !state.task.runs.some(existing => existing.id === run.id))] : result.runs;
     retainTaskDay(result);
-    state.task.nextBefore = result.nextBefore; state.task.heartbeat = result.heartbeat;
+    state.task.nextBefore = result.nextBefore; state.task.heartbeat = result.heartbeat; state.task.reminders = result.reminders || [];
     if (result.heartbeat?.timezone) state.timezone = result.heartbeat.timezone;
     if (!state.task.selected && result.runs.length) state.task.selected = result.runs[0].id;
     renderTasks();
@@ -149,6 +149,7 @@
     return el('div', { class: 'toolbar', id: 'task-toolbar' }, el('div', { class: 'task-state' },
       el('span', { class: 'task-state-label' }, el('span', { class: 'live-dot' }), el('strong', {}, hb?.enabled ? 'Heartbeat 已启用' : 'Heartbeat 未启用')),
       hb ? el('span', {}, '当天发送尝试 ', el('strong', {}, number(hb.attemptsToday))) : null,
+      hb?.interval ? el('span', {}, `检查间隔 ${hb.interval.minIntervalMinutes}–${hb.interval.maxIntervalMinutes} 分钟`) : null,
       hb?.nextCheckAt ? el('span', {}, '下次检查 ', el('strong', {}, date(hb.nextCheckAt))) : null), el('span', { class: 'small' }, state.timezone));
   }
   function taskPlan(open = false) {
@@ -156,13 +157,25 @@
     return el('details', { class: 'panel plan-panel', id: 'task-plan', open }, el('summary', {}, `当前唤醒计划 · ${plan.date || ''} · ${(plan.wakes || []).length} 个机会`),
       el('div', { class: 'plan-content' }, el('div', { class: 'plan-wakes' }, ...(plan.wakes || []).map(wake => el('div', { class: `plan-wake ${wake.consumed ? 'consumed' : ''}` }, el('strong', {}, wake.time, el('span', { class: 'muted small' }, wake.consumed ? '已使用' : '待检查')), el('p', {}, wake.intent)))), el('p', { class: 'plan-note' }, `生成于 ${date(plan.generatedAt)}。计划代表检查机会，届时仍可能静默。`)));
   }
+  function reminderPanel() {
+    const labels = { pending: '等待执行', sending: '发送中', delivered: '已送达', unknown: '结果不确定（不自动重发）', cancelled: '已取消', expired: '已过期（错过超过 24 小时）' };
+    const tasks = [...state.task.reminders].sort((a,b) => Number(b.status === 'pending') - Number(a.status === 'pending') || a.dueAt.localeCompare(b.dueAt));
+    return el('section', { class: 'panel reminder-panel', id: 'reminder-panel' }, el('h3', {}, '定时提醒'),
+      el('p', { class: 'muted' }, '在聊天中指定时间创建。明确提醒独立于主动聊天开关及免打扰时段；服务需保持运行。时间按下方时区显示。'),
+      ...(tasks.length ? tasks.map(task => el('div', { class: 'reminder-item' },
+        el('p', {}, task.text), el('span', { class: 'small' }, `${date(task.dueAt)} · ${state.timezone} · ${task.channel === 'telegram' ? 'Telegram' : '微信'} · ${labels[task.status] || task.status}`),
+        ...(task.status === 'pending' ? [button('取消提醒', async () => {
+          await api('reminder-cancel', { id: task.id }); await loadTasks(false);
+        }, 'small')] : []))) : [empty('暂无提醒', '例如：明天下午三点提醒我检查文档。')])
+    );
+  }
   function renderTasks() {
     const filter = el('select', { 'aria-label': '按执行结果筛选', onchange: event => { state.task.filter = event.target.value; renderTaskList(); } },
       ...[['all', '全部结果'], ['delivered', '确认送达'], ['silent', '静默 / 跳过'], ['failed', '失败 / 不确定'], ['running', '运行中']].map(([value, label]) => el('option', { value }, label)));
     filter.value = state.task.filter;
     const runPanel = el('section', { class: 'run-list-panel', 'aria-label': '执行记录' }, el('div', { class: 'section-heading' }, el('h3', {}, '执行记录'), filter), el('div', { id: 'task-runs', class: 'run-items' }), el('div', { id: 'task-more', class: 'list-more' }));
     const inspector = el('section', { id: 'task-detail', class: 'inspector', 'aria-label': '调用轨迹' }, empty('选择一次执行', '左侧每条记录对应一次真实任务。'));
-    const nodes = [taskToolbar(), el('div', { id: 'task-plan-slot' }, taskPlan())];
+    const nodes = [reminderPanel(), taskToolbar(), el('div', { id: 'task-plan-slot' }, taskPlan())];
     nodes.push(el('div', { class: 'panel workbench' }, runPanel, inspector));
     content.replaceChildren(...nodes); renderTaskList();
   }
@@ -725,9 +738,10 @@
           .sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id)).slice(0, 1000);
         retainTaskDay(result);
         if (!keepOlder) state.task.nextBefore = result.nextBefore;
-        state.task.heartbeat = result.heartbeat;
+        state.task.heartbeat = result.heartbeat; state.task.reminders = result.reminders || [];
         if (result.heartbeat?.timezone) state.timezone = result.heartbeat.timezone;
         $('#task-toolbar')?.replaceWith(taskToolbar());
+        $('#reminder-panel')?.replaceWith(reminderPanel());
         const planOpen = $('#task-plan')?.open === true, planSlot = $('#task-plan-slot');
         if (planSlot) replace(planSlot, taskPlan(planOpen));
         if (!state.task.selected) state.task.selected = state.task.runs[0]?.id || null;
