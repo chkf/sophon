@@ -1,5 +1,5 @@
 import {spawn} from 'node:child_process';
-import {mkdir,readFile,writeFile,rename,rm,lstat,mkdtemp} from 'node:fs/promises';
+import {mkdir,readFile,writeFile,rename,rm,lstat,mkdtemp,readdir} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {commandSpec} from './process.mjs';
@@ -41,10 +41,40 @@ export async function atomicJson(path,value){
  finally{await rm(temp,{force:true});}
 }
 export async function readJson(path,fallback){try{return JSON.parse(await readFile(path,'utf8'));}catch(error){if(error.code==='ENOENT')return fallback;throw error;}}
-export async function acquireLock(root,name,metadata={}){
+function processIsGone(pid){
+ if(!Number.isSafeInteger(pid)||pid<=0)return false;
+ try{process.kill(pid,0);return false;}catch(error){return error.code==='ESRCH';}
+}
+async function reclaimStoppedSupervisor(path){
+ const owner=await readJson(join(path,'owner.json'),null);
+ if(owner?.role!=='supervisor'||!processIsGone(owner.pid))return false;
+ const stat=await lstat(path);
+ if(!stat.isDirectory()||stat.isSymbolicLink())return false;
+ if((await readdir(path)).join()!=='owner.json')return false;
+ // A claim inside the old lock prevents two starters from renaming different owners.
+ const claim=join(path,'.reclaiming');
+ try{await writeFile(claim,String(process.pid),{flag:'wx'});}catch(error){if(['EEXIST','ENOENT'].includes(error.code))return false;throw error;}
+ let moved=false;
+ try{
+  const current=await readJson(join(path,'owner.json'),null);
+  if(JSON.stringify(current)!==JSON.stringify(owner)||!processIsGone(owner.pid))return false;
+  const stale=path+'.stale-'+randomUUID();
+  await rename(path,stale);moved=true;
+  await rm(stale,{recursive:true,force:true});
+  return true;
+ }finally{if(!moved)await rm(claim,{force:true});}
+}
+export async function acquireLock(root,name,metadata={},options={}){
  const dir=await stateDirectory(root),path=join(dir,name+'.lock');
- try{await mkdir(path,{mode:0o700});}catch(error){if(error.code==='EEXIST')throw Error(name+' lock exists; another operation may be running. See docs/updating.md for interrupted-lock recovery.');throw error;}
- await atomicJson(join(path,'owner.json'),{...metadata,pid:process.pid,startedAt:new Date().toISOString()});
+ try{await mkdir(path,{mode:0o700});}
+ catch(error){
+  if(error.code!=='EEXIST')throw error;
+  const reclaimed=name==='host'&&options.reclaimStale===true&&await reclaimStoppedSupervisor(path);
+  if(!reclaimed)throw Error(name+' lock exists; another operation may be running. See docs/updating.md for interrupted-lock recovery.');
+  await mkdir(path,{mode:0o700});
+ }
+ try{await atomicJson(join(path,'owner.json'),{...metadata,pid:process.pid,startedAt:new Date().toISOString()});}
+ catch(error){await rm(path,{recursive:true,force:true});throw error;}
  return ()=>rm(path,{recursive:true,force:true});
 }
 export function buildEnvironment(env=process.env){

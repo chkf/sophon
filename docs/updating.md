@@ -82,7 +82,7 @@ npm start
 
 启动和更新会自动检查并补齐 cloudflared，包括代码无变更的情况；已有显式路径、PATH 程序或已校验缓存会复用。组件失败不阻止业务代码更新。管理进程自动启用隧道，入口仍要求管理员登录；重载管理程序时临时网址可能变化，重新获取控制中心链接即可。详见 [控制中心](control-center.md)。
 
-突然断电可能留下 `host.lock`、`update.lock` 或 `cloudflared.lock`。先检查各目录 `owner.json` 的 PID，并确认管理进程、业务进程和更新任务全部停止，再删除残留锁。不要在运行时删除锁。待处理的 `request.json` 下次启动会继续处理；不需要的请求仅在停机时删除。保留 `activation.json` 以便恢复未完成的切换。
+突然断电可能留下 `host.lock`、`update.lock` 或 `cloudflared.lock`。`npm start` 会自动回收能确认原管理进程已退出、记录完整的 `host.lock`；仍有进程、记录不完整或离线更新留下的锁不会自动回收。其他残留锁仍需先检查各目录 `owner.json` 的 PID，并确认管理进程、业务进程和更新任务全部停止，再手动删除。不要在运行时删除锁。待处理的 `request.json` 下次启动会继续处理；不需要的请求仅在停机时删除。保留 `activation.json` 以便恢复未完成的切换。
 
 发布目录不自动清理。停机时可清理不被 `current.json`、`previous.json`、`activation.json` 引用的版本及残留 `staging-*`。预留依赖副本和测试所需空间，不要删除数据目录。
 
