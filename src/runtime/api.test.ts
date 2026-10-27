@@ -278,3 +278,12 @@ test('temporary API chat uses selected model and normal tools without a durable 
  const {readdir}=await import('node:fs/promises');
  assert.deepEqual(await readdir(join(root,'runtime','api-turns')).catch(()=>[]),[]);
 }));
+
+test('explicit local proactive approval enables background text without changing the environment default',()=>temp(async root=>{
+ const {runtime,sent}=fixture(root,[json('SILENT')],{heartbeat:false});
+ const background:ChatRequest={purpose:'heartbeat_decision',sessionId:'scheduled',text:'Check synthetic records'};
+ assert.equal((await runtime.reply(background)).skipped,'background_disabled');assert.equal(sent.length,0);
+ assert.equal((await runtime.reply({...background,proactiveAuthorized:true})).text,'SILENT');assert.equal(sent.length,1);
+ assert.equal((await runtime.reply(background)).skipped,'background_disabled');assert.equal(sent.length,1);
+ await runtime.close();
+}));

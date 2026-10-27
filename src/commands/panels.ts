@@ -14,7 +14,8 @@ export class CommandPanels {
     private readonly expressions:ExpressionStore,private readonly diagnostics:DiagnosticRegistry,
     private readonly logDir:string,private readonly timezone:string,private readonly credits:()=>Promise<string>,
     private readonly weixin?:{choose:()=>Promise<PanelView>;panel:()=>Promise<PanelView>},
-    private readonly voice?:{open:()=>Promise<PanelView>}) {}
+    private readonly voice?:{open:()=>Promise<PanelView>},
+    private readonly proactiveSettings?:{enabled:()=>Promise<boolean>;setEnabled:(enabled:boolean)=>Promise<void>}) {}
   async open(command:string,_message:InboundMessage):Promise<PanelView|undefined> {
     if(!["model","expression","proactive","test","logs"].includes(command))return undefined;
     if(command==="model")return this.model();
@@ -86,7 +87,11 @@ export class CommandPanels {
   }
   async proactive():Promise<PanelView> {
     const active=await this.channels.getActive();
-    return {text:"主动消息渠道\n只影响主动消息，你仍可使用任一已配置渠道聊天。",rows:(["telegram","wechat","off"] as const).map(c=>[button((c===active?"✓ ":"")+({telegram:"Telegram",wechat:"微信",off:"关闭"}[c]),async()=>{if(c==="wechat"&&this.weixin)return this.weixin.choose();await this.channels.setActive(c);return this.proactive();})]).concat(this.weixin?[[button("微信管理 / 重新绑定",()=>this.weixin!.panel())]]:[])};
+    const enabled=await this.proactiveSettings?.enabled();
+    const toggle=this.proactiveSettings ? [[button(enabled?"关闭主动模式":"开启主动模式（允许后台模型调用）",async()=>{
+      await this.proactiveSettings!.setEnabled(!enabled);return this.proactive();
+    })]] : [];
+    return {text:(enabled===undefined?"":"主动模式："+(enabled?"已开启":"已关闭")+"\n")+"主动消息渠道\n开启后允许当前 Provider 的后台文字调用，可能消耗额度；时间限制及工具授权仍有效。\n渠道为关闭时不会运行主动判断。普通聊天不受影响。",rows:toggle.concat((["telegram","wechat","off"] as const).map(c=>[button((c===active?"✓ ":"")+({telegram:"Telegram",wechat:"微信",off:"关闭"}[c]),async()=>{if(c==="wechat"&&this.weixin)return this.weixin.choose();await this.channels.setActive(c);return this.proactive();})]).concat(this.weixin?[[button("微信管理 / 重新绑定",()=>this.weixin!.panel())]]:[]))};
   }
   async expression():Promise<PanelView> {
     const state=await this.expressions.snapshot();

@@ -19,7 +19,7 @@ Self-hosted messaging gateway with local SQLite context, memory graph, durable d
 - 本地文件浏览、保存与发送、确认后修改或删除，以及独立的后台 Recent 整理。
 - [Sophon 控制中心](docs/control-center.md)：聊天历史与 Core/Recent 管理、上下文观察、主动任务调用轨迹和主机走势；与已有 slash 面板分工。`npm start` 自动生成临时手机访问网址，Telegram `/status` 获取入口（缺少 cloudflared 时自动下载并校验）。
 
-当前是单用户、单实例框架。API、数据库格式和配置仍可能演进。主动消息默认关闭；没有内置个人资料、私人业务工作流或固定角色设定。
+当前是单用户、单实例框架。API、数据库格式和配置仍可能演进。主动消息默认关闭，可在 `/proactive` 面板开启；没有内置个人资料、私人业务工作流或固定角色设定。
 
 ## 快速开始
 
@@ -81,7 +81,7 @@ npm start
 
 Core、描写和记忆如何配置，见 [存储与表达设置指南](docs/personalization.md)，包含 Telegram 面板步骤和可编辑的 [Core 示例](examples/core.example.md)。
 
-- **主动消息**：显式启用 `GATEWAY_HEARTBEAT_ENABLED=true` 后才运行。通用 API 还需设置 `GATEWAY_API_HEARTBEAT_ENABLED=true`，OpenRouter 则设置 `OPENROUTER_HEARTBEAT_ENABLED=true`；频率、静默时间和时区由环境变量控制。
+- **主动消息**：推荐在 `/proactive` 面板点击“开启主动模式”，无需修改配置或重启，选择会持久保存，并授权当前 Provider 的后台文字调用（可能消耗额度）。也可通过环境变量 `GATEWAY_HEARTBEAT_ENABLED=true` 设置初始状态；仅使用环境变量时，通用 API 还需设置 `GATEWAY_API_HEARTBEAT_ENABLED=true`，OpenRouter 则设置 `OPENROUTER_HEARTBEAT_ENABLED=true`；频率、静默时间和时区由环境变量控制。
 - **ChatGPT 登录**：可选，安装方式和非商业许可限制见 [SIWC 说明](docs/optional-siwc.md)。默认安装不下载该组件。
 - **语音**：安装可从命令行访问的 `ffmpeg` 与 `ffprobe`，配置自己的 `DASHSCOPE_API_KEY` 和匹配账号地域的 `GATEWAY_VOICE_BASE_URL`（HTTPS API Host，不含路径），再在 `/model` 面板进入语音设置。npm 不安装这些系统工具；不启用语音时照常使用文字。
 - **微信 iLink**：启用 `GATEWAY_ILINK_ENABLED=true`，通过 `/proactive` 绑定。在无系统凭据存储的主机上，先用 `npm run credentials:create -- ./secrets/chatgpt-credential.key` 生成密钥，再设置 `GATEWAY_CREDENTIAL_KEY_FILE=./secrets/chatgpt-credential.key`；此密钥不依赖 SIWC。

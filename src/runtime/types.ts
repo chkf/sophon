@@ -90,6 +90,8 @@ export type ChatRequest = ChatInput & {
   trace?: import("../observability/types.js").RuntimeTraceObserver;
   contextSources?: Array<Omit<import("../observability/types.js").ContextSource, "content">>;
   purpose: RequestPurpose;
+  /** Explicit operator approval from the local proactive panel; never a model argument. */
+  proactiveAuthorized?: boolean;
   memory?: MemoryRuntimeContext;
   memoryTask?: import("../memory/tasks.js").MemoryTask;
   deliveryId?: string;
