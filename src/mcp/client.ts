@@ -31,13 +31,17 @@ export interface McpToolSource {
  tools(message:InboundMessage):Promise<RuntimeTool[]>;
  execute(name:string,args:Record<string,unknown>,message:InboundMessage):Promise<unknown>;
 }
-/** Only explicitly configured tools reach formal owner chat; no background task or replay opt-in. */
+export interface ProactiveMcpSource {
+ proactiveTools():Promise<RuntimeTool[]>;
+ executeProactive(name:string,args:Record<string,unknown>):Promise<unknown>;
+}
+/** Chat authorization and background authorization are checked independently. */
 export class McpTools implements McpToolSource {
- private entries=new Map<string,{connection:ToolConnection;remote:string}>();
+ private entries=new Map<string,{connection:ToolConnection;remote:string;proactive:boolean}>();
  private catalog:RuntimeTool[]=[];
  private connections:ToolConnection[]=[];
  private loading?:Promise<void>;
- private loaded=false;
+ private attempted=new Set<string>();
  private closed=false;
  constructor(private readonly configs:McpServerConfig[],private readonly allowed:(message:InboundMessage)=>boolean,
   private readonly connect:(config:McpServerConfig)=>Promise<ToolConnection>=connectMcp){}
@@ -45,8 +49,10 @@ export class McpTools implements McpToolSource {
   for(const config of this.configs)for(const value of Object.values({...config.env,...config.headers}))if(value)text=text.split(value).join('[redacted]');
   return text;
  }
- private async load():Promise<void>{
+ private async load(background=false):Promise<void>{
   for(const config of this.configs){
+   if(this.attempted.has(config.id)||(background&&!config.proactiveTools?.length))continue;
+   this.attempted.add(config.id);
    let connection:ToolConnection|undefined;
    try{
     connection=await this.connect(config);
@@ -65,22 +71,39 @@ export class McpTools implements McpToolSource {
     }while(cursor);
     if(this.closed){await connection.close();return;}
     this.connections.push(connection);
-    for(const [name,remote] of routes)this.entries.set(name,{connection,remote});
+    for(const [name,remote] of routes)this.entries.set(name,{connection,remote,proactive:config.proactiveTools?.includes(remote)===true});
     this.catalog.push(...found);
    }catch{
     await connection?.close().catch(()=>{});
     console.error('[mcp] server='+config.id+' unavailable; check configuration and restart');
    }
   }
-  this.loaded=true;
+
+ }
+ private async ensureLoaded(background=false):Promise<void>{
+  // Serialize discovery while sharing connections between chat and scheduled decisions.
+  const pending=(this.loading??Promise.resolve()).then(()=>this.closed?undefined:this.load(background));
+  this.loading=pending;await pending;
+ }
+ async proactiveTools():Promise<RuntimeTool[]>{
+  if(this.closed||!this.configs.some(c=>c.proactiveTools?.length))return [];
+  await this.ensureLoaded(true);
+  return structuredClone(this.catalog.filter(t=>this.entries.get(t.name)?.proactive));
+ }
+ async executeProactive(name:string,args:Record<string,unknown>):Promise<unknown>{
+  if(this.closed||!this.entries.get(name)?.proactive)throw Error('MCP_TOOL_UNAVAILABLE');
+  return this.call(name,args);
  }
  async tools(message:InboundMessage):Promise<RuntimeTool[]>{
   if(this.closed||!this.allowed(message))return [];
-  if(!this.loaded){this.loading??=this.load();await this.loading;}
+  await this.ensureLoaded();
   return this.closed?[]:structuredClone(this.catalog);
  }
  async execute(name:string,args:Record<string,unknown>,message:InboundMessage):Promise<unknown>{
   if(this.closed||!this.allowed(message)||!this.entries.has(name))throw Error('MCP_TOOL_UNAVAILABLE');
+  return this.call(name,args);
+ }
+ private async call(name:string,args:Record<string,unknown>):Promise<unknown>{
   if(JSON.stringify(args).length>64_000)throw Error('MCP_ARGUMENT_LIMIT');
   const entry=this.entries.get(name)!;
   try{

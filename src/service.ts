@@ -273,6 +273,7 @@ export class GatewayService {
         async () => { const settings=await this.voice.settings.get();return this.voice.configured()&&settings.tts&&settings.proactive; },
         this.taskTraces,
         memory ? () => ({...memory.context(), refresh: () => memory.context()}) : undefined,
+        this.mcp,
       );
     }
   }
