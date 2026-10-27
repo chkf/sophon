@@ -1,3 +1,4 @@
+import { ProactiveSettings } from "./heartbeat/settings.js";
 import { McpTools } from "./mcp/client.js";
 import { readMcpConfig } from "./mcp/config.js";
 import { requestHostUpdate } from "./commands/update.js";
@@ -113,6 +114,7 @@ export class GatewayService {
   ) {
     validateServeConfig(config);
     const mcpServers=readMcpConfig(config.mcpConfigFile);
+    const proactiveSettings=new ProactiveSettings(config.dataDir,config.heartbeat.enabled);
 
     const media = new MediaStore(join(config.dataDir, "media"));
     this.sessions = new SessionStore(config.dataDir);
@@ -197,6 +199,7 @@ export class GatewayService {
       config.dataDir,
       { telegram: this.telegram, wechat: this.ilink },
       defaultChannel,
+      () => proactiveSettings.enabled(),
     );
     const logDir = config.logDir ?? join(config.dataDir, "logs");
     if (config.control) {
@@ -219,7 +222,7 @@ export class GatewayService {
           const now = new Date();
           const state = await readJsonFile<HeartbeatState>(join(config.dataDir, "heartbeat", "state.json"),
             { dateKey: dateKey(now, config.heartbeat.timezone), sentToday: 0, recent: [] });
-          return { enabled: config.heartbeat.enabled, timezone: config.heartbeat.timezone,
+          return { enabled: await proactiveSettings.enabled(), timezone: config.heartbeat.timezone,
             plan: state.plan ?? null, nextCheckAt: state.nextCheckAt ?? null,
             attemptsToday: state.dateKey === dateKey(now, config.heartbeat.timezone) ? state.sentToday : 0,
             activeChannel: await this.activeChannels.getActive() };
@@ -251,28 +254,30 @@ export class GatewayService {
         const policy=heartbeatEligible(now,config.heartbeat,state,await this.sessions.latestActivityAt());
         const minutes=localMinutes(now,config.heartbeat.timezone);
         const next=state.plan?.date===dateKey(now,config.heartbeat.timezone)?state.plan.wakes.find(w=>!w.consumed && Number(w.time.slice(0,2))*60+Number(w.time.slice(3))>=minutes)?.time:undefined;
-        return "主动消息："+(!config.heartbeat.enabled?"未启用":active)+"\n当天尝试："+(state.dateKey===dateKey(now,config.heartbeat.timezone)?state.sentToday:0)+
-          "\n下一计划唤醒："+(next??state.nextCheckAt??"尚无计划")+"\n当前条件："+(!config.heartbeat.enabled?"未启用":active==="off"?"渠道关闭":policy.reason??"满足基础条件，到点后仍可选择静默")+"\n时区："+config.heartbeat.timezone;
+        return "主动消息："+(!await proactiveSettings.enabled()?"未启用":active)+"\n当天尝试："+(state.dateKey===dateKey(now,config.heartbeat.timezone)?state.sentToday:0)+
+          "\n下一计划唤醒："+(next??state.nextCheckAt??"尚无计划")+"\n当前条件："+(!await proactiveSettings.enabled()?"未启用":active==="off"?"渠道关闭":policy.reason??"满足基础条件，到点后仍可选择静默")+"\n时区："+config.heartbeat.timezone;
       },
     }));
     this.panels=new CommandPanels(runtime,this.activeChannels,this.expressions,this.diagnostics,logDir,
-      config.heartbeat.timezone,()=>creditSummary(config.openrouter?.apiKey,process.env.GATEWAY_OPENROUTER_MANAGEMENT_KEY),this.ilink,new VoicePanel(this.voice,()=>this.telegram?.previewVoice()??Promise.resolve(false)));
+      config.heartbeat.timezone,()=>creditSummary(config.openrouter?.apiKey,process.env.GATEWAY_OPENROUTER_MANAGEMENT_KEY),this.ilink,new VoicePanel(this.voice,()=>this.telegram?.previewVoice()??Promise.resolve(false)),proactiveSettings);
 
-    if (config.heartbeat.enabled) {
+    {
       this.heartbeat = new HeartbeatRunner(
         config.dataDir,
-        config.heartbeat,
+        {...config.heartbeat,enabled:true},
         runtime,
         this.sessions,
         this.gatewayContext,
         this.activeChannels,
         this.expressions,
-        undefined,
+        async () => !await proactiveSettings.enabled(),
         this.localKnowledge,
         this.conversationQueue,
         async () => { const settings=await this.voice.settings.get();return this.voice.configured()&&settings.tts&&settings.proactive; },
         this.taskTraces,
         memory ? () => ({...memory.context(), refresh: () => memory.context()}) : undefined,
+        this.mcp,
+        () => proactiveSettings.explicitlyEnabled(),
       );
     }
   }

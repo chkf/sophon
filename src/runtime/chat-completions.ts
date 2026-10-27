@@ -227,7 +227,9 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
       request.imageOutputAllowed === true && await this.canGenerateImage(true);
     // Recent maintenance is bundled independently of proactive messages.
     // Other background calls retain the text/image spending gates.
-    if (isBackground(request) && request.purpose !== "recent_review" && !this.config.heartbeat && !imageHeartbeat) {
+    const proactiveAuthorized = request.proactiveAuthorized === true &&
+      (request.purpose === "heartbeat_plan" || request.purpose === "heartbeat_decision");
+    if (isBackground(request) && request.purpose !== "recent_review" && !this.config.heartbeat && !imageHeartbeat && !proactiveAuthorized) {
       return { text: "SILENT", skipped: "background_disabled" };
     }
     const autonomousImage = request.allowImageGeneration !== true && request.imageOutputAllowed === true &&

@@ -2,7 +2,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 export interface McpServerConfig {
  id:string; transport:'stdio'|'http'; command?:string; args?:string[]; cwd?:string;
- url?:string; env?:Record<string,string>; headers?:Record<string,string>; tools:string[]; timeoutMs:number;
+ url?:string; env?:Record<string,string>; headers?:Record<string,string>; tools:string[]; proactiveTools?:string[]; timeoutMs:number;
 }
 const object=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
 const bad=()=>{throw Error('MCP 配置无效：请检查 docs/mcp.md；不输出配置正文。');};
@@ -15,11 +15,12 @@ export function readMcpConfig(path?:string,env:NodeJS.ProcessEnv=process.env):Mc
   if(!object(root)||Object.keys(root).some(k=>k!=='servers')||!Array.isArray(root.servers)||root.servers.length>8)return bad();
   const ids=new Set<string>();
   return root.servers.map(raw=>{
-   if(!object(raw)||Object.keys(raw).some(k=>!['id','transport','command','args','cwd','url','env','headers','tools','timeoutMs'].includes(k)))return bad();
+   if(!object(raw)||Object.keys(raw).some(k=>!['id','transport','command','args','cwd','url','env','headers','tools','proactiveTools','timeoutMs'].includes(k)))return bad();
    const {id,transport}=raw;
    if(typeof id!=='string'||! /^[a-z][a-z0-9_]{0,19}$/.test(id)||ids.has(id))return bad();ids.add(id);
    if(transport!=='stdio'&&transport!=='http')return bad();
    if(!Array.isArray(raw.tools)||!raw.tools.length||raw.tools.length>32||raw.tools.some(t=>typeof t!=='string'||!t.trim()||t.length>128)||new Set(raw.tools).size!==raw.tools.length)return bad();
+   if(raw.proactiveTools!==undefined&&(!Array.isArray(raw.proactiveTools)||raw.proactiveTools.some(t=>typeof t!=='string'||!(raw.tools as string[]).includes(t))||new Set(raw.proactiveTools).size!==raw.proactiveTools.length))return bad();
    const timeoutMs=raw.timeoutMs??30_000;
    if(!Number.isInteger(timeoutMs)||Number(timeoutMs)<1000||Number(timeoutMs)>120_000)return bad();
    const refs=(value:unknown,headers=false):Record<string,string>=>{
@@ -32,7 +33,7 @@ export function readMcpConfig(path?:string,env:NodeJS.ProcessEnv=process.env):Mc
      return [key,value];
     });return Object.fromEntries(entries);
    };
-   const base={id,transport,tools:raw.tools as string[],timeoutMs:Number(timeoutMs)};
+   const base={id,transport,tools:raw.tools as string[],proactiveTools:(raw.proactiveTools??[]) as string[],timeoutMs:Number(timeoutMs)};
    if(transport==='http'){
     if(typeof raw.url!=='string'||raw.command!==undefined||raw.args!==undefined||raw.cwd!==undefined||raw.env!==undefined)return bad();
     const url=new URL(raw.url);

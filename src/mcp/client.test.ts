@@ -85,3 +85,28 @@ test('HTTP protocol passes configured authentication and never follows redirects
   await assert.rejects(connectMcp({...config,url:url+'/redirect'}),/MCP_CONNECT_FAILED/);assert.equal(calls,1);
  }finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
+
+test('background allowlist is opt-in, validated, and cannot grant tools outside chat scope',()=>directory(async root=>{
+ const path=join(root,'mcp.json');
+ for(const proactiveTools of [['missing'],['lookup','lookup'],'lookup']){
+  await writeFile(path,JSON.stringify({servers:[{id:'sample',transport:'http',url:'https://mcp.example/mcp',tools:['lookup'],proactiveTools}]}));
+  assert.throws(()=>readMcpConfig(path));
+ }
+ await writeFile(path,JSON.stringify({servers:[{id:'sample',transport:'http',url:'https://mcp.example/mcp',tools:['lookup'],proactiveTools:['lookup']}]}));
+ assert.deepEqual(readMcpConfig(path)[0]!.proactiveTools,['lookup']);
+}));
+
+test('background discovery skips unapproved services and shares connections without granting chat-only tools',async()=>{
+ let connects=0,calls=0;
+ const source=new McpTools([{...config,id:'chat_only'},{...config,id:'background',tools:['lookup','write'],proactiveTools:['lookup']}],()=>true,async()=>{
+  connects++;return {listTools:async()=>({tools:[tool,{...tool,name:'write'}]}),callTool:async()=>{calls++;throw Error('synthetic failure');},close:async()=>{}};
+ });
+ const background=await source.proactiveTools();assert.equal(connects,1);assert.equal(background.length,1);
+ const chat=await source.tools(message);assert.equal(connects,2);assert.equal(chat.length,3);
+ const forbidden=chat.filter(t=>t.name!==background[0]!.name);
+ for(const t of forbidden)await assert.rejects(source.executeProactive(t.name,{}));
+ assert.equal(calls,0);
+ assert.match(JSON.stringify(await source.executeProactive(background[0]!.name,{})),/outcome unknown/);
+ await assert.rejects(source.executeProactive(background[0]!.name,{}));assert.equal(calls,1);
+ assert.deepEqual(await source.proactiveTools(),[]);assert.equal(connects,2);await source.close();
+});

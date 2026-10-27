@@ -21,6 +21,7 @@ export class ActiveChannelRouter {
     dataDir: string,
     private readonly senders: Partial<Record<ChannelName, ProactiveSender>>,
     private readonly defaultChannel: ActiveProactiveChannel,
+    private readonly enabled: () => Promise<boolean> = async () => true,
   ) {
     this.statePath = join(dataDir, "channels", "active.json");
   }
@@ -44,10 +45,11 @@ export class ActiveChannelRouter {
   }
 
   async isActive(channel: ChannelName): Promise<boolean> {
-    return (await this.getActive()) === channel;
+    return await this.enabled() && (await this.getActive()) === channel;
   }
 
   async resolve(): Promise<ProactiveRoute | undefined> {
+    if (!await this.enabled()) return undefined;
     const channel = await this.getActive();
     if (channel === "off") return undefined;
     const sender = this.senders[channel];
