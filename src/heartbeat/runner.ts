@@ -1,3 +1,4 @@
+import { CHAT_BUBBLE_GUIDANCE } from "../runtime/chat-format.js";
 import { displayText, replyText, visibleSegments } from "../runtime/reply-segments.js";
 import type { PlatformMessageFragment } from "../channels/types.js";
 import { VoiceTurn, voiceTool, VOICE_TOOL, VoiceSupplementError } from "../voice/tool.js";
@@ -444,7 +445,8 @@ export class HeartbeatRunner {
       "把最近聊天里的明确作息、疲劳、准备睡觉、刚醒等状态与真实时间间隔一起考虑。若用户刚表示要睡、刚结束熬夜或明显很累，短时间内应优先保持安静，不要因为固定 quiet hours 已结束就机械发消息。",
       "结合可靠 Recent、近期聊天和用户明确表达的偏好判断是否打扰；无记录不能证明用户空闲。",
       "在用户已启用主动消息的前提下，可以延续已有话题或进行普通闲聊，不要求每次都附带任务或事件。",
-      "按完整意思自然分段，不刻意拆碎；避免重复询问用户状态或发送无意义的连续消息。",
+      CHAT_BUBBLE_GUIDANCE,
+      "避免重复询问用户状态或发送无意义的连续消息。",
       "可以自然选择发送文字、语音或图片，也可以保持安静。SILENT 时不生成角色描写或调用发送工具。",
       (this.router.availableStickers?.(route.channel) ?? 0) > 0
         ? "若自然适合添加一张 Telegram 贴纸，可在消息最后另起一行写 [STICKER:N]，N 为 1 至 " +

@@ -25,7 +25,7 @@ export class VoiceTurn {
   // Legacy getters are retained only for older provider consumers.
   get text(): string | undefined { return this.parts.find(part => part.kind === "voice")?.text; }
   get instruction(): string | undefined { return this.parts.find(part => part.kind === "voice")?.instruction; }
-  readonly guidance="根据内容和情绪自然选择文字或语音，可以分成多个气泡，不限制语音段数。角色描写遵循 Core 和独立描写开关的设置；如需描写，使用简短、中性的心理或动作描写。instruction 利用对应描写指导表达，语音只朗读正文。普通文字与 send_voice 按输出顺序交付。不要重复输出已登记的台词。工具成功仅代表登记，实际发送和失败回退由 Gateway 完成。";
+  readonly guidance="根据内容和情绪自然选择文字或语音，按完整意思组织台词；同一句或简短确认尽量在一次输出中完成，不把时间、数字和说明拆成多个气泡。内容较长或话题转换时可自然分段，不限制合理的语音段数。角色描写遵循 Core 和独立描写开关的设置；如需描写，使用简短、中性的心理或动作描写。instruction 利用对应描写指导表达，语音只朗读正文。普通文字与 send_voice 按输出顺序交付。不要重复输出已登记的台词。工具成功仅代表登记，实际发送和失败回退由 Gateway 完成。";
   recordText(text: string, id: string): void {
     if (this.recorded.has(id)) return;
     this.recorded.add(id);
