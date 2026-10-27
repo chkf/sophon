@@ -89,7 +89,7 @@ test("expired panels delete silently; stale render clicks and strangers cannot d
 
 test("panel deadlines refresh once, survive restart, and remove in-memory actions",()=>temp(async dir=>{
   const calls:any[]=[];
-  const api:any={call:async(method:string,body:any)=>{calls.push({method,body});return {message_id:99};}};
+  const api:any={call:async(method:string,body:any)=>{calls.push({method,body});return method==="deleteMessage"?true:{message_id:99};}};
   const config={token:"test",ownerId:"1",dataDir:dir,mediaStore:{} as any,api};
   const first:any=new TelegramAdapter(config);
   await first.panels.open("1",{text:"panel",rows:[]});
@@ -167,7 +167,7 @@ test("generic API panels confirm paid selections and never query OpenRouter feat
 
 test("retry response expires and persisted pause notices clear on resume",()=>temp(async dir=>{
   let id=100;const calls:any[]=[];
-  const api:any={call:async(method:string,body:any)=>{calls.push({method,body});return {message_id:++id};}};
+  const api:any={call:async(method:string,body:any)=>{calls.push({method,body});return method==="deleteMessage"?true:{message_id:++id};}};
   const adapter:any=new TelegramAdapter({token:"test",ownerId:"1",dataDir:dir,mediaStore:{} as any,api,commandReplyAutoDeleteMs:10});
   adapter.handler=async()=>undefined;
   adapter.state.inFlight={chatId:"1",senderId:"1",lastReceivedAtMs:1,parts:[],retryPaused:true};
