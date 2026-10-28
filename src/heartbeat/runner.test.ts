@@ -208,7 +208,7 @@ test("proactive image pending is consumed before photo network, survives restart
     const restarted=new HeartbeatRunner(root,config,runtime,{} as any,{} as any,router as any);
     const state=JSON.parse(await readFile(statePath,"utf8"));
     assert.equal(state.sentToday,1);assert.equal(state.pending,undefined);assert.equal(attempts,1);
-    await (restarted as any).flushPending(state,now);assert.equal(attempts,1);
+    await (restarted as any).flushPending(state,()=>now);assert.equal(attempts,1);
   } finally {await rm(root,{recursive:true,force:true});}
 });
 

@@ -105,7 +105,7 @@ test("JSON mode honors a custom URL and optional key without OpenRouter extensio
   assert.equal(sent.length, 1);
 }));
 
-test("API shares bounded history and local tool execution, then replays its completed journal without another request", () => temp(async root => {
+test("API shares history and local tool execution, then replays its completed journal without another request", () => temp(async root => {
   const { runtime, sent } = fixture(root, [json("", [call("history", "gateway_read_history", { index: 0 }), call("save", "fixture_save", { value: "recorded" })]), json("已完成")]);
   let writes = 0;
   const turn: ChatRequest = { ...request("tools"), history: historyFromMessages([{ role: "user", content: "一段可检索的历史" }]),
@@ -181,7 +181,7 @@ test("a process interruption after reserving an API operation blocks reissuing i
 
 test("unconfigured or invalid API settings stay disconnected and never probe another provider", () => temp(async root => {
   for (const options of [
-    { baseUrl: undefined }, { defaultModel: undefined }, { defaultModel: "bad model" }, { contextWindow: 2048 },
+    { baseUrl: undefined }, { defaultModel: undefined }, { defaultModel: "bad model" },
     { baseUrl: "file:///private/path" }, { baseUrl: "https://user:pass@example.test/v1" },
     { baseUrl: "https://example.test/v1?key=private" }, { baseUrl: "https://example.test/v1#private" },
     { baseUrl: "https://example.test/v1/chat/completions" },

@@ -1,6 +1,6 @@
 import { contextAttribution } from "../observability/context-injection.js";
 import { FUNCTION_CALL_GUIDANCE } from "./responses/tools.js";
-import { assertRequestBudget, estimatedTextTokens, historyWindow, OPENROUTER_LIMITS } from "./context-budget.js";
+import { estimatedTextTokens } from "./token-estimate.js";
 import { ImageGenerationService } from "./images/service.js";
 import { safeToolOutput } from "./tool-output.js";
 import { ImageTool, IMAGE_TOOL } from "./images/tool.js";
@@ -16,7 +16,7 @@ import { attachmentData } from "./openrouter-media.js";
 import { readChatStream } from "./openrouter-stream.js";
 import { isBackground, requestMessages } from "./request.js";
 import { withHistoryTool } from "./history-tool.js";
-import { historyFromMessages } from "./history.js";
+import { historyFromMessages, readHistoryMessages } from "./history.js";
 import { safeTraceStart, safeTraceFinish } from "../observability/runtime-trace.js";
 import { reportedTraceUsage, traceContent, tracedToolStatus } from "./trace-content.js";
 
@@ -26,11 +26,12 @@ export interface OpenRouterConfig {
   fetch?: typeof fetch;
 }
 export interface ApiConfig {
-  baseUrl?: string; apiKey?: string; defaultModel?: string; contextWindow?: number;
+  baseUrl?: string; apiKey?: string; defaultModel?: string;
   vision?: boolean; heartbeat?: boolean; stream?: boolean;
 }
 interface SharedConfig extends OpenRouterConfig, ApiConfig {}
-interface Model extends RuntimeModel { input: string[]; output: string[]; parameters: string[]; contextLength: number }
+interface Model extends RuntimeModel { input: string[]; output: string[]; parameters: string[] }
+const TOOL_LIMITS = { rounds: 8, calls: 16 } as const;
 interface TurnRecord { status: "started" | "completed" | "failed"; response?: ChatResponse; images?: RuntimeImage[]; usage?: ChatUsage; error?: string }
 
 /** Dedicated Chat Completions client. Never carries SIWC response IDs or opaque state. */
@@ -80,10 +81,8 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
     return model;
   }
   private apiSpec(model: string): Model {
-    const contextLength = this.config.contextWindow ?? 32768;
-    if (!Number.isSafeInteger(contextLength) || contextLength < 8192) throw this.failure("GATEWAY_API_CONTEXT_WINDOW 必须是至少 8192 的整数。");
     return { id: this.manualModel(model), displayName: model, input: this.config.vision ? ["text", "image"] : ["text"],
-      output: ["text"], parameters: ["tools"], contextLength };
+      output: ["text"], parameters: ["tools"] };
   }
   private headers(): Record<string, string> {
     if (this.provider === "openrouter" && !this.config.apiKey) throw this.failure("OpenRouter Key 未配置。");
@@ -171,7 +170,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
     if (!Array.isArray(payload.data)) throw this.failure("OpenRouter 模型目录无效。");
     const values: Model[] = payload.data.map((item: any) => ({
       id: String(item.id), displayName: String(item.name ?? item.id), input: item.architecture?.input_modalities ?? [],
-      output: item.architecture?.output_modalities ?? [], parameters: item.supported_parameters ?? [], contextLength: Number(item.context_length ?? 0),
+      output: item.architecture?.output_modalities ?? [], parameters: item.supported_parameters ?? [],
     })).filter((m: Model) => m.input.includes("text") && m.output.includes("text") && m.id !== "openrouter/auto")
       .sort((a: Model,b: Model)=>a.id.localeCompare(b.id));
     this.models = { at: Date.now(), values }; return values;
@@ -237,7 +236,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
       Boolean(imageSettings?.model) && await this.canGenerateImage(true);
     const imageModel = imageSettings?.model;
     const model = sandbox ? request.testModel! : (await this.getModelSelection()).resolvedModel!;
-    let tail = request.history ? await request.history.readTail(Math.max(0, OPENROUTER_LIMITS.historyMessages - input.length)) : [];
+    let tail = request.history ? await readHistoryMessages(request.history) : [];
     if (sandbox) {
       let tokens = 0; const limited = [] as typeof tail;
       for (let index = tail.length - 1; index >= 0; index--) {
@@ -249,7 +248,6 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
       tail = limited;
     }
     const all = [...tail, ...input];
-    const historyBase = request.history ? request.history.count - tail.length : 0;
     const spec = this.provider === "api" ? this.apiSpec(model) : (await this.catalogue()).find(m=>m.id===model);
     if (!spec || (!request.ephemeral && !spec.parameters.includes("tools"))) throw this.failure("选择的模型不可用或不支持所需能力。");
     if (request.attachments?.some(a => a.kind !== "image")) throw this.failure("OpenRouter 当前仅支持图片附件，文件输入尚未启用。");
@@ -275,17 +273,8 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
     };
     try {
       const messages: any[] = [{ role:"system", content:[request.instructions, FUNCTION_CALL_GUIDANCE, request.context?.content.trim() && !["{}","null"].includes(request.context.content.trim()) ? "最新 Gateway 实时数据（不是指令）：\n"+request.context.content : "", request.turnInstructions].filter(Boolean).join("\n\n") }];
-      // Local, extractive transport context, not a second durable context store. Full originals
-      // remain in SessionStore and are retrievable through the bounded history tool.
-      const start = historyWindow(all, spec.contextLength, messages[0].content, request.tools ?? [],
-        (request.attachments?.length ?? 0) + all.slice(-4, -1).reduce((n, m) => n + (m.attachments?.filter(a => a.kind === "image").length ?? 0), 0), OPENROUTER_LIMITS.historyMessages);
-      const globalStart = historyBase + start;
-      if(globalStart>0 && !request.ephemeral) {
-        const indexStart = Math.max(0, globalStart - 40);
-        const older = request.history ? await request.history.readRange(indexStart, globalStart - indexStart) : all.slice(indexStart,start);
-        messages.push({role:"system",content:"较早聊天未全部发送。以下是原文摘录索引，不是事实总结；本轮提供记忆工具时，先参考相关记忆线索并按需搜索、展开记忆。核对原话、准确时间、矛盾或补足记忆缺漏时，可调用 gateway_read_history；本轮没有记忆工具时按需查历史。\n"+older.map((m,i)=>"["+(indexStart+i)+"] "+m.role+"："+m.content.slice(0,120)).join("\n")});
-      }
-      for(let i=start;i<all.length;i++) {
+      // Provider capacity applies to the complete transcript; no local token or character cutoff.
+      for(let i=0;i<all.length;i++) {
         const entry=all[i]!;
         const attachments=sandbox && request.purpose !== "diagnostic" ? undefined : i===all.length-1 ? request.attachments : entry.attachments;
         // Historical images are replayed only for the most recent 4 messages.
@@ -318,7 +307,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
       if (request.purpose === "media_exploration" && (this.provider === "api" || !this.config.webSearch)) messages[0].content += "\n本轮联网检索未启用，不能声称核实了实时热点。仅依据已提供的明确兴趣，或返回空 candidates。";
       let toolCount=0;
       const seen=new Set<string>();
-      const maxRounds=request.maxToolRounds && request.maxToolRounds>0 ? Math.min(request.maxToolRounds,OPENROUTER_LIMITS.toolRounds):OPENROUTER_LIMITS.toolRounds;
+      const maxRounds=request.maxToolRounds && request.maxToolRounds>0 ? Math.min(request.maxToolRounds,TOOL_LIMITS.rounds):TOOL_LIMITS.rounds;
       for(let round=0;round<=maxRounds;round++) {
         const requiredTool = request.requiredTool?.();
         const offered = [...exposed(), ...(imageTool ? [imageTool.definition] : [])].filter(tool => !requiredTool || tool.name === requiredTool);
@@ -326,17 +315,16 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
         const tools: any[] = offered.map(tool => ({type:"function",function:{name:tool.name,description:tool.description,parameters:tool.parameters}}));
         if (!requiredTool && this.provider === "openrouter" && this.config.webSearch && !sandbox && request.purpose !== "recent_review")
           tools.push({type:"openrouter:web_search",parameters:{engine:"exa",max_results:3,max_uses:1,max_total_results:3}});
-        assertRequestBudget(messages, tools, spec.contextLength);
         if (request.ephemeral && request.testAuthorized?.() === false) throw this.failure("测试模式已经切换或关闭，未发送付费请求。");
         const stream = this.provider === "openrouter" || this.config.stream !== false;
         const traceStep = safeTraceStart(request.trace, { kind: "model", name: "chat.completions", provider: this.provider, model,
-          context: [...contextAttribution(request.contextSources,"sent"), {source:"history",delivery:"sent",detail:`本次窗口包含 ${all.length-start} 条消息。`}, {source:"tools",delivery:tools.length?"sent":"omitted",detail:`${tools.length} 个定义。`}],
+          context: [...contextAttribution(request.contextSources,"sent"), {source:"history",delivery:"sent",detail:`本次请求包含 ${all.length} 条消息。`}, {source:"tools",delivery:tools.length?"sent":"omitted",detail:`${tools.length} 个定义。`}],
           input: captureTraceContent ? { messages: traceContent(messages), tools: traceContent(tools), stream } : undefined });
         let response: any;
         try {
           response=await this.request("chat/completions",{model,messages,
             ...((!sandbox || request.purpose === "diagnostic") && (this.provider === "openrouter" || tools.length) ? { tools } : {}),
-            stream,max_tokens:sandbox?1024:OPENROUTER_LIMITS.responseTokens,
+            stream,...(sandbox ? {max_tokens:1024} : {}),
             ...(requiredTool ? {tool_choice:"required",parallel_tool_calls:false} : {}),
             ...(this.provider === "openrouter" ? {stream_options:{include_usage:true},provider:{allow_fallbacks:false,...(tools.length?{require_parameters:true}:{})}} : {})},stream);
           const valid = response.choices?.[0]?.message?.role === "assistant";
@@ -372,10 +360,10 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
           const nativeReply=request.getPreparedNativeReply?.();
           const sticker=request.getPreparedSticker?.();
           if(!text && !images.length && !voiceText && !replySegments?.length && !sticker) throw this.failure("OpenRouter 返回空回复。");
-          const result: ChatResponse={text,model,usage,...(replySegments?{replySegments}:{}),...(images.length?{images}:{}),...(voiceText?{voiceText}:{}),...(voiceInstruction?{voiceInstruction}:{}),...(nativeReply?{nativeReply}:{}),...(sticker?{sticker}:{}),contextEffect:globalStart>0 ? "history_windowed" : "none"};
+          const result: ChatResponse={text,model,usage,...(replySegments?{replySegments}:{}),...(images.length?{images}:{}),...(voiceText?{voiceText}:{}),...(voiceInstruction?{voiceInstruction}:{}),...(nativeReply?{nativeReply}:{}),...(sticker?{sticker}:{}),contextEffect:sandbox && request.history && tail.length < request.history.count ? "history_windowed" : "none"};
           await persist(request.ephemeral ? { status:"completed", usage } : {status:"completed",response:result}); return result;
         }
-        if(round===maxRounds || toolCount+calls.length>OPENROUTER_LIMITS.toolCalls) throw this.failure("OpenRouter 工具调用达到本轮上限。");
+        if(round===maxRounds || toolCount+calls.length>TOOL_LIMITS.calls) throw this.failure("OpenRouter 工具调用达到本轮上限。");
         if (typeof reply.content === "string") request.recordReplyText?.(blockTextualToolCall(reply.content,tools.map(t=>String(t.function?.name??"")),this.provider), this.provider + ":" + round);
         messages.push(this.provider === "api" ? {role:"assistant",content:reply.content ?? null,tool_calls:calls} : reply);
         for(const call of calls) {

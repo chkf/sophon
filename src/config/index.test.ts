@@ -64,7 +64,7 @@ test("generic API is the default and has no vendor endpoint or credentials", () 
   assert.equal(config.provider, "api");
   assert.deepEqual(config.api, {
     baseUrl: undefined, apiKey: undefined, defaultModel: undefined,
-    contextWindow: 32768, vision: false, heartbeat: false, stream: true,
+    vision: false, heartbeat: false, stream: true,
   });
   process.env.GATEWAY_API_BASE_URL = "http://127.0.0.1:8080/v1/";
   process.env.GATEWAY_API_MODEL = "local-tool-model";
@@ -75,7 +75,7 @@ test("generic API is the default and has no vendor endpoint or credentials", () 
   assert.equal(local.defaultModel, "local-tool-model");
   assert.equal(local.apiKey, undefined);
   assert.equal(local.stream, false);
-  assert.equal(local.contextWindow, 16384);
+  assert.equal(Object.hasOwn(local, "contextWindow"), false);
   process.env.GATEWAY_LOG_DIR = "./custom-logs";
   const standalone = loadConfig();
   assert.ok(standalone.logDir?.endsWith("custom-logs"));
@@ -87,15 +87,19 @@ test("API configuration rejects unsafe URL fields without disclosing their value
     assert.throws(loadConfig, error => error instanceof Error && /GATEWAY_API_BASE_URL/.test(error.message) && !error.message.includes("private-value"));
   }
   process.env.GATEWAY_API_BASE_URL = "https://api.example/custom/v1";
-  process.env.GATEWAY_API_CONTEXT_WINDOW = "4096";
-  assert.throws(loadConfig, /GATEWAY_API_CONTEXT_WINDOW/);
-  delete process.env.GATEWAY_API_CONTEXT_WINDOW;
   for (const provider of ["api", "openrouter", "siwc"]) {
     process.env.GATEWAY_PROVIDER = provider;
     assert.equal(loadConfig().provider, provider);
   }
   process.env.GATEWAY_PROVIDER = "unknown";
   assert.throws(loadConfig, /must be api, siwc or openrouter/);
+}));
+
+test("retired context budget settings do not constrain or block legacy installations", () => isolatedConfig(() => {
+  for (const value of ["32768", "4096", "invalid-legacy-value"]) {
+    process.env.GATEWAY_API_CONTEXT_WINDOW = value;
+    assert.equal(Object.hasOwn(loadConfig().api!, "contextWindow"), false);
+  }
 }));
 
 test("retired Official Account settings fail clearly; owner-managed iLink is the WeChat route", () => isolatedConfig(() => {
