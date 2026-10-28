@@ -1,3 +1,4 @@
+import { selectTestTurn } from "../testing/turn-decision.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -28,14 +29,14 @@ test("local Core exposes Recent tools and persists idempotent updates", async ()
   const fixture = setup();
   try {
     let request: any;
-    const runtime = { async reply(value: any) { request = value; return { text: "已经了解" }; } };
+    const runtime = { async reply(value: any) { request = value; await selectTestTurn(value, {groups:["recent_manage"]}); return { text: "已经了解" }; } };
     const gateway = new Gateway(runtime as any, fixture.sessions, fixture.context as any,
       2, "Asia/Shanghai", undefined, undefined, fixture.knowledge);
     const outcome = await gateway.handle(message);
     assert.equal(outcome.kind, "model_reply");
     assert.match(request.instructions, /测试本地 Core/);
     assert.match(request.instructions, /可靠事实管理记忆/);
-    assert.deepEqual(request.tools.map((tool: any) => tool.name),
+    assert.deepEqual(request.tools.filter((tool: any) => tool.name.startsWith('gateway_recent_')).map((tool: any) => tool.name),
       ["gateway_recent_read", "gateway_recent_create",
         "gateway_recent_write"]);
     const recent = await request.executeTool("gateway_recent_read", { query: "晚上" });
@@ -53,11 +54,11 @@ test("local conversation rejects unadvertised tools without changing stored memo
   const fixture = setup();
   try {
     let request: any;
-    const runtime = { async reply(value: any) { request = value; return { text: "本地信息仍可用" }; } };
+    const runtime = { async reply(value: any) { request = value; await selectTestTurn(value, {groups:["recent_manage"]}); return { text: "本地信息仍可用" }; } };
     const gateway = new Gateway(runtime as any, fixture.sessions, fixture.context as any,
       2, "Asia/Shanghai", undefined, undefined, fixture.knowledge);
     assert.equal((await gateway.handle(message)).kind, "model_reply");
-    assert.deepEqual(request.tools.map((tool: any) => tool.name),
+    assert.deepEqual(request.tools.filter((tool: any) => tool.name.startsWith('gateway_recent_')).map((tool: any) => tool.name),
       ["gateway_recent_read", "gateway_recent_create", "gateway_recent_write"]);
     assert.equal((await request.executeTool("gateway_recent_read", { query: "晚上" })).total, 1);
     const before = fixture.knowledge.listRecent();

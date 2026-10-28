@@ -57,5 +57,5 @@ export interface TaskTraceSummary {
 }
 export interface TaskTraceRun extends TaskTraceSummary { steps: TaskTraceStep[] }
 
-export interface ContextSource { id:string; label:string; placement:"policy"|"turn"; content:string }
+export interface ContextSource { id:string; label:string; placement:"policy"|"turn"|"recovery"; content:string }
 export interface ContextInjection { source:string; delivery:"sent"|"inherited"|"replayed"|"omitted"; detail?:string }

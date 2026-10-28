@@ -1,3 +1,4 @@
+import { selectTestTurn } from "../testing/turn-decision.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -46,8 +47,9 @@ test("Gateway exposes real voice tool only to eligible TG turns and prepares sel
     let enabled=true;let advertised=false;
     const runtime:any={reply:async(req:any)=>{
       advertised=req.tools?.some((t:any)=>t.name===VOICE_TOOL)??false;
+      await selectTestTurn(req,{voice:advertised});
       if(advertised){
-        assert.match(req.turnInstructions,/仅代表登记/);
+        assert.match(req.instructions,/仅代表登记/);
         assert.equal((await req.executeTool(VOICE_TOOL,{text:"语音测试片段"})).success,true);
       }
       return {text:"这是文字补充"};
@@ -57,7 +59,7 @@ test("Gateway exposes real voice tool only to eligible TG turns and prepares sel
     const result=await gateway.handle(input);
     assert.equal(advertised,true);assert.equal(result.kind,"model_reply");
     if(result.kind!=="model_reply")throw Error("wrong outcome");
-    assert.equal(result.voiceText,"语音测试片段");assert.equal(result.text,"语音测试片段\n\n这是文字补充");
+    assert.equal(result.voiceText,"语音测试片段");assert.equal(result.text,"语音测试片段");
     enabled=false;await gateway.handle({...input,messageId:"2"});assert.equal(advertised,false);
     enabled=true;await gateway.handle({...input,channel:"wechat",messageId:"3"});assert.equal(advertised,false);
   } finally {sessions.close();await rm(dir,{recursive:true,force:true});}

@@ -10,10 +10,10 @@ const DAY=86400_000;
 export class ReminderStore {
  private readonly path:string;
  private readonly queue=new SerialQueue();
- constructor(dataDir:string){this.path=join(dataDir,'heartbeat','reminders.json');}
+ constructor(dataDir:string,private readonly onChanged:()=>void=()=>{}){this.path=join(dataDir,'heartbeat','reminders.json');}
  private read():Promise<Reminder[]>{return readJsonFile(this.path,[]);}
  private change<T>(work:(items:Reminder[])=>T):Promise<T>{return this.queue.run(async()=>{
-  const items=await this.read();const result=work(items);await writeJsonAtomic(this.path,items);return structuredClone(result);
+  const items=await this.read();const result=work(items);await writeJsonAtomic(this.path,items);this.onChanged();return structuredClone(result);
  });}
  list():Promise<Reminder[]>{return this.queue.run(async()=>structuredClone(await this.read()).sort((a,b)=>a.dueAt.localeCompare(b.dueAt)));}
  create(input:{text:unknown;dueAt:unknown;timezone:string;channel:ChannelName;target:string;source:string},now=new Date()):Promise<Reminder>{

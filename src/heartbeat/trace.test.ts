@@ -40,11 +40,11 @@ for(const outcome of ["silent","disabled","confirmed","uncertain"] as const){
   }));
 }
 
-test("scheduler gates are visible, coalesced and never invoke the model",()=>setup(async({root,sessions,traces})=>{
+test("waiting scheduler gates do not poll the model or produce repeated trace records",()=>setup(async({root,sessions,traces})=>{
   const runtime={async reply(){assert.fail("quiet hours must not call provider");}};
   const runner=new HeartbeatRunner(root,{...config,planningEnabled:true},runtime as never,sessions,{load:async()=>localContext()} as never,{} as never,undefined,undefined,undefined,undefined,undefined,traces);
   await runner.tick(new Date("2026-10-25T03:00:00Z"));await runner.tick(new Date("2026-10-25T03:01:00Z"));
-  const runs=traces.list().runs;assert.equal(runs.length,1);assert.equal(runs[0].status,"skipped");assert.equal(runs[0].reason,"planning_window_closed");
+  assert.equal(traces.list().runs.length,0);assert.equal(runner.scheduling().waiting,'等待早间规划');
 }));
 
 test("planning trace includes parsed candidate times and only completes after persistence",()=>setup(async({root,sessions,traces})=>{

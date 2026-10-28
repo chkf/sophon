@@ -1,3 +1,4 @@
+import { selectTestTurn } from "../testing/turn-decision.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -40,6 +41,7 @@ test("Gateway advertises sticker selection and returns its verified metadata wit
   const sessions = new SessionStore(root);
   try {
     const runtime = { async reply(request: ChatRequest) {
+      await selectTestTurn(request, {sticker:true});
       assert.ok(request.tools!.some(tool => tool.name === "gateway_sticker"));
       const result = await request.executeTool!("gateway_sticker", { action: "list" }) as { stickers: { key: string }[] };
       await request.executeTool!("gateway_sticker", { action: "select", key: result.stickers[0]!.key });

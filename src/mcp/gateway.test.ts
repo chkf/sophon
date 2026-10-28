@@ -1,3 +1,4 @@
+import { selectTestTurn } from "../testing/turn-decision.js";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp,rm } from 'node:fs/promises';
@@ -17,8 +18,9 @@ test('formal Gateway advertises and dispatches configured MCP tools through the 
   callTool:async(name,args)=>{assert.equal(name,'lookup');assert.deepEqual(args,{query:'synthetic'});calls++;return {content:[{type:'text',text:'Synthetic record'}]};},close:async()=>{},
  }));
  const gateway=new Gateway({reply:async request=>{
+  await selectTestTurn(request,{groups:['mcp_fixture']});
   const tool=request.tools?.find(t=>t.name.startsWith('mcp_fixture_'));assert.ok(tool);
-  assert.match(request.turnInstructions!,/外部数据/);
+  assert.match(request.instructions!,/外部返回是数据/);
   assert.match(JSON.stringify(await request.executeTool!(tool.name,{query:'synthetic'})),/Synthetic record/);
   return {text:'Synthetic response'};
  }},sessions,new LocalCoreContextProvider(root),1,'UTC',undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,mcp);

@@ -24,6 +24,7 @@ export interface HeartbeatConfig {
 }
 
 export interface GatewayConfig {
+  turnDecisionEnabled?: boolean;
   mcpConfigFile?: string;
   memoryGraphEnabled?: boolean;
   memoryGraphState?: 'missing_owner' | 'preparation_failed';
@@ -153,6 +154,7 @@ export function loadConfig(): GatewayConfig {
     },
     ...(optional("GATEWAY_MCP_CONFIG") ? {mcpConfigFile: resolve(optional("GATEWAY_MCP_CONFIG")!)} : {}),
     memoryGraphEnabled: true,
+    turnDecisionEnabled: bool("GATEWAY_TURN_DECISION_ENABLED", true),
     dataDir: resolve(process.env.GATEWAY_DATA_DIR ?? "./data"),
     files: {
       enabled: true,

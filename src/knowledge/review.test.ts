@@ -166,3 +166,18 @@ test("proposal parsing rejects unadvertised targets, repeated mutations and extr
   ]) assert.throws(() => parseReview(JSON.stringify(proposal), entries));
   assert.deepEqual(parseReview("```json\n" + JSON.stringify(empty) + "\n```", entries), empty);
 });
+
+test('Recent review continues after graph integration and keeps linked ongoing topics visible',async t=>{
+ const f=await fixture(t);await f.append(['Track the sample document review.']);
+ const {installMemorySchema}=await import("../memory/schema.js");
+ const database=openDatabase(mainPath(f.data));try{installMemorySchema(database);}finally{database.close();}
+ const graph=f.sessions.enableMemory(owner);
+ const {MemoryRecent}=await import('../memory/recent.js');const linked=new MemoryRecent(graph);linked.migrate();
+ f.respond(async()=>({text:JSON.stringify({changes:[],creates:[{body:'Sample document review remains open'}],deletes:[]})}));
+ const review=new RecentReview(f.data,owner,{reply:async request=>{f.calls.push(request);return {text:JSON.stringify({changes:[],creates:[{body:'Sample document review remains open'}],deletes:[]})};}},
+  f.sessions,f.knowledge,new LocalCoreContextProvider(f.data),undefined,()=>{linked.sync();});
+ assert.equal(await review.tick(time()),'committed');assert.equal(linked.enabled(),true);
+ const entries=f.knowledge.listRecent();assert.equal(entries.length,1);assert.deepEqual(linked.remainingDirectory(entries),entries);
+ assert.equal(await review.tick(time(2)),'idle');assert.equal(f.calls.length,1);
+ assert.match(f.calls[0]!.instructions!,/事实、偏好和已结束经历交给记忆图/);
+});

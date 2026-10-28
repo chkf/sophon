@@ -1,6 +1,6 @@
 import type { ChatUsage } from "./types.js";
 
-const VISIBLE_FIELDS = ["type", "id", "role", "content", "text", "name", "arguments", "call_id", "tool_call_id", "tool_calls", "function", "output", "output_text", "annotations", "url_citation", "url", "title", "file_name", "filename", "action", "query", "queries", "sources", "status"] as const;
+const VISIBLE_FIELDS = ["type", "id", "role", "content", "text", "name", "arguments", "call_id", "tool_call_id", "tool_calls", "function", "output", "output_text", "annotations", "url_citation", "url", "title", "file_name", "filename", "action", "query", "queries", "sources", "status", "description", "parameters", "properties", "required", "enum", "items", "additionalProperties", "minimum", "maximum", "maxLength", "minLength", "anyOf", "uniqueItems", "maxItems"] as const;
 const TRUNCATED = "[trace projection truncated]";
 
 /**
@@ -9,15 +9,15 @@ const TRUNCATED = "[trace projection truncated]";
  * outcome of a provider request, even for malformed plugin/test transport data.
  */
 export function traceContent(value: unknown): unknown {
-  let nodes = 300, characters = 12_000;
+  let nodes = 1200, characters = 64_000;
   const seen = new WeakSet<object>();
-  const walk = (item: unknown, depth: number): unknown => {
-    if (nodes-- <= 0 || depth > 6) return TRUNCATED;
+  const walk = (item: unknown, depth: number, schema = false): unknown => {
+    if (nodes-- <= 0 || depth > (schema ? 12 : 6)) return TRUNCATED;
     try {
       if (typeof item === "string") {
         if (item.startsWith("data:")) return "[media bytes omitted]";
         if (characters <= 0) return TRUNCATED;
-        const length = Math.min(item.length, characters, 3_000);
+        const length = Math.min(item.length, characters, 24_000);
         characters -= length;
         return item.slice(0,length) + (length < item.length ? TRUNCATED : "");
       }
@@ -31,7 +31,7 @@ export function traceContent(value: unknown): unknown {
         const length = Math.min(item.length,40);
         for (let i=0;i<length;i++) {
           if (nodes <= 0 || characters <= 0) { result.push(TRUNCATED); break; }
-          const visible = walk(item[i],depth+1);
+          const visible = walk(item[i],depth+1,schema);
           if (visible !== undefined) result.push(visible);
         }
         if (item.length > length) result.push(TRUNCATED);
@@ -41,11 +41,11 @@ export function traceContent(value: unknown): unknown {
       const type = object.type;
       if (type === "reasoning" || type === "compaction") return undefined;
       const result: Record<string,unknown> = {};
-      for (const key of VISIBLE_FIELDS) {
+      for (const key of schema ? Object.keys(object).slice(0,60) : VISIBLE_FIELDS) {
         if (nodes <= 0 || characters <= 0) { result.trace_projection = TRUNCATED; break; }
         const field = object[key];
         if (field !== undefined) {
-          const visible = walk(field,depth+1);
+          const visible = walk(field,depth+1,schema || key === "parameters");
           if (visible !== undefined) result[key] = visible;
         }
       }

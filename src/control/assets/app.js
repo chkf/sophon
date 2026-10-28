@@ -149,24 +149,28 @@
     return el('div', { class: 'toolbar', id: 'task-toolbar' }, el('div', { class: 'task-state' },
       el('span', { class: 'task-state-label' }, el('span', { class: 'live-dot' }), el('strong', {}, hb?.enabled ? 'Heartbeat 已启用' : 'Heartbeat 未启用')),
       hb ? el('span', {}, '当天发送尝试 ', el('strong', {}, number(hb.attemptsToday))) : null,
-      hb?.interval ? el('span', {}, `检查间隔 ${hb.interval.minIntervalMinutes}–${hb.interval.maxIntervalMinutes} 分钟`) : null,
-      hb?.nextCheckAt ? el('span', {}, '下次检查 ', el('strong', {}, date(hb.nextCheckAt))) : null), el('span', { class: 'small' }, state.timezone));
+      hb?.enabled && !hb.planningEnabled && hb.interval ? el('span', {}, `检查间隔 ${hb.interval.minIntervalMinutes}–${hb.interval.maxIntervalMinutes} 分钟`) : null,
+      hb?.enabled ? (hb.planningEnabled ? el('span', {}, hb.nextPlannedWake ? '下一计划唤醒 '+hb.nextPlannedWake : '暂无待执行计划') : hb.nextCheckAt ? el('span', {}, '下次检查 ', el('strong', {}, date(hb.nextCheckAt))) : null) : null, hb?.waiting ? el('span', {class:'small'}, hb.waiting) : null), el('span', { class: 'small' }, state.timezone));
   }
-  function taskPlan(open = false) {
-    const plan = state.task.heartbeat?.plan; if (!plan) return null;
-    return el('details', { class: 'panel plan-panel', id: 'task-plan', open }, el('summary', {}, `当前唤醒计划 · ${plan.date || ''} · ${(plan.wakes || []).length} 个机会`),
-      el('div', { class: 'plan-content' }, el('div', { class: 'plan-wakes' }, ...(plan.wakes || []).map(wake => el('div', { class: `plan-wake ${wake.consumed ? 'consumed' : ''}` }, el('strong', {}, wake.time, el('span', { class: 'muted small' }, wake.consumed ? '已使用' : '待检查')), el('p', {}, wake.intent)))), el('p', { class: 'plan-note' }, `生成于 ${date(plan.generatedAt)}。计划代表检查机会，届时仍可能静默。`)));
+  function localTaskTime(value) {
+    const parts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:state.timezone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(value)).map(part=>[part.type,part.value]));
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
   }
   function reminderPanel() {
-    const labels = { pending: '等待执行', sending: '发送中', delivered: '已送达', unknown: '结果不确定（不自动重发）', cancelled: '已取消', expired: '已过期（错过超过 24 小时）' };
-    const tasks = [...state.task.reminders].sort((a,b) => Number(b.status === 'pending') - Number(a.status === 'pending') || a.dueAt.localeCompare(b.dueAt));
-    return el('section', { class: 'panel reminder-panel', id: 'reminder-panel' }, el('h3', {}, '定时提醒'),
-      el('p', { class: 'muted' }, '在聊天中指定时间创建。明确提醒独立于主动聊天开关及免打扰时段；服务需保持运行。时间按下方时区显示。'),
-      ...(tasks.length ? tasks.map(task => el('div', { class: 'reminder-item' },
-        el('p', {}, task.text), el('span', { class: 'small' }, `${date(task.dueAt)} · ${state.timezone} · ${task.channel === 'telegram' ? 'Telegram' : '微信'} · ${labels[task.status] || task.status}`),
-        ...(task.status === 'pending' ? [button('取消提醒', async () => {
-          await api('reminder-cancel', { id: task.id }); await loadTasks(false);
-        }, 'small')] : []))) : [empty('暂无提醒', '例如：明天下午三点提醒我检查文档。')])
+    const labels={pending:'等待执行',sending:'发送中',delivered:'已送达',unknown:'结果不确定（不自动重发）',cancelled:'已取消',expired:'已过期'};
+    const hb=state.task.heartbeat, plan=hb?.plan;
+    const rows=state.task.reminders.map(task=>({kind:'reminder',sort:localTaskTime(task.dueAt),task}));
+    if (hb?.enabled && hb.planningEnabled && plan?.date===localTaskTime(new Date()).slice(0,10) && plan.channel===hb.activeChannel)
+      rows.push(...(plan.wakes||[]).map(wake=>({kind:'proactive',sort:plan.date+' '+wake.time,wake})));
+    rows.sort((a,b)=>a.sort.localeCompare(b.sort)||a.kind.localeCompare(b.kind));
+    return el('section',{class:'panel reminder-panel',id:'reminder-panel'},el('h3',{},'任务计划'),
+      el('p',{class:'muted'},'约定提醒和主动聊天按时间排列。约定提醒不受主动开关和免打扰影响；服务需保持运行。主动候选到点后仍可静默。'),
+      ...(rows.length ? rows.map(row=>row.kind==='reminder' ? el('div',{class:'reminder-item','data-task-kind':'reminder'},
+        el('strong',{},'约定提醒'),el('p',{},row.task.text),el('span',{class:'small'},`${row.sort} · ${state.timezone} · ${row.task.channel==='telegram'?'Telegram':'微信'} · ${labels[row.task.status]||row.task.status}`),
+        row.task.status==='pending'?button('取消提醒',async()=>{await api('reminder-cancel',{id:row.task.id});await loadTasks(false);},'small'):null)
+        : el('div',{class:'reminder-item','data-task-kind':'proactive'},el('strong',{},'主动聊天'),el('p',{},row.wake.intent),
+          el('span',{class:'small'},`${row.sort} · ${state.timezone} · ${row.wake.consumed?'已检查':'待检查'}`)))
+        : [empty('暂无待执行安排','可在聊天中指定时间创建提醒。')])
     );
   }
   function renderTasks() {
@@ -175,7 +179,7 @@
     filter.value = state.task.filter;
     const runPanel = el('section', { class: 'run-list-panel', 'aria-label': '执行记录' }, el('div', { class: 'section-heading' }, el('h3', {}, '执行记录'), filter), el('div', { id: 'task-runs', class: 'run-items' }), el('div', { id: 'task-more', class: 'list-more' }));
     const inspector = el('section', { id: 'task-detail', class: 'inspector', 'aria-label': '调用轨迹' }, empty('选择一次执行', '左侧每条记录对应一次真实任务。'));
-    const nodes = [reminderPanel(), taskToolbar(), el('div', { id: 'task-plan-slot' }, taskPlan())];
+    const nodes = [taskToolbar(), reminderPanel()];
     nodes.push(el('div', { class: 'panel workbench' }, runPanel, inspector));
     content.replaceChildren(...nodes); renderTaskList();
   }
@@ -206,6 +210,14 @@
     renderTraceRun(target, run, state.task.open);
   }
   function renderTraceRun(target, run, openedSteps) {
+    const signature = JSON.stringify(run);
+    if (target._traceSignature === signature && target.childElementCount) return;
+    const sameRun = target._traceId === run.id;
+    const position = sameRun ? {x:window.scrollX,y:window.scrollY} : null;
+    const scrolls = sameRun ? [...target.querySelectorAll('[data-step-id]')].map(node => ({
+      id:node.dataset.stepId, values:[...node.querySelectorAll('pre,.injection-table')].map(part=>({top:part.scrollTop,left:part.scrollLeft}))
+    })) : [];
+
     const allSteps = Array.isArray(run.steps) ? run.steps : [];
     const sources = allSteps.filter(step => step.kind === 'context');
     const steps = allSteps.filter(step => step.kind !== 'context');
@@ -246,6 +258,14 @@
       steps.length ? timeline : empty('尚无步骤', '运行开始后，实际步骤会逐条记录。'),
       el('div', { class: `outcome ${run.status}` }, el('span', { class: 'outcome-mark', 'aria-hidden': 'true' }, run.status === 'delivered' ? '✓' : run.status === 'failed' || run.status === 'delivery_unknown' ? '!' : '·'), el('div', {}, el('strong', {}, statusNames[run.status] || run.status), el('p', {}, reason || descriptions[run.status] || '查看上方已记录的执行步骤。'), run.reason ? el('p', { class: 'trace-note' }, `原因代码：${run.reason}`) : null)),
       usage ? usageRow(usage, run.usageCompleteFields) : null, partialUsage ? el('p', { class: 'trace-note' }, `${run.usageReportedModelSteps} / ${models} 次模型尝试回报了用量，以上为已回报部分。`) : null, run.truncated || run.droppedSteps ? el('p', { class: 'trace-note' }, `记录达到存储上限，部分内容已截断${run.droppedSteps ? `，另有 ${number(run.droppedSteps)} 个步骤未保留` : ''}。`) : null, el('p', { class: 'trace-note' }, '用量仅展示 Provider 实际回报；空缺表示未知。输入 token 为各次调用累计，包含缓存输入。'));
+    target._traceSignature = signature; target._traceId = run.id;
+    for (const saved of scrolls) {
+      const node = [...target.querySelectorAll('[data-step-id]')].find(item=>item.dataset.stepId===saved.id);
+      node?.querySelectorAll('pre,.injection-table').forEach((part,index)=>{
+        const value=saved.values[index];if(value){part.scrollTop=value.top;part.scrollLeft=value.left;}
+      });
+    }
+    if(position)window.scrollTo({left:position.x,top:position.y,behavior:'instant'});
   }
   const sourceNames = { core: 'Core', local_guidance: '本地指导 / 表达规则', memory_hints: '记忆图线索', recent: 'Recent 活跃目录', time: '时间与消息间隔', history: '聊天历史 / 恢复条目', history_index: '较早历史摘录', memory_seed: '记忆图重建摘要', checkpoint: '已有会话 / 检查点', current_user: '本轮消息与引用', tool_results: '工具返回', tools: '工具定义', live_context: '额外实时数据', runtime_guidance: 'Provider 运行指导' };
   const injectionNames = { sent: '本次传入', inherited: '沿用会话', replayed: '恢复重放', omitted: '本次未传入' };
@@ -256,11 +276,12 @@
         el('tbody', {}, ...items.map(item => el('tr', {}, el('td', {}, labels.get(item.source) || sourceNames[item.source] || item.source), el('td', {}, injectionNames[item.delivery] || '未记录'), el('td', {}, item.detail || '—')))))));
   }
   function sourceSnapshots(sources, opened) {
+    sources=[...sources].sort((a,b)=>{const order={policy:0,recovery:1,turn:2};return (order[a.input?.placement]??3)-(order[b.input?.placement]??3);});
     return el('section', { class: 'source-snapshots' }, el('h3', {}, '本轮上下文来源'),
       el('p', { class: 'trace-note' }, '下方是本轮准备的内容快照。每次模型调用内会分别标出实际传入、沿用或恢复重放；准备完成不等于已发给模型。'),
       ...sources.map(step => {
         const detail = el('details', { open: opened.has(step.id), 'data-step-id': step.id }, el('summary', {}, step.name),
-          el('p', { class: 'trace-note' }, step.input?.placement === 'policy' ? '基础指令：可能沿用已有会话。' : step.input?.placement === 'recovery' ? '重建时准备的历史数据；传入状态见下方模型调用。' : '本轮指导：随请求传入。'),
+          el('p', { class: 'trace-note' }, step.input?.placement === 'policy' ? '基础指令：可能沿用已有会话。' : step.input?.placement === 'recovery' ? '会话建立或重建时提供的快照；传入状态见下方模型调用。' : '本轮指导：随请求传入。'),
           el('pre', {}, step.input?.content ?? '快照未保留或已达到记录上限。'),
           step.truncated || step.input?.contentTruncated ? el('p', { class: 'trace-note' }, '内容已截断，仅显示预览。') : null);
         detail.addEventListener('toggle', () => { if (detail.open) opened.add(step.id); else opened.delete(step.id); });
@@ -283,9 +304,15 @@
     } }, ...runs.map(run => el('option', { value: run.id }, `${date(run.startedAt)} · ${statusNames[run.status] || run.status} · ${run.channel || ''}`)));
     picker.value = state.call.selected || '';
     const selectedDetail = $('#call-detail') || el('div', { id: 'call-detail' });
-    replace(target, el('div', { class: 'section-heading' }, el('h3', {}, '完整调用流程'), runs.length ? picker : null),
+    const heading=el('div', { class: 'section-heading' }, el('h3', {}, '完整调用流程'), runs.length ? picker : null);
+    const listSignature=JSON.stringify(runs);
+    if (target._listSignature!==listSignature || !target.childElementCount) {
+    if (runs.length && selectedDetail.parentElement===target) target.querySelector('.section-heading').replaceWith(heading);
+    else replace(target, heading,
       el('p', { class: 'trace-note' }, '展示正式会话进入模型运行器后的上下文准备、模型请求（含重试）、工具调用和结果。保留最近 20 轮、最长 7 天；临时测试不记录。每 10 秒刷新。'),
       runs.length ? selectedDetail : empty('还没有调用流程', '更新后的下一轮正式对话开始记录，旧调用无法补回完整轨迹。'));
+    target._listSignature=listSignature;
+    }
     if (state.call.selected) await loadCallDetail(state.call.selected, epoch);
   }
   function usageRow(usage, completeFields) {
@@ -504,7 +531,7 @@
   async function graphPage(epoch) {
     const result = await api('graph'); if (epoch !== state.epoch) return;
     if (!result.available) {
-      content.replaceChildren(el('div', { class: 'panel' }, empty('记忆图尚未准备好', graphRuntimeText(result.runtimeStatus) || (result.enabled ? '启动时将自动准备记忆图，请检查服务日志。' : '请完成管理员配置后重启。'))),el('section',{id:'graph-prompts',class:'panel panel-pad'})); await loadGraphPrompts(epoch); return;
+      content.replaceChildren(el('div', { class: 'panel' }, empty('记忆图尚未准备好', graphRuntimeText(result.runtimeStatus) || (result.enabled ? '启动时将自动准备记忆图，请检查服务日志。' : '请完成管理员配置后重启。'))),el('section',{id:'graph-prompts',class:'panel panel-pad graph-prompts'})); await loadGraphPrompts(epoch); return;
     }
     content.replaceChildren(el('div', { id: 'graph-overview' }), el('section', { id: 'graph-prompts', class: 'panel panel-pad' }), el('div', { class: 'panel graph-workbench' },
       el('section', { id: 'graph-topics', class: 'graph-topics', 'aria-label': '主题目录' }, loading()),
@@ -525,11 +552,13 @@
     if (gs.selected) await loadGraphNode(gs.selected, 0, epoch);
   }
   function graphEditor(fields, save, reload) {
-    const wrapper=el('div',{class:'editor'}), inputs={};
+    const wrapper=el('div',{class:'graph-editor'}), inputs={};
     for(const [key,label,value,max] of fields) {
-      const input=el('textarea',{rows:key==='content'?18:4,maxlength:String(max),value,'aria-label':label});
+      const input=key==='name'
+        ? el('input',{type:'text',maxlength:String(max),value,'aria-label':label})
+        : el('textarea',{rows:key==='content'?18:key==='summary'?7:3,maxlength:String(max),value,'aria-label':label});
       input.addEventListener('input',()=>{wrapper.dataset.dirty='true';state.dirty=true;}); inputs[key]=input;
-      wrapper.append(el('label',{},label,input));
+      wrapper.append(el('label',{class:'graph-field'},el('span',{},label),input));
     }
     wrapper.append(el('div',{class:'editor-actions'},button('保存修改',async()=>{
       if(state.saving)return;state.saving=true;
@@ -551,7 +580,8 @@
           await api('graph-prompt-save',{id:item.id,expectedRevision:result.revision,reset:true});state.dirty=false;await loadGraphPrompts();},'small'));
     };
     selector.addEventListener('change',()=>{if(!canLeave()){selector.value=state.graph.promptId||'classify';return;}state.dirty=false;state.graph.promptId=selector.value;render();});render();
-    $('#graph-prompts').replaceChildren(el('details',{},el('summary',{},'记忆模型提示词'),selector,editor));
+    const open=$('#graph-prompts details')?.open===true;
+    $('#graph-prompts').replaceChildren(el('details',{open},el('summary',{},'记忆模型提示词'),el('div',{class:'graph-prompt-body'},el('label',{class:'graph-field'},el('span',{},'任务类型'),selector),editor)));
   }
   function renderGraphOverview(result) {
     const target = $('#graph-overview'); if (!target) return;
@@ -742,8 +772,6 @@
         if (result.heartbeat?.timezone) state.timezone = result.heartbeat.timezone;
         $('#task-toolbar')?.replaceWith(taskToolbar());
         $('#reminder-panel')?.replaceWith(reminderPanel());
-        const planOpen = $('#task-plan')?.open === true, planSlot = $('#task-plan-slot');
-        if (planSlot) replace(planSlot, taskPlan(planOpen));
         if (!state.task.selected) state.task.selected = state.task.runs[0]?.id || null;
         renderTaskList();
         const selected = state.task.runs.find(run => run.id === state.task.selected);

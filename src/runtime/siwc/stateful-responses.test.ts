@@ -17,15 +17,15 @@ test("Telegram reply-format preference resets on a new socket, not on every turn
     instructions: "Telegram 私聊默认优先用语音回复。", resetVoicePreferenceOnReconnect: true });
   try {
     await bridge.reply(turn("你好"));
-    assert.match(JSON.stringify(first.sent[0]?.input), /Telegram 回复形式已重置为默认偏好/);
+    assert.match(JSON.stringify(first.sent[0]?.input), /回复形式采用当前配置/);
     await bridge.reply(turn("请发文字"));
-    assert.doesNotMatch(JSON.stringify(first.sent[1]?.input), /Telegram 回复形式已重置为默认偏好/);
+    assert.doesNotMatch(JSON.stringify(first.sent[1]?.input), /回复形式采用当前配置/);
     first.close();
     await bridge.reply(turn("继续"));
     const recoveredInput = JSON.stringify(second.sent[0]?.input);
-    assert.match(recoveredInput, /Telegram 回复形式已重置为默认偏好/);
-    assert.ok(recoveredInput.indexOf("请发文字") < recoveredInput.lastIndexOf("Telegram 回复形式已重置为默认偏好"),
-      "the new socket reset must follow the older text request in recovered history");
+    assert.match(recoveredInput, /回复形式采用当前配置/);
+    assert.ok(recoveredInput.indexOf("回复形式采用当前配置") < recoveredInput.indexOf("请发文字"),
+      "the current bootstrap policy precedes recovered history");
   } finally { await bridge.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -610,7 +610,7 @@ test("voice-only completion traverses Gateway and real WS tool loop without requ
   const {Gateway}=await import("../../gateway.js");
   const {localContext}=await import("../../core/context-fixture.js");
   const root=await mkdtemp(join(tmpdir(),"siwc-voice-only-"));
-  const socket=new FakeSocket([{id:"voice-call",output:[{type:"function_call",call_id:"v1",namespace:"gateway",name:"send_voice",arguments:JSON.stringify({text:"语音测试"})}]},messageResponse("voice-done",""),messageResponse("next","收到")]);
+  const socket=new FakeSocket([{id:"decision",output:[{type:"function_call",call_id:"decision",name:"gateway_turn_decision",arguments:JSON.stringify({stage_direction:"查看文档",reply_mode:"voice",memory:{need_score:0,query:null,ids:null},sticker:"skip",quote:"skip",image:"skip"})}]},{id:"voice-call",output:[{type:"function_call",call_id:"v1",namespace:"gateway",name:"send_voice",arguments:JSON.stringify({text:"语音测试"})}]},messageResponse("voice-done",""),messageResponse("next","收到")]);
   const bridge=new StatefulResponsesBridge(root,()=>socket);
   const sessions=new SessionStore(root);
   const runtime:any={reply:async(turn:any)=>bridge.reply({...request(),...turn,accessToken:"fixture",model:"test-model"})};
@@ -620,7 +620,7 @@ test("voice-only completion traverses Gateway and real WS tool loop without requ
     assert.equal(result.kind,"model_reply");
     if(result.kind!=="model_reply")throw Error("expected prepared voice");
     assert.equal(result.text,"语音测试");assert.equal(result.voiceText,"语音测试");
-    assert.equal(socket.sent.length,2);
+    assert.equal(socket.sent.length,3);
     await bridge.commitSession("telegram:reliability",result.text,result.deliveryId);
     const next=await bridge.reply(request("接着聊"));
     assert.equal(next.text,"收到");assert.equal(next.voiceText,undefined);
@@ -685,6 +685,7 @@ test("SIWC delivery IDs reject old confirmations and preserve pre-delivery check
     const socket = new FakeSocket([toolResponse(), messageResponse("pending", "未交付答案")]);
     const bridge = new StatefulResponsesBridge(directory, () => socket);
     await bridge.reply({ ...request(), deliveryId: "current", deferAssistantCommit: true,
+      tools:[{name:"fixture_write",parameters:{type:"object"}}],
       async executeTool() { return { saved: "已完成工具证据" }; } });
     assert.equal(await bridge.commitSession(request().sessionId, "old", "old"), false);
     assert.equal(await bridge.resetSession(request().sessionId, "old"), false);
@@ -891,7 +892,7 @@ test("tool results survive a later response failure and process restart without 
     let writes = 0;
     const socket = new FakeSocket([toolResponse(), { __event: "failed" }]);
     const bridge = new StatefulResponsesBridge(directory, () => socket);
-    await assert.rejects(bridge.reply({ ...request("save this"), async executeTool() {
+    await assert.rejects(bridge.reply({ ...request("save this"), tools:[{name:"fixture_write",parameters:{type:"object"}}], async executeTool() {
       writes++;
       return { saved: true, id: "saved-page" };
     } }));
@@ -1221,7 +1222,7 @@ test("an in-flight tool has a durable uncertainty marker before its side effect"
   try {
     const socket = new FakeSocket([toolResponse(), messageResponse("done", "saved")]);
     const bridge = new StatefulResponsesBridge(directory, () => socket);
-    await bridge.reply({ ...request(), async executeTool() {
+    await bridge.reply({ ...request(), tools:[{name:"fixture_write",parameters:{type:"object"}}], async executeTool() {
       const recoverySocket = new FakeSocket([messageResponse("inspect", "check first")]);
       await new StatefulResponsesBridge(directory, () => recoverySocket).reply(request("status"));
       const input = recoverySocket.sent[0]!.input as Record<string, unknown>[];
@@ -1242,14 +1243,15 @@ test("failed delivery rolls back only the reply, retaining compaction and tool e
     const sockets = [firstSocket, secondSocket];
     const bridge = new StatefulResponsesBridge(directory, () => sockets.shift()!);
     await bridge.reply(request("old question"));
-    await bridge.reply({ ...request("save this"), deferAssistantCommit: true,
+    await bridge.reply({ ...request("save this"), deferAssistantCommit: true, tools:[{name:"fixture_write",parameters:{type:"object"}}],
       async executeTool() { return { saved: "page-1" }; },
     });
     await bridge.resetSession(request().sessionId);
     await bridge.reply(request("what happened?"));
     const input = secondSocket.sent[0]!.input as Record<string, unknown>[];
     const encoded = JSON.stringify(input);
-    assert.equal(input[0]?.type, "compaction");
+    assert.ok(input.some(item=>item.type === "compaction"));
+    assert.match(String(input[0]?.content), /当前 Gateway 规则/);
     assert.match(encoded, /old-checkpoint/);
     assert.match(encoded, /page-1/);
     assert.doesNotMatch(encoded, /not delivered/);

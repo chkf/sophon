@@ -182,3 +182,9 @@ test("temporary control access ignores obsolete settings and rejects untrusted t
   process.env.GATEWAY_CONTROL_TUNNEL = "unknown";
   assert.equal(loadConfig().control?.tunnel, "cloudflare");
 }));
+
+
+test('structured turn decisions default on and have an explicit compatibility override',()=>isolatedConfig(()=>{
+ assert.equal(loadConfig().turnDecisionEnabled,true);
+ process.env.GATEWAY_TURN_DECISION_ENABLED='false';assert.equal(loadConfig().turnDecisionEnabled,false);
+}));

@@ -123,6 +123,9 @@ export type ChatRequest = ChatInput & {
   context?: StatefulRuntimeContext;
   attachments?: RuntimeAttachment[];
   tools?: RuntimeTool[];
+  getTools?: () => RuntimeTool[];
+  requiredTool?: () => string | undefined;
+  authorizeTool?: (name: string) => void;
   executeTool?: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   /** Local per-turn getter; only validated, actually selected speech counts as output. */
   recordReplyText?: (text: string, id: string) => void;

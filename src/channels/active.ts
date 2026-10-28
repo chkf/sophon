@@ -22,6 +22,7 @@ export class ActiveChannelRouter {
     private readonly senders: Partial<Record<ChannelName, ProactiveSender>>,
     private readonly defaultChannel: ActiveProactiveChannel,
     private readonly enabled: () => Promise<boolean> = async () => true,
+    private readonly onChanged: () => void = () => {},
   ) {
     this.statePath = join(dataDir, "channels", "active.json");
   }
@@ -42,6 +43,7 @@ export class ActiveChannelRouter {
       throw new Error(channel === "telegram" ? "Telegram 还没有配置。" : "微信还没有配置。");
     }
     await writeJsonAtomic(this.statePath, { active: channel } satisfies ActiveChannelState);
+    this.onChanged();
   }
 
   async isActive(channel: ChannelName): Promise<boolean> {

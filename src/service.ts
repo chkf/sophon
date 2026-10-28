@@ -1,3 +1,4 @@
+import { controlHeartbeatTiming } from "./control/heartbeat.js";
 import { ReminderStore } from "./reminders/store.js";
 import { ReminderTools } from "./reminders/tools.js";
 import { ReminderRunner } from "./reminders/runner.js";
@@ -120,8 +121,8 @@ export class GatewayService {
   ) {
     validateServeConfig(config);
     const mcpServers=readMcpConfig(config.mcpConfigFile);
-    const proactiveSettings=this.proactiveSettings=new ProactiveSettings(config.dataDir,config.heartbeat.enabled,config.heartbeat);
-    this.reminders=new ReminderStore(config.dataDir);
+    const proactiveSettings=this.proactiveSettings=new ProactiveSettings(config.dataDir,config.heartbeat.enabled,config.heartbeat,()=>this.heartbeat?.requestCheck());
+    this.reminders=new ReminderStore(config.dataDir,()=>this.heartbeat?.requestCheck());
 
     const media = new MediaStore(join(config.dataDir, "media"));
     this.sessions = new SessionStore(config.dataDir);
@@ -136,7 +137,7 @@ export class GatewayService {
     this.voice = new VoiceService(speechSettings, new VoiceStore(config.dataDir),speechClient,undefined,speechQueue);
     this.localKnowledge = new LocalKnowledgeStore(config.dataDir, "formal");
     this.gatewayContext = new LocalCoreContextProvider(config.dataDir,
-      () => renderRecentSummary(memory?new MemoryRecent(memory).remainingDirectory(this.localKnowledge!.listRecent()):this.localKnowledge!.listRecent()),
+      () => renderRecentSummary(this.localKnowledge!.listRecent()),
       () => this.expressions.snapshot(), () => this.localKnowledge!.getRecentRevision());
     const files = config.files?.enabled && config.telegram ? new FileService(config.dataDir,
       config.files.generatedDir, config.telegram.ownerId, file => {
@@ -144,7 +145,7 @@ export class GatewayService {
         return this.telegram.sendDocumentToOwner(file);
       }) : undefined;
     if (config.recentReview?.enabled && config.telegram) this.recentReview = new RecentReview(config.dataDir,
-      config.telegram.ownerId, runtime, this.sessions, this.localKnowledge, this.gatewayContext, this.conversationQueue, () => !!memory && !!runtime.classifyMemory && !['MODEL_UNAVAILABLE','CLASSIFIER_UNAVAILABLE'].includes(this.memoryWorker?.status() ?? '') && new MemoryRecent(memory).enabled());
+      config.telegram.ownerId, runtime, this.sessions, this.localKnowledge, this.gatewayContext, this.conversationQueue, () => { if(memory)new MemoryRecent(memory).sync(); });
     this.mcp=new McpTools(mcpServers,message => !!config.telegram && message.senderId===message.conversationId &&
       this.sessions.sessionKey(message.channel,message.conversationId)==="telegram:"+config.telegram.ownerId);
     const reminderTools=new ReminderTools(this.reminders,message=>!!config.telegram && message.senderId===message.conversationId &&
@@ -152,19 +153,20 @@ export class GatewayService {
     this.reminderRunner=new ReminderRunner(this.reminders,async task=>{
       const sender=task.channel==="telegram"?this.telegram:this.ilink;
       return !!sender && await sender.availableTarget()===task.target;
-    },task=>this.conversationQueue.run(async()=>{
+    },async task=>{
       const sender=task.channel==="telegram"?this.telegram:this.ilink;
       if(!sender||await sender.availableTarget()!==task.target)throw Error("Reminder channel unavailable");
       const text=(task.late?"补发提醒：":"提醒：")+task.text;
       const fragments=await sender.sendText(task.target,text);
       await recordDeliveredAssistant(this.sessions,task.channel,task.target,task.target,text,undefined,"reminder:"+task.id,new Date().toISOString(),{origin:"proactive"},fragments || undefined);
-    }));
+    });
     this.gateway = new Gateway(runtime, this.sessions, this.gatewayContext,
       config.maxToolRounds, config.heartbeat.timezone,
       undefined, this.expressions, this.localKnowledge, async message =>
         message.senderId===config.telegram?.ownerId && message.conversationId===config.telegram?.ownerId &&
         this.voice.configured() && (await this.voice.settings.get()).tts,
-      undefined, config.control ? observation => persistContextObservation(config.dataDir, observation) : undefined, files, memory, this.mcp, sessionId=>sessionId==="telegram:"+config.telegram?.ownerId?this.callTraces:undefined,reminderTools);
+      undefined, config.control ? observation => persistContextObservation(config.dataDir, observation) : undefined, files, memory, this.mcp, sessionId=>sessionId==="telegram:"+config.telegram?.ownerId?this.callTraces:undefined,reminderTools,{turnDecisionEnabled:config.turnDecisionEnabled,
+        ...(config.heartbeat.planningEnabled ? {replan:(id,args,now)=>this.heartbeat!.requestReplan(id,args,now)} : {})});
 
     if (config.telegram) {
       const telegramVoice=new TelegramVoiceTransport(this.voice,config.telegram.ownerId);
@@ -183,6 +185,7 @@ export class GatewayService {
         onPollingConflict: () => this.requestShutdown("telegram-conflict"),
         onReplyDelivered: async ({ conversationId, senderId, reply, images, deliveryId, complete, platformMessages }) => {
           await this.gateway.commitDeliveredAssistant("telegram", conversationId, senderId, reply, images, deliveryId, complete, platformMessages);
+          this.recentReview?.conversationDelivered();
         },
         onReplyDeliveryFailed: async ({ conversationId, deliveryId }) => {
           await this.gateway.discardUndeliveredAssistant("telegram", conversationId, deliveryId);
@@ -207,6 +210,7 @@ export class GatewayService {
         },
         delivered: async (user, text, id, complete, fragments) => {
           await this.gateway.commitDeliveredAssistant("wechat", user, user, text, undefined, id, complete, fragments);
+          this.recentReview?.conversationDelivered();
         },
         discarded: (user, id) => this.gateway.discardUndeliveredAssistant("wechat", user, id),
       });
@@ -219,6 +223,7 @@ export class GatewayService {
       { telegram: this.telegram, wechat: this.ilink },
       defaultChannel,
       () => proactiveSettings.enabled(),
+      () => this.heartbeat?.requestCheck(),
     );
     const logDir = config.logDir ?? join(config.dataDir, "logs");
     if (config.control) {
@@ -237,13 +242,15 @@ export class GatewayService {
           editHistory: async (id, work) => { if(!runtime.editHistory)throw Error("历史编辑不可用。");await runtime.editHistory(id,work); } }),
         reminders: this.reminders,
         traces: this.taskTraces, calls: this.callTraces, host: new HostMonitor(config.dataDir),
-        mutate: work => this.conversationQueue.run(async () => work()),
+        mutate: work => this.conversationQueue.run(async () => {const result=await work();this.heartbeat?.requestCheck();return result;}),
         heartbeat: async () => {
           const now = new Date();
           const state = await readJsonFile<HeartbeatState>(join(config.dataDir, "heartbeat", "state.json"),
             { dateKey: dateKey(now, config.heartbeat.timezone), sentToday: 0, recent: [] });
           return { interval:await proactiveSettings.interval(), enabled: await proactiveSettings.enabled(), timezone: config.heartbeat.timezone,
-            plan: state.plan ?? null, nextCheckAt: state.nextCheckAt ?? null,
+            plan: state.plan ?? null,
+            ...controlHeartbeatTiming(state,config.heartbeat.planningEnabled,config.heartbeat.timezone,await this.activeChannels.getActive(),now,await proactiveSettings.enabled()),
+            ...this.heartbeat?.scheduling(),
             attemptsToday: state.dateKey === dateKey(now, config.heartbeat.timezone) ? state.sentToday : 0,
             activeChannel: await this.activeChannels.getActive() };
         },
@@ -299,13 +306,14 @@ export class GatewayService {
         this.mcp,
         () => proactiveSettings.explicitlyEnabled(),
         () => proactiveSettings.interval(),
+        this.reminders, this.reminderRunner,
       );
     }
   }
   private async handleInbound(message: InboundMessage): Promise<ReplyOutcome | undefined> {
     if (this.stopping) return undefined;
     const command = message.channel === "telegram" ? await this.commands.handle(message) : undefined;
-    if (command !== undefined) return { kind: "local_reply", text: command };
+    if (command !== undefined) {this.heartbeat?.requestCheck();return { kind: "local_reply", text: command };}
     try { message = await this.voice.preprocess(message); }
     catch (error) { return { kind: "local_reply", text: error instanceof Error ? error.message : "附件或语音处理失败，请重发。" }; }
     this.chatInFlight++;
@@ -346,7 +354,6 @@ export class GatewayService {
       if (this.telegram) await this.telegram.start((message) => this.handleInbound(message));
       if (this.ilink) await this.ilink.start((message) => this.handleInbound(message));
       await this.heartbeat?.start();
-      await this.reminderRunner.start();
       this.recentReview?.start();
       this.memoryWorker?.start();
 
@@ -373,7 +380,6 @@ export class GatewayService {
     this.diagnostics.stop();
     this.control?.beginShutdown();
     // Drain decisions and deliveries before releasing their runtime and lock.
-    await attempt(() => this.reminderRunner.stop());
     await attempt(() => this.heartbeat?.stop());
     await attempt(() => this.recentReview?.stop());
     await attempt(() => this.ilink?.stop());

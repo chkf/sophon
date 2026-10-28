@@ -12,6 +12,7 @@ import { ResponsesTransport, defaultSocketFactory, SIWC_RESPONSE_IDLE_TIMEOUT_MS
 import { LaneStore } from "./lane-store.js";
 import { cleanupSupersededArchives, cleanupInactiveModelContexts } from "./background-cleanup.js";
 import { planRecovery } from "./recovery.js";
+import { BOOTSTRAP_POLICY_PREFIX, isUnsupportedHostedWebSearch } from "./responses-codec.js";
 import { hasUnresolvedToolEvidence } from "./responses-codec.js";
 import { readRecoveryHistoryWindow } from "./history-window.js";
 import { withHistoryTool } from "../history-tool.js";
@@ -23,6 +24,17 @@ export { summarizeContextItems } from "./context-diagnostics.js";
 export type { ContextPayloadSummary } from "./context-diagnostics.js";
 export { hasUnresolvedToolEvidence, pruneToLatestCompaction } from "./responses-codec.js";
 
+function orderedBootstrap(items: Record<string, unknown>[], policy?: Record<string, unknown>, live?: Record<string, unknown>): Record<string, unknown>[] {
+  const result = items.filter(item => !(item.role === "developer" && typeof item.content === "string" &&
+    (item.content.startsWith(BOOTSTRAP_POLICY_PREFIX) || item.content.startsWith("下面是 Gateway 当前实时内容数据。"))));
+  if (policy) result.unshift(policy);
+  if (live) {
+    const seed = result.findIndex(item => item.role === "developer" && typeof item.content === "string" && item.content.startsWith("【记忆感知重建】"));
+    result.splice(seed >= 0 ? seed + 1 : policy ? 1 : 0, 0, live);
+  }
+  return result;
+}
+
 /** Old releases embedded per-turn Persona as developer input items. Those items
  * persist through previous_response_id and must be removed by replaying the
  * canonical transcript when it is safe to do so. Opaque checkpoints and
@@ -33,7 +45,7 @@ function isLegacyPersonaInput(item: Record<string, unknown>): boolean {
     // The current unified policy deliberately includes Persona. Only the old
     // standalone Persona items need migration; matching their label alone
     // would discard a healthy response chain on every formal turn.
-    !item.content.startsWith(String(bootstrapPolicyItem("").content));
+    !item.content.startsWith(BOOTSTRAP_POLICY_PREFIX);
 }
 
 function unresolvedToolItems(items: Record<string, unknown>[]): Record<string, unknown>[] {
@@ -101,6 +113,7 @@ export class StatefulResponsesBridge {
   private readonly socketRotationTimers = new Map<StatefulResponsesSocket, ReturnType<typeof setTimeout>>();
   private readonly expiredSockets = new Set<StatefulResponsesSocket>();
   private readonly activeSessions = new Set<string>();
+  private readonly unsupportedWebSearchModels = new Set<string>();
 
   constructor(
     private readonly dataDir: string,
@@ -224,7 +237,7 @@ export class StatefulResponsesBridge {
     if (trace && trace.captureContent !== false) {
       const content = String(candidate.items[0]?.content ?? "");
       const step = safeTraceStart(trace,{kind:"context",name:"记忆图重建摘要",
-        input:{source:"memory_seed",placement:"recovery",content:content.slice(0,3000),contentTruncated:content.length>3000}});
+        input:{source:"memory_seed",placement:"recovery",content:"〔记忆重建摘要已省略 · "+content.length+" 字符；仅影响诊断展示〕"}});
       safeTraceFinish(trace,step,{status:"completed"});
     }
     // Archive before publishing. Failure at either step leaves the live checkpoint untouched.
@@ -396,8 +409,7 @@ export class StatefulResponsesBridge {
     // continuation; writes and unknown tools are potentially irreversible.
     let unsafeToolInvocationStarted = false;
     const captureTraceContent = Boolean(options.trace && options.trace.captureContent !== false);
-    const replayableTools = new Set((options.tools ?? []).filter((tool) => tool.readOnly === true || tool.replaySafe === true).map((tool) => tool.name));
-    const tools = responseTools(options.tools ?? [], options.webSearchAllowed !== false);
+
     const currentUser = await currentUserItem(options.messages,
       options.attachments ?? options.messages.at(-1)?.attachments ?? [], options.timezone);
     const input: Record<string, unknown>[] = [];
@@ -463,17 +475,13 @@ export class StatefulResponsesBridge {
 
     let policyItem: Record<string, unknown> | undefined;
     let liveItem: Record<string, unknown> | undefined;
-    if ((recovering || lane.needsBootstrap || controlChanged) && options.instructions) {
-      const resetVoicePreference = recovering && options.resetVoicePreferenceOnReconnect
-        ? "\nTelegram 回复形式已重置为默认偏好；历史消息中的临时文字回复要求不再延续。"
-        : "";
-      policyItem = bootstrapPolicyItem(options.instructions + resetVoicePreference);
-      input.push(policyItem);
-    }
-    if (options.context && (recovering || lane.needsBootstrap || controlChanged)) {
-      liveItem = liveContextItem(options.context);
-      if (liveItem) input.push(liveItem);
-    }
+    const bootstrap = (items: Record<string, unknown>[], reset: boolean) => {
+      const preference = reset && options.resetVoicePreferenceOnReconnect ? "\n回复形式采用当前配置。" : "";
+      policyItem = options.instructions ? bootstrapPolicyItem(options.instructions + preference) : undefined;
+      liveItem = options.context ? liveContextItem(options.context) : undefined;
+      return orderedBootstrap(items, policyItem, liveItem);
+    };
+    if (recovering || lane.needsBootstrap || controlChanged) input.splice(0,input.length,...bootstrap(input,recovering));
     // Per-response instructions are not inherited through previous_response_id.
     // Never append Persona or temporal instructions to replayable chat input.
     input.push(currentUser);
@@ -487,7 +495,7 @@ export class StatefulResponsesBridge {
         checkpointCandidate,
         recoveryItems,
         input,
-        tools,
+        responseTools(options.getTools?.() ?? options.tools ?? [],options.webSearchAllowed!==false),
       );
     }
 
@@ -521,6 +529,12 @@ export class StatefulResponsesBridge {
       let maxWorkingTokens = 0;
       for (;;) {
         stepIndex += 1;
+        const requiredTool = options.requiredTool?.();
+        const offered = (options.getTools?.() ?? options.tools ?? []).filter(tool => !requiredTool || tool.name === requiredTool);
+        const offeredNames = new Set(offered.map(tool => tool.name));
+        const replayableTools = new Set(offered.filter(tool => tool.readOnly === true || tool.replaySafe === true).map(tool => tool.name));
+        const webSearch = !requiredTool && options.webSearchAllowed !== false && !this.unsupportedWebSearchModels.has(options.model);
+        const tools = responseTools(offered, webSearch);
         const usedPreviousResponseId = Boolean(previousResponseId);
         const stepInputItems = nextInput.length;
         let completed: { response: ResponseSnapshot; retries: number; traceStepId?: string };
@@ -535,6 +549,7 @@ export class StatefulResponsesBridge {
             prompt_cache_key: createHash("sha256").update(options.sessionId).digest("hex").slice(0, 32),
             ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
             ...(tools.length ? { tools, parallel_tool_calls: false } : {}),
+            ...(requiredTool ? {tool_choice: "required"} : {}),
           }, options.trace, captureTraceContent ? siwcContextAttribution({
             sources:options.contextSources, policySent:Boolean(policyItem && nextInput.includes(policyItem)),
             continues:Boolean(previousResponseId), replay:!previousResponseId && (continuationRecoveryUsed || recoverySource === "checkpoint"),
@@ -545,9 +560,14 @@ export class StatefulResponsesBridge {
             tools:tools.length, liveContextSent:Boolean(liveItem && nextInput.includes(liveItem)),
           }) : undefined);
         } catch (error) {
+          const unsupportedSearch = webSearch && isUnsupportedHostedWebSearch(error);
+          if (unsupportedSearch) {
+            this.unsupportedWebSearchModels.add(options.model);
+            const step = safeTraceStart(options.trace,{kind:"system",provider:"siwc",model:options.model,name:"当前模型通道不支持托管搜索，已停用 web_search"});
+            safeTraceFinish(options.trace,step,{status:"completed"});
+          }
           if (
-            previousResponseId &&
-            (isMissingPreviousResponseError(error) || isRetryableTransportError(error)) &&
+            (unsupportedSearch || previousResponseId && (isMissingPreviousResponseError(error) || isRetryableTransportError(error))) &&
             !continuationRecoveryUsed &&
             !unsafeToolInvocationStarted
           ) {
@@ -569,10 +589,11 @@ export class StatefulResponsesBridge {
               if (stepIndex !== 1) throw error;
               await this.rebuildEditedHistory(lane, options);
               socket = this.ensureSocket(lane, options.accessToken);
-              lane.contextItems.push(...input.slice(historyInputItemCount));
-              recoverableItems = [...lane.contextItems];
-              await this.persistLane(lane);
+              lane.contextItems.push(currentUser);
             }
+            lane.contextItems = bootstrap(lane.contextItems,true);
+            recoverableItems = [...lane.contextItems];
+            await this.persistLane(lane);
             nextInput = [...lane.contextItems];
             continue;
           }
@@ -614,10 +635,11 @@ export class StatefulResponsesBridge {
         const calls = callsFrom(output);
         let text = "";
         if (!calls.length) {
+          if (options.requiredTool?.()) throw Error("模型未完成本轮必需的能力决策。");
           text = textFrom(output).trim() ||
             (typeof response.output_text === "string" ? response.output_text.trim() : "") ||
             response.streamedText?.trim() || "";
-          const verifiedText = blockTextualToolCall(text,(options.tools??[]).map(tool=>tool.name),"siwc");
+          const verifiedText = blockTextualToolCall(text,[...offeredNames],"siwc");
           const finalized = options.finalizeReplyText?.(verifiedText) ?? verifiedText;
           if (finalized !== text) output = replaceVisibleReplyText(output, finalized);
           text = finalized;
@@ -637,6 +659,7 @@ export class StatefulResponsesBridge {
         lane.previousResponseId = response.id;
 
         if (!calls.length) {
+          if (options.requiredTool?.()) throw Error("模型未完成本轮必需的能力决策。");
           const replySegments = options.getPreparedReplySegments?.();
           const voiceText = options.getPreparedVoice?.();
           const voiceInstruction = voiceText ? options.getPreparedVoiceInstruction?.() : undefined;
@@ -715,7 +738,7 @@ export class StatefulResponsesBridge {
           for (; outputCursor < end; outputCursor++) {
             const item = output[outputCursor]!;
             const value = textFrom([item]);
-            if (value) options.recordReplyText?.(blockTextualToolCall(value,(options.tools??[]).map(t=>t.name),"siwc"), response.id + ":" + outputCursor);
+            if (value) options.recordReplyText?.(blockTextualToolCall(value,[...offeredNames],"siwc"), response.id + ":" + outputCursor);
           }
         };
         for (const [index, call] of calls.entries()) {
@@ -740,6 +763,8 @@ export class StatefulResponsesBridge {
 
           const toolTrace = safeTraceStart(options.trace, { kind: "tool", name: call.name, provider: "siwc", parentId: traceStepId, input: captureTraceContent ? args : undefined });
           try {
+            if (!offeredNames.has(call.name)) throw Error("本次请求未提供该工具，请先加载对应工具组。");
+            options.authorizeTool?.(call.name);
             if (!replayableTools.has(call.name)) unsafeToolInvocationStarted = true;
             const outputValue = await options.executeTool(call.name, args);
             outputs[index] = {

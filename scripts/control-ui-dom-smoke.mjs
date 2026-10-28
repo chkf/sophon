@@ -5,6 +5,8 @@ const {JSDOM}=await import(process.env.SOPHON_UI_DOM_MODULE || 'jsdom');
 const html=await readFile(new URL('../src/control/assets/index.html',import.meta.url),'utf8');
 const dom=new JSDOM(html,{url:'https://control.example/control/',runScripts:'outside-only'});
 const w=dom.window,doc=w.document,errors=[];
+let poll;w.setInterval=fn=>{poll=fn;return 1;};w.scrollTo=()=>{};Object.defineProperty(doc,'hidden',{value:false});
+const today=new Date().toISOString().slice(0,10);
 w.matchMedia=()=>({matches:false,addEventListener(){}});w.confirm=()=>true;
 w.ResizeObserver=class{observe(){}disconnect(){}};
 w.HTMLElement.prototype.scrollIntoView=function(){};
@@ -18,7 +20,7 @@ const run={id:'fixture-call',kind:'chat',status:'completed',channel:'telegram',s
 w.fetch=async(url,init)=>{
  const action=url.split('/').at(-1),body=JSON.parse(init.body);let data;
  if(action==='session') data={authenticated:true,csrfToken:'fixture-csrf'};
- else if(action==='tasks') data={runs:[],nextBefore:null,heartbeat:{enabled:false,timezone:'UTC'},reminders:[{id:'rem_'+'a'.repeat(32),text:'检查合成文档 <script>literal</script>',dueAt:'2026-02-01T10:00:00Z',status:reminderStatus,channel:'telegram'}]};
+ else if(action==='tasks') data={runs:[],nextBefore:null,heartbeat:{enabled:true,planningEnabled:true,activeChannel:'telegram',timezone:'UTC',plan:{date:today,channel:'telegram',wakes:[{time:'09:00',intent:'Review sample report'}]}},reminders:[{id:'rem_'+'a'.repeat(32),text:'检查合成文档 <script>literal</script>',dueAt:today+'T10:00:00Z',status:reminderStatus,channel:'telegram'}]};
  else if(action==='reminder-cancel'){assert.equal(body.id,'rem_'+'a'.repeat(32));reminderStatus='cancelled';data={};}
  else if(action==='context') data={calls:[run],checkpoints:[],usage:{note:'合成用量'}};
  else if(action==='call') data=run;
@@ -38,13 +40,19 @@ const click=async(selector)=>{assert.ok(doc.querySelector(selector),selector);do
 const save=async(container)=>{const button=[...doc.querySelectorAll(container+' button')].find(b=>b.textContent==='保存修改');assert.ok(button);button.click();await settle();};
 try{
  w.eval(await readFile(new URL('../src/control/assets/app.js',import.meta.url),'utf8'));await settle();
+ assert.deepEqual([...doc.querySelectorAll('[data-task-kind]')].map(node=>node.dataset.taskKind),['proactive','reminder']);
  assert.match(doc.querySelector('#reminder-panel').textContent,/检查合成文档/);assert.equal(doc.querySelector('#reminder-panel script'),null);
  await click('#reminder-panel button');assert.equal(reminderStatus,'cancelled');assert.match(doc.querySelector('#reminder-panel').textContent,/已取消/);
  await click('[data-page="context"]');assert.match(doc.querySelector('#page-content').textContent,/完整调用流程/);assert.match(doc.querySelector('#call-detail').textContent,/本次传入/);
+ const detail=doc.querySelector('#call-detail'),step=detail.querySelector('[data-step-id="model"]');step.open=true;await settle();
+ const pre=step.querySelector('pre');pre.scrollTop=73;pre.scrollLeft=19;await poll();await settle();assert.equal(detail.querySelector('[data-step-id="model"] pre'),pre,'unchanged trace retains DOM');
+ run.steps[1].output={message:'Revised sample response'};await poll();await settle();
+ const revised=detail.querySelector('[data-step-id="model"]');assert.equal(revised.open,true);assert.equal(revised.querySelector('pre').scrollTop,73);assert.equal(revised.querySelector('pre').scrollLeft,19);
  await click('[data-page="graph"]');assert.ok(doc.querySelector('#graph-prompts textarea'));
- const editor=doc.querySelector('#graph-prompts textarea');editor.value='仅根据原文输出 JSON。';editor.dispatchEvent(new w.Event('input'));await save('#graph-prompts');assert.equal(prompt,'仅根据原文输出 JSON。');
- await click('.graph-topic');const title=doc.querySelector('[aria-label="主题名称"]');title.value='资料';title.dispatchEvent(new w.Event('input'));await save('#graph-topics');assert.equal(topicName,'资料');
+ doc.querySelector('#graph-prompts details').open=true;
+ const editor=doc.querySelector('#graph-prompts textarea');assert.equal(editor.rows,18);editor.value='仅根据原文输出 JSON。';editor.dispatchEvent(new w.Event('input'));await save('#graph-prompts');assert.equal(prompt,'仅根据原文输出 JSON。');assert.equal(doc.querySelector('#graph-prompts details').open,true);
+ await click('.graph-topic');const title=doc.querySelector('[aria-label="主题名称"]');assert.equal(title.tagName,'INPUT');title.value='资料';title.dispatchEvent(new w.Event('input'));await save('#graph-topics');assert.equal(topicName,'资料');
  await click('.graph-node');const gist=doc.querySelector('[aria-label="检索线索"]');gist.value='你计划整理资料。';gist.dispatchEvent(new w.Event('input'));await save('#graph-detail');assert.equal(nodeGist,'你计划整理资料。');
  assert.equal(saves,3);assert.deepEqual(errors,[]);assert.notEqual(doc.querySelector('#notice').className,'notice error');
- console.log(JSON.stringify({passed:true,checks:['reminder rendering and cancellation','call attribution rendering','graph prompt save','topic save','node save','revision payloads'],layoutVerified:false}));
+ console.log(JSON.stringify({passed:true,checks:['unified task ordering and reminder cancellation','trace refresh scroll retention','graph editor sizing','call attribution rendering','graph prompt save','topic save','node save','revision payloads'],layoutVerified:false}));
 }finally{w.close();}

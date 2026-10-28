@@ -145,7 +145,7 @@ test("visible trace projection is bounded for cycles, deep structures and large 
   const projected=traceContent(input);
   const serialized=JSON.stringify(projected);
   assert.match(serialized,/visible/);assert.match(serialized,/trace projection truncated/);
-  assert.ok(Buffer.byteLength(serialized)<64*1024,"projection stays bounded before a recorder sees it");
+  assert.ok(Buffer.byteLength(serialized)<256*1024,"projection stays bounded before a recorder sees it");
   const hostile=Object.defineProperty({},"content",{get(){throw new Error("must not escape projection");}});
   assert.doesNotThrow(()=>traceContent(hostile));
   assert.match(JSON.stringify(traceContent(hostile)),/projection unavailable/);

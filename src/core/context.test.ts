@@ -58,9 +58,9 @@ test("compact guidance keeps Recent indexing without a fixed external service", 
   const fixture = core();
   try {
     const guidance = (await new LocalCoreContextProvider(fixture.root).load()).data!.guidance;
-    assert.match(guidance,/跨越当前上下文的持续交流话题/);
-    assert.match(guidance,/读取完整 Recent/);
-    assert.match(guidance,/不凭摘要猜测细节/);
+    assert.match(guidance,/待接续话题、待跟进事项和待分享内容/);
+    assert.match(guidance,/需要最新目录或正文时主动调用 gateway_recent_read/);
+    assert.match(guidance,/只根据可靠事实管理记忆/);
     assert.doesNotMatch(guidance,/WORK_GUIDANCE|斜杠命令|没看过/);
   } finally { fixture.cleanup(); }
 });

@@ -8,7 +8,7 @@ export class VoiceSupplementError extends Error {
 }
 export const voiceTool: RuntimeTool = {
   name: VOICE_TOOL,
-  description: "登记下一段语音，可多次调用，与文字和角色描写按生成顺序交替交付。text 只写台词，不含角色描写；instruction 结合 Core、对应描写和语境描述情绪、语气、语速及停顿。成功仅表示已登记，实际发送由 Gateway 完成。",
+  description: "登记下一段语音，可多次调用，按完整意思分段。遵循本轮选择的回复形式，不重复输出已登记的台词。text 只写台词，不含角色描写；instruction 结合 Core、对应描写和语境描述情绪、语气、语速及停顿。成功仅表示已登记，实际发送由 Gateway 完成。",
   parameters: {type:"object",properties:{
     text:{type:"string",description:"实际台词，1–500 字符，不含角色描写、代码、链接或排版标记。"},
     instruction:{type:"string",maxLength:MAX_VOICE_INSTRUCTION_CHARS,description:"结合 Core、对应角色描写和当前语境生成自然的情绪、语气、语速和停顿描述。"}
@@ -20,18 +20,19 @@ export const voiceTool: RuntimeTool = {
 export class VoiceTurn {
   private parts: ReplySegment[] = [];
   private readonly recorded = new Set<string>();
-  constructor(readonly showStageDirections = false) {}
+  constructor(readonly showStageDirections = false, private readonly exclusive = false) {}
   get segments(): ReplySegment[] { return structuredClone(this.parts); }
   // Legacy getters are retained only for older provider consumers.
   get text(): string | undefined { return this.parts.find(part => part.kind === "voice")?.text; }
   get instruction(): string | undefined { return this.parts.find(part => part.kind === "voice")?.instruction; }
-  readonly guidance="根据内容和情绪自然选择文字或语音，按完整意思组织台词；同一句或简短确认尽量在一次输出中完成，不把时间、数字和说明拆成多个气泡。内容较长或话题转换时可自然分段，不限制合理的语音段数。角色描写遵循 Core 和独立描写开关的设置；如需描写，使用简短、中性的心理或动作描写。instruction 利用对应描写指导表达，语音只朗读正文。普通文字与 send_voice 按输出顺序交付。不要重复输出已登记的台词。工具成功仅代表登记，实际发送和失败回退由 Gateway 完成。";
+  readonly guidance="根据内容和情绪自然选择文字或语音，按完整意思组织台词；同一句或简短确认尽量在一次输出中完成，不把时间、数字和说明拆成多个气泡。内容较长或话题转换时可自然分段，不限制合理的语音段数。角色描写遵循 Core 和独立描写开关的设置；如需描写，使用简短、中性的心理或动作描写。instruction 利用对应描写指导表达，语音只朗读正文。本轮选择语音时只用 send_voice 登记台词；选择文字时不调用语音。不要重复输出已登记的台词。工具成功仅代表登记，实际发送和失败回退由 Gateway 完成。";
   recordText(text: string, id: string): void {
     if (this.recorded.has(id)) return;
     this.recorded.add(id);
     for (const part of splitStageDirections(text).flatMap(part => part.kind === "text"
       ? replyParagraphs(part.text).map(text=>({kind:"text" as const,text})) : [part])) {
       if (part.kind === "stage_direction" && !this.showStageDirections) continue;
+      if (this.exclusive && part.kind === "text" && this.parts.some(p => p.kind === "voice")) continue;
       // A final transcript echo must not repeat already queued speech.
       if (part.kind === "text" && this.parts.some(p => p.kind === "voice" && p.text === part.text)) continue;
       this.parts.push(part);
@@ -39,7 +40,7 @@ export class VoiceTurn {
   }
   finalize(text: string): string {
     this.recordText(text, "final");
-    return displayText(text, this.showStageDirections);
+    return this.exclusive && this.text ? "" : displayText(text, this.showStageDirections);
   }
   restore(segments: ReplySegment[], voice = true): void {
     this.parts = visibleSegments(segments, this.showStageDirections, voice);
@@ -54,6 +55,7 @@ export class VoiceTurn {
     const text=args.text.trim(),instruction=(args.instruction as string|undefined)??"用自然、清晰的语气说话。";
     if (this.parts.some(p=>p.kind==="voice"&&p.text===text&&p.instruction===instruction))
       return {success:true,status:"相同片段已登记，不重复发送。"};
+    if (this.exclusive) this.parts = this.parts.filter(part => part.kind !== "text");
     this.parts.push({kind:"voice",text,instruction});
     return {success:true,status:"已登记语音片段，待本轮完成后按顺序发送。"};
   }

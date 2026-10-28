@@ -241,9 +241,14 @@ export function liveContextItem(context: StatefulRuntimeContext): Record<string,
   );
 }
 
+export const BOOTSTRAP_POLICY_PREFIX = "以下是当前 Gateway 规则，与历史规则冲突时以此为准。";
+export function isUnsupportedHostedWebSearch(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : error && typeof error === "object" ? (error as {message?:unknown}).message : error;
+  return typeof message === "string" && /hosted tool ['"]web_search['"] requires authorization and metering that are not supported by rustponsesapi\b/i.test(message);
+}
 export function bootstrapPolicyItem(instructions: string): Record<string, unknown> {
   return developerItem(
-    "以下是当前 Gateway 规则，与历史规则冲突时以此为准。需要实时信息时使用 web_search 核实。\n\n" +
+    BOOTSTRAP_POLICY_PREFIX + "需要实时信息且本轮提供 web_search 时，先联网核实；未经核实的信息不得当成已验证事实。\n\n" +
     instructions,
   );
 }

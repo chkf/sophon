@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { InboundMessage, TelegramSticker, PlatformMessageFragment } from "../channels/types.js";
 import type { RuntimeHistory, RuntimeTool } from "./types.js";
 import type { SessionMessage } from "../sessions/types.js";
@@ -11,7 +12,7 @@ export function validSticker(value: TelegramSticker | undefined, chatId: string,
 }
 export const STICKER_TOOL: RuntimeTool = {
   name: "gateway_sticker", readOnly: true, replaySafe: true,
-  description: "查找或选择本 TG 私聊收到过的贴纸和 GIF。list 返回当前、近期历史和主库目录的真实素材及备注；query 可按备注等搜索，history_index 可查指定历史条目。select 用 list 返回的 key 登记本轮一个素材，由 Gateway 实际发送。",
+  description: "查找或选择本 TG 私聊收到过的贴纸和 GIF。list 返回当前、近期历史和主库目录的真实素材及备注；query 可按备注等搜索，history_index 可查指定历史条目。select 可使用 list 返回或上下文已知的真实素材 key，登记本轮一个素材；没有合适素材时再查询最多 8 个候选，由 Gateway 实际发送。",
   parameters: { type: "object", properties: {
     action: { type: "string", enum: ["list", "select"] },
     history_index: { type: "integer", minimum: 0 }, key: { type: "string" }, query: { type: "string" },
@@ -52,7 +53,11 @@ export class StickerTurn {
     if (!args || Object.keys(args).some(k => !["action", "history_index", "key", "query"].includes(k))) throw new Error("贴纸参数无效。");
     if (args.action === "select") {
       if (args.history_index !== undefined || args.query !== undefined || typeof args.key !== "string") throw new Error("请选择 list 返回的 key。");
-      const chosen = this.catalog.get(args.key);
+      let chosen = this.catalog.get(args.key);
+      if (!chosen && /^asset:[a-f0-9]{24}$/.test(args.key)) {
+        const saved = await this.saved?.listTelegramReactions(account,this.inbound.conversationId,undefined,5000) ?? [];
+        chosen = saved.find(entry => "asset:" + createHash("sha256").update(entry.sticker.fileId).digest("hex").slice(0,24) === args.key)?.sticker;
+      }
       if (!validSticker(chosen, this.inbound.conversationId, account)) throw new Error("请先 list，再选择真实表情包。");
       if (this.selection && this.selection.fileId !== chosen.fileId) throw new Error("每轮只能选择一个表情包。");
       this.selection = chosen;
@@ -89,10 +94,12 @@ export class StickerTurn {
       seen.add(entry.sticker.fileId);
     }
     const query = typeof args.query === "string" ? args.query.trim().toLowerCase() : "";
-    const visible = [...entries].filter(([, s]) => !query || [descriptions.get(s.fileId), s.emoji, s.setName, s.format]
-      .some(value => value?.toLowerCase().includes(query))).slice(0, 50);
-    this.catalog.clear();
-    for (const [key, sticker] of visible) this.catalog.set(key, sticker);
+    const distinct = new Map([...entries.values()].map(sticker => ["asset:" + createHash("sha256").update(sticker.fileId).digest("hex").slice(0,24), sticker]));
+    const visible = [...distinct].filter(([, s]) => !query || [descriptions.get(s.fileId), s.emoji, s.setName, s.format]
+      .some(value => value?.toLowerCase().includes(query))).slice(0, 8);
+    for (const entry of visible) {
+      this.catalog.set(entry[0],entry[1]);
+    }
     return { stickers: visible.map(([key, s]) => ({ key, kind: s.format.startsWith("gif") || s.format === "mp4_document" ? "gif" : "sticker",
       emoji: s.emoji, set_name: s.setName, format: s.format, note: descriptions.get(s.fileId) })),
       note: "仅包含本私聊真实收到的素材；GIF 和视频贴纸的多帧预览可能不完整，更早的贴纸可指定 history_index 查找。" };

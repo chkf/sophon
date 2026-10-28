@@ -234,7 +234,7 @@ test("fresh heartbeat can choose an image-only reply and prepare a durable typed
 });
 
 
-test("planned heartbeat schedules once, sends only when due, persists text, and replans after owner activity", async () => {
+test("planned heartbeat schedules once, sends only when due, persists text, and preserves conversation plans until an explicit request", async () => {
   const root = await mkdtemp(join(tmpdir(), "gateway-heartbeat-plan-integration-"));
   try {
     const messages: any[] = [{ role: "user", content: "明天有一项任务", at: "2026-10-10T22:00:00Z" }];
@@ -254,7 +254,7 @@ test("planned heartbeat schedules once, sends only when due, persists text, and 
     const runtime = { async reply(request: any) {
       if (request.sessionId === "heartbeat-planner") {
         planCalls++;
-        assert.equal(request.imageOutputAllowed, true);
+        assert.equal(request.imageOutputAllowed, false);
         assert.equal(request.purpose, "heartbeat_plan");
         assert.ok(request.text.trim());
         // Planning uses local context without a required external service.
@@ -301,9 +301,12 @@ test("planned heartbeat schedules once, sends only when due, persists text, and 
     assert.match(recorded[0]?.id, /^heartbeat:.*:text:assistant$/);
     await runner.tick(new Date("2026-10-11T02:31:00Z"));
     assert.equal(sends, 1);
-    // A real user follow-up invalidates the old 14:00 candidate.
+    // Ordinary conversation leaves the existing plan intact.
     messages.push({ role: "user", content: "我改计划了，晚点出门", at: "2026-10-11T02:40:00Z" });
     await runner.tick(new Date("2026-10-11T03:00:00Z")); // 11:00 local
+    assert.equal(planCalls, 1);
+    await runner.requestReplan("sample-change",{reason:"Adjust the document review time"},new Date("2026-10-11T03:00:00Z"));
+    await runner.tick(new Date("2026-10-11T03:00:00Z"));
     assert.equal(planCalls, 2);
     const state = JSON.parse(await readFile(join(root, "heartbeat", "state.json"), "utf8"));
     assert.deepEqual(state.plan.wakes.map((wake: any) => wake.time), ["16:00"]);

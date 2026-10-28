@@ -27,6 +27,9 @@ export interface DirectResponseOptions {
   instructions?: string;
   attachments?: RuntimeAttachment[];
   tools?: RuntimeTool[];
+  getTools?: () => RuntimeTool[];
+  requiredTool?: () => string | undefined;
+  authorizeTool?: (name: string) => void;
   executeTool?: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   recordReplyText?: (text: string, id: string) => void;
   getPreparedReplySegments?: () => ReplySegment[];
@@ -110,13 +113,17 @@ async function parseSse(response: Response, onActivity?: () => void): Promise<St
 export async function runDirectResponse(options: DirectResponseOptions): Promise<string> {
   const endpoint = options.endpoint ?? "https://api.openai.com/v1/responses";
   const input = await initialInput(options.messages, options.attachments ?? []);
-  const tools = toolNamespace(options.tools ?? []);
+
   const maxToolRounds = options.maxToolRounds && options.maxToolRounds > 0
     ? options.maxToolRounds
     : undefined;
   let toolRounds = 0;
 
   for (;;) {
+    const requiredTool = options.requiredTool?.();
+    const offered = (options.getTools?.() ?? options.tools ?? []).filter(tool => !requiredTool || tool.name === requiredTool);
+    const names = new Set(offered.map(tool => tool.name));
+    const tools = toolNamespace(offered);
     const controller = new AbortController();
     const idleTimeoutMs = 300_000;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -142,6 +149,7 @@ export async function runDirectResponse(options: DirectResponseOptions): Promise
           input,
           ...(options.instructions !== undefined ? { instructions: options.instructions } : {}),
           ...(tools.length ? { tools, parallel_tool_calls: false } : {}),
+          ...(requiredTool ? {tool_choice:"required"} : {}),
           store: false,
           stream: true,
         }),
@@ -156,6 +164,7 @@ export async function runDirectResponse(options: DirectResponseOptions): Promise
       const result = await parseSse(response, armIdleTimeout);
       if (idleTimer) clearTimeout(idleTimer);
       if (!result.calls.length) {
+        if (options.requiredTool?.()) throw Error("模型未完成本轮必需的能力决策。");
         const text = options.finalizeReplyText?.(result.text) ?? result.text;
         if (!text.trim() && !options.getPreparedReplySegments?.().length) throw new Error("Responses API completed without a final text response.");
         return text;
@@ -195,6 +204,8 @@ export async function runDirectResponse(options: DirectResponseOptions): Promise
       }
 
       try {
+        if (!names.has(call.name)) throw Error("本次请求未提供该工具。");
+        options.authorizeTool?.(call.name);
         const output = await options.executeTool(call.name, args);
         input.push({ type: "function_call_output", call_id: call.call_id, output: safeToolOutput(output) });
       } catch (error) {

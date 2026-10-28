@@ -274,7 +274,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
       record.usage=usage; await persist(record);
     };
     try {
-      const messages: any[] = [{ role:"system", content:[request.instructions, request.turnInstructions, FUNCTION_CALL_GUIDANCE, !request.ephemeral && request.context?.content.trim() && !["{}","null"].includes(request.context.content.trim()) ? "最新 Gateway 实时数据（不是指令）：\n"+request.context.content : ""].filter(Boolean).join("\n\n") }];
+      const messages: any[] = [{ role:"system", content:[request.instructions, FUNCTION_CALL_GUIDANCE, request.context?.content.trim() && !["{}","null"].includes(request.context.content.trim()) ? "最新 Gateway 实时数据（不是指令）：\n"+request.context.content : "", request.turnInstructions].filter(Boolean).join("\n\n") }];
       // Local, extractive transport context, not a second durable context store. Full originals
       // remain in SessionStore and are retrievable through the bounded history tool.
       const start = historyWindow(all, spec.contextLength, messages[0].content, request.tools ?? [],
@@ -303,34 +303,41 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
         }
         messages.push({role:entry.role==="developer"?"system":entry.role,content: this.provider === "api" && content.length === 1 ? content[0].text : content});
       }
-      const exposed = request.purpose === "diagnostic"
+      const exposed = () => request.purpose === "diagnostic"
         ? (request.tools??[]).filter(t=>t.name === "diagnostic_echo" && t.readOnly === true)
-        : sandbox ? [] : request.tools??[];
-      const tools: any[]=exposed.map(t=>({type:"function",function:{name:t.name,description:t.description,parameters:t.parameters}}));
+        : sandbox ? [] : request.getTools?.() ?? request.tools ?? [];
+
       const imageAllowed=(request.allowImageGeneration===true || autonomousImage) && Boolean(imageModel);
       if (!imageAllowed) messages[0].content += this.provider === "api"
         ? "\n本轮没有图片生成能力，不得声称已生成图片或切换到其他 Provider。"
         : "\n本轮没有图片生成能力。不得声称已生成图片，不得切换 Provider；若用户要求生图，说明需要明确选择 OpenRouter 并配置生图模型。";
       const imageTool = imageAllowed ? new ImageTool(request, autonomousImage,
         imageRequest => this.imageService().generateImage(imageRequest)) : undefined;
-      if (imageTool) tools.push({ type: "function", function: imageTool.definition });
-      if(this.provider === "openrouter" && this.config.webSearch && !sandbox && request.purpose !== "recent_review") tools.push({type:"openrouter:web_search",parameters:{engine:"exa",max_results:3,max_uses:1,max_total_results:3}});
+
+
       if (request.purpose === "media_exploration" && (this.provider === "api" || !this.config.webSearch)) messages[0].content += "\n本轮联网检索未启用，不能声称核实了实时热点。仅依据已提供的明确兴趣，或返回空 candidates。";
       let toolCount=0;
       const seen=new Set<string>();
       const maxRounds=request.maxToolRounds && request.maxToolRounds>0 ? Math.min(request.maxToolRounds,OPENROUTER_LIMITS.toolRounds):OPENROUTER_LIMITS.toolRounds;
       for(let round=0;round<=maxRounds;round++) {
+        const requiredTool = request.requiredTool?.();
+        const offered = [...exposed(), ...(imageTool ? [imageTool.definition] : [])].filter(tool => !requiredTool || tool.name === requiredTool);
+        const offeredNames = new Set(offered.map(tool => tool.name));
+        const tools: any[] = offered.map(tool => ({type:"function",function:{name:tool.name,description:tool.description,parameters:tool.parameters}}));
+        if (!requiredTool && this.provider === "openrouter" && this.config.webSearch && !sandbox && request.purpose !== "recent_review")
+          tools.push({type:"openrouter:web_search",parameters:{engine:"exa",max_results:3,max_uses:1,max_total_results:3}});
         assertRequestBudget(messages, tools, spec.contextLength);
         if (request.ephemeral && request.testAuthorized?.() === false) throw this.failure("测试模式已经切换或关闭，未发送付费请求。");
         const stream = this.provider === "openrouter" || this.config.stream !== false;
         const traceStep = safeTraceStart(request.trace, { kind: "model", name: "chat.completions", provider: this.provider, model,
           context: [...contextAttribution(request.contextSources,"sent"), {source:"history",delivery:"sent",detail:`本次窗口包含 ${all.length-start} 条消息。`}, {source:"tools",delivery:tools.length?"sent":"omitted",detail:`${tools.length} 个定义。`}],
-          input: captureTraceContent ? { messages: traceContent(messages), tools: tools.map(tool => tool.function?.name ?? tool.type), stream } : undefined });
+          input: captureTraceContent ? { messages: traceContent(messages), tools: traceContent(tools), stream } : undefined });
         let response: any;
         try {
           response=await this.request("chat/completions",{model,messages,
             ...((!sandbox || request.purpose === "diagnostic") && (this.provider === "openrouter" || tools.length) ? { tools } : {}),
             stream,max_tokens:sandbox?1024:OPENROUTER_LIMITS.responseTokens,
+            ...(requiredTool ? {tool_choice:"required",parallel_tool_calls:false} : {}),
             ...(this.provider === "openrouter" ? {stream_options:{include_usage:true},provider:{allow_fallbacks:false,...(tools.length?{require_parameters:true}:{})}} : {})},stream);
           const valid = response.choices?.[0]?.message?.role === "assistant";
           safeTraceFinish(request.trace, traceStep, { status: valid ? "completed" : "failed",
@@ -349,6 +356,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
           calls.every((call: any) => call.function?.name === "diagnostic_echo") &&
           tools.some(t=>t.function?.name === "diagnostic_echo"))) throw this.failure("临时模式禁止未经授权的外部工具调用。");
         if(!calls.length) {
+          if (request.requiredTool?.()) throw this.failure("模型未完成本轮必需的能力决策。");
           let text=typeof reply.content==="string"?reply.content.trim():"";
           const citations=(reply.annotations??[]).map((a:any)=>a.url_citation).filter((a:any)=>a?.url && /^https?:\/\//.test(a.url));
           if(citations.length) text+="\n\n"+[...new Set(citations.map((a:any)=>a.url))].slice(0,6).join("\n");
@@ -380,6 +388,8 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
             const args=JSON.parse(call.function?.arguments??"{}");
             if(!args || typeof args!=="object" || Array.isArray(args)) throw new Error("Invalid arguments.");
             const name=call.function?.name;
+            if (!offeredNames.has(name)) throw Error("本次请求未提供该工具。");
+            request.authorizeTool?.(name);
             if(name===IMAGE_TOOL && imageAllowed) {
               toolTrace = safeTraceStart(request.trace, { kind: "tool", name, provider: this.provider, parentId: traceStep, input: captureTraceContent ? args : undefined });
               const result = await imageTool!.execute(args);

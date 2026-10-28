@@ -12,12 +12,14 @@ export async function replyWithPaidImages(runtime: ManagedChatRuntime, imagesRun
     const imageTool = new ImageTool(request, autonomous, imageRequest => imagesRuntime.generateImage!(imageRequest));
     const images = imageTool.images;
     const executeTool = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      request.authorizeTool?.(name);
       if (name === imageTool.definition.name) return (await imageTool.execute(args)).output;
-      if (!request.executeTool || !request.tools?.some(t => t.name === name)) throw new Error("工具未授权。");
+      if (!request.executeTool || !(request.getTools?.() ?? request.tools)?.some(t => t.name === name)) throw new Error("工具未授权。");
       return request.executeTool(name, args);
     };
     try {
-      const response = await runtime.reply({ ...request, tools: [...(request.tools ?? []), imageTool.definition], executeTool });
+      const response = await runtime.reply({ ...request, tools: [...(request.tools ?? []), imageTool.definition],
+        getTools: () => [...(request.getTools?.() ?? request.tools ?? []), imageTool.definition], executeTool });
       if (images.length) return { ...response, images };
       if (imageTool.attempted || request.allowImageGeneration) return { ...response,
         text: "本轮没有成功生成图片。" + (response.text ? "\n" + response.text : ""),

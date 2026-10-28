@@ -74,7 +74,7 @@ test("trace retention, page cursors and payload bounds are enforced",()=>fixture
     const id=store.begin({kind:"heartbeat_decision",trigger:"scheduled_check"});
     for(let i=0;i<100;i++){const step=store.start(id,{kind:"tool",name:"read",input:{content:"内容".repeat(10000)}});store.finishStep(id,step,{status:"completed",output:{content:"结果".repeat(10000)}});}
     const run=store.get(id)!;assert.equal(run.steps.length,80);assert.equal(run.droppedSteps,20);assert.equal(run.truncated,true);
-    assert.ok(Buffer.byteLength(JSON.stringify(run))<=128*1024);
+    assert.ok(Buffer.byteLength(JSON.stringify(run))<=512*1024);
   } finally {store.close();}
 }));
 

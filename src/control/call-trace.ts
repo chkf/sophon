@@ -24,7 +24,7 @@ export function recordContextSources(observer: RuntimeTraceObserver | undefined,
   if (!observer) return;
   for (const source of sources) {
     const id = safeTraceStart(observer, {kind:"context",name:source.label,
-      input:{source:source.id,placement:source.placement,content:source.content.slice(0,3000),contentTruncated:source.content.length>3000}});
+      input:{source:source.id,placement:source.placement,content:source.placement === "policy" ? source.content.slice(0,24000) : "〔内容快照已省略 · " + source.content.length + " 字符；仅影响诊断展示〕",contentTruncated:source.placement === "policy" && source.content.length>24000}});
     safeTraceFinish(observer,id,{status:"completed"});
   }
 }

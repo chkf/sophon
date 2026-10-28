@@ -71,7 +71,7 @@ test("Gateway hidden stage directions are absent from delivered shared history a
     request.recordReplyText!("中间文字","two");
     await request.executeTool!("send_voice",{text:"第二段",instruction:"平稳表达"});
     return {text:request.finalizeReplyText!("（PRIVATE_END）\n最后文字"),replySegments:request.getPreparedReplySegments!()};
-  }},sessions,{load:async()=>context} as any,0,undefined,undefined,undefined,undefined,async()=>true);
+  }},sessions,{load:async()=>context} as any,0,undefined,undefined,undefined,undefined,async()=>true,undefined,undefined,undefined,undefined,undefined,undefined,undefined,{turnDecisionEnabled:false});
   try{
     const reply=await gateway.handle({channel:"telegram",conversationId:"1",senderId:"1",messageId:"1",text:"你好",receivedAt:new Date().toISOString(),attachments:[]});
     assert.equal(reply.kind,"model_reply");if(reply.kind!=="model_reply")return;
@@ -89,7 +89,7 @@ test("SILENT decision suppresses all staged text, voice, directions and images",
     {reply:async request=>{request.recordReplyText!("（隐藏描写）","one");await request.executeTool!("send_voice",{text:"不应发出",instruction:"自然表达"});return {text:"SILENT",images:[{} as any]};}},
     {latestActivityAt:async()=>undefined,latestConversation:async()=>undefined} as any,{load:async()=>localContext()} as any,
     {resolve:async()=>({channel:"telegram",target:"1"}),sendIfActive:async()=>assert.fail("silent text"),sendImagesIfActive:async()=>assert.fail("silent image")} as any,
-    undefined,undefined,undefined,undefined,async()=>true);
+    undefined,undefined,undefined,undefined,async()=>true,undefined,undefined,undefined,undefined,undefined,undefined,undefined,{turnDecisionEnabled:false});
   await runner.tick(new Date("2026-10-23T04:00:00Z"));
 }));
 
