@@ -4,7 +4,7 @@ import type { RuntimeTool } from './types.js';
 export const DECISION_TOOL_NAME = 'gateway_turn_decision';
 export const DECISION_TOOL: RuntimeTool = {
   name: DECISION_TOOL_NAME, readOnly: true, replaySafe: true,
-  description: '先按需查询记忆、贴纸候选及其他资料，正式回复前提交一次决策。stage_direction 只写简短、中性的虚构动作或心理描写，可表达角色当下意图；不写分析过程，不复述到台词。展示由本地开关控制。',
+  description: '先按需查询记忆、贴纸候选及其他资料，正式回复前提交一次决策。stage_direction 只写简短的虚构动作或心理描写，可表达角色当下意图；不写分析过程，不复述到台词。展示由本地开关控制。',
   parameters: {type:'object',additionalProperties:false,required:['stage_direction','reply_mode','sticker','quote','image'],properties:{
     stage_direction:{type:'string',minLength:1,maxLength:600},
     reply_mode:{type:'string',enum:['text','voice']},
