@@ -11,6 +11,7 @@ w.matchMedia=()=>({matches:false,addEventListener(){}});w.confirm=()=>true;
 w.ResizeObserver=class{observe(){}disconnect(){}};
 w.HTMLElement.prototype.scrollIntoView=function(){};
 w.addEventListener('error',event=>errors.push(event.message));
+let replySeconds=8;
 let reminderStatus='pending';
 let prompt='输出带引用的 JSON。',revision=0,topicName='文档',nodeGist='你计划整理目录。',saves=0;
 const at='2026-01-01T10:00:00Z';
@@ -20,7 +21,8 @@ const run={id:'fixture-call',kind:'chat',status:'completed',channel:'telegram',s
 w.fetch=async(url,init)=>{
  const action=url.split('/').at(-1),body=JSON.parse(init.body);let data;
  if(action==='session') data={authenticated:true,csrfToken:'fixture-csrf'};
- else if(action==='tasks') data={runs:[],nextBefore:null,heartbeat:{enabled:true,planningEnabled:true,activeChannel:'telegram',timezone:'UTC',plan:{date:today,channel:'telegram',wakes:[{time:'09:00',intent:'Review sample report'}]}},reminders:[{id:'rem_'+'a'.repeat(32),text:'检查合成文档 <script>literal</script>',dueAt:today+'T10:00:00Z',status:reminderStatus,channel:'telegram'}]};
+ else if(action==='tasks') data={runs:[],nextBefore:null,replyTiming:{seconds:replySeconds},heartbeat:{enabled:true,planningEnabled:true,activeChannel:'telegram',timezone:'UTC',plan:{date:today,channel:'telegram',wakes:[{time:'09:00',intent:'Review sample report'}]}},reminders:[{id:'rem_'+'a'.repeat(32),text:'检查合成文档 <script>literal</script>',dueAt:today+'T10:00:00Z',status:reminderStatus,channel:'telegram'}]};
+ else if(action==='reply-timing-save'){assert.equal(body.seconds,3);replySeconds=body.seconds;data={seconds:replySeconds};}
  else if(action==='reminder-cancel'){assert.equal(body.id,'rem_'+'a'.repeat(32));reminderStatus='cancelled';data={};}
  else if(action==='context') data={calls:[run],checkpoints:[],usage:{note:'合成用量'}};
  else if(action==='call') data=run;
@@ -63,6 +65,7 @@ try{
  readable.remove();delete w.__traceTest;
  }
  assert.deepEqual([...doc.querySelectorAll('[data-task-kind]')].map(node=>node.dataset.taskKind),['proactive','reminder']);
+ const delayInput=doc.querySelector('[aria-label="回复等待秒数"]');assert.equal(delayInput.value,'8');delayInput.value='3';delayInput.dispatchEvent(new w.Event('input'));await poll();await settle();assert.equal(delayInput.value,'3');await click('#reply-timing-panel button');assert.equal(replySeconds,3);
  assert.match(doc.querySelector('#reminder-panel').textContent,/检查合成文档/);assert.equal(doc.querySelector('#reminder-panel script'),null);
  await click('#reminder-panel button');assert.equal(reminderStatus,'cancelled');assert.match(doc.querySelector('#reminder-panel').textContent,/已取消/);
  await click('[data-page="context"]');assert.match(doc.querySelector('#page-content').textContent,/完整调用流程/);assert.match(doc.querySelector('#call-detail').textContent,/本次传入/);

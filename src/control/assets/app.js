@@ -191,7 +191,7 @@
     if (epoch !== state.epoch) return;
     state.task.runs = append ? [...state.task.runs, ...result.runs.filter(run => !state.task.runs.some(existing => existing.id === run.id))] : result.runs;
     retainTaskDay(result);
-    state.task.nextBefore = result.nextBefore; state.task.heartbeat = result.heartbeat; state.task.reminders = result.reminders || [];
+    state.task.nextBefore = result.nextBefore; state.task.heartbeat = result.heartbeat; state.task.replyTiming = result.replyTiming; state.task.reminders = result.reminders || [];
     if (result.heartbeat?.timezone) state.timezone = result.heartbeat.timezone;
     if (!state.task.selected && result.runs.length) state.task.selected = result.runs[0].id;
     renderTasks();
@@ -226,6 +226,21 @@
         : [empty('暂无待执行安排','可在聊天中指定时间创建提醒。')])
     );
   }
+  function replyTimingPanel() {
+    if (!state.task.replyTiming) return null;
+    const input = el('input',{type:'number',min:0,max:30,step:1,value:state.task.replyWaitDraft ?? state.task.replyTiming.seconds,'aria-label':'回复等待秒数',oninput:event=>{state.task.replyWaitDraft=event.target.value;}});
+    const save = button('保存等待时间',async()=>{
+      const seconds=Number(input.value);
+      if(input.value.trim()==='' || !Number.isInteger(seconds) || seconds<0 || seconds>30)throw Error('请输入 0–30 秒的整数。');
+      save.disabled=true;input.disabled=true;
+      try{state.task.replyTiming=await api('reply-timing-save',{seconds});state.task.replyWaitDraft=undefined;showNotice('回复等待时间已保存。');}
+      finally{save.disabled=false;input.disabled=false;}
+    });
+    return el('section',{class:'panel',id:'reply-timing-panel'},el('h3',{},'回复等待时间'),
+      el('p',{class:'small'},'收到最后一条消息后，等待多久再开始回复。连续发消息会重新计时；0 秒表示不额外等待。Telegram 与微信共用，默认 8 秒。'),
+      el('div',{class:'toolbar'},input,el('span',{},'秒'),save),
+      el('p',{class:'small'},'保存后无需重启，不影响已开始生成的回复。微信连续消息仍最多合并等待 30 秒。'));
+  }
   function renderTasks() {
     const filter = el('select', { 'aria-label': '按执行结果筛选', onchange: event => { state.task.filter = event.target.value; renderTaskList(); } },
       ...[['all', '全部结果'], ['delivered', '确认送达'], ['silent', '静默 / 跳过'], ['failed', '失败 / 不确定'], ['running', '运行中']].map(([value, label]) => el('option', { value }, label)));
@@ -233,6 +248,7 @@
     const runPanel = el('section', { class: 'run-list-panel', 'aria-label': '执行记录' }, el('div', { class: 'section-heading' }, el('h3', {}, '执行记录'), filter), el('div', { id: 'task-runs', class: 'run-items' }), el('div', { id: 'task-more', class: 'list-more' }));
     const inspector = el('section', { id: 'task-detail', class: 'inspector', 'aria-label': '调用轨迹' }, empty('选择一次执行', '左侧每条记录对应一次真实任务。'));
     const nodes = [taskToolbar(), reminderPanel()];
+    const timing=replyTimingPanel();if(timing)nodes.push(timing);
     nodes.push(el('div', { class: 'panel workbench' }, runPanel, inspector));
     content.replaceChildren(...nodes); renderTaskList();
   }
@@ -823,7 +839,7 @@
           .sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id)).slice(0, 1000);
         retainTaskDay(result);
         if (!keepOlder) state.task.nextBefore = result.nextBefore;
-        state.task.heartbeat = result.heartbeat; state.task.reminders = result.reminders || [];
+        state.task.heartbeat = result.heartbeat; state.task.replyTiming = result.replyTiming; state.task.reminders = result.reminders || [];
         if (result.heartbeat?.timezone) state.timezone = result.heartbeat.timezone;
         $('#task-toolbar')?.replaceWith(taskToolbar());
         $('#reminder-panel')?.replaceWith(reminderPanel());

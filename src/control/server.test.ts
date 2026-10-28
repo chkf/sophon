@@ -1,3 +1,4 @@
+import { ReplyTiming } from "../channels/reply-timing.js";
 import { ReminderStore } from "../reminders/store.js";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -24,7 +25,7 @@ async function fixture(run: (client: {
   const traces = new TaskTraceStore(dataDir);
   const data = new ControlData(dataDir);
   control = new ControlCenter({ publicUrl: temporary ? "https://pending.trycloudflare.com/control/" : origin + "/control/", temporary, data, traces,
-    host: new HostMonitor(dataDir), heartbeat: async () => ({ enabled: false, timezone: "UTC" }), reminders: new ReminderStore(dataDir),
+    replyTiming:new ReplyTiming(dataDir), host: new HostMonitor(dataDir), heartbeat: async () => ({ enabled: false, timezone: "UTC" }), reminders: new ReminderStore(dataDir),
     mutate: async work => { await beforeMutation?.(); return work(); } });
   const post = (action: string, input: unknown = {}, headers: Record<string, string> = {}) => fetch(origin + "/control/api/" + action,
     { method: "POST", headers: { origin, "content-type": "application/json", ...headers }, body: JSON.stringify(input) });
@@ -251,4 +252,18 @@ test("control lists future reminders and protects cancellation with owner login 
  assert.equal((await post('reminder-cancel',{id:task.id},headers)).status,200);
  assert.equal((await store.list())[0]!.status,'cancelled');
  assert.equal((await post('reminder-cancel',{id:'invalid'},headers)).status,400);
+}));
+
+
+test("reply timing updates require login and CSRF and persist without starting a model",()=>fixture(async({control,post,dataDir})=>{
+ assert.equal((await post('reply-timing-save',{seconds:3})).status,401);
+ const login=await post('login',{code:control.auth.issueCode()});
+ const cookie=login.headers.get('set-cookie')!.split(';')[0],csrf=(await login.json()).data.csrfToken;
+ assert.equal((await post('reply-timing-save',{seconds:3},{cookie})).status,403);
+ const headers={cookie,'x-control-csrf':csrf};
+ for(const seconds of [-1,31,1.5,'3',null])assert.equal((await post('reply-timing-save',{seconds},headers)).status,400);
+ assert.equal((await post('reply-timing-save',{seconds:3,extra:true},headers)).status,400);
+ assert.deepEqual((await (await post('reply-timing-save',{seconds:3},headers)).json()).data,{seconds:3});
+ assert.deepEqual(new ReplyTiming(dataDir).get(),{seconds:3});
+ assert.deepEqual((await (await post('tasks',{},headers)).json()).data.replyTiming,{seconds:3});
 }));

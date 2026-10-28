@@ -1,3 +1,4 @@
+import { validReplyWait, type ReplyTiming } from "../channels/reply-timing.js";
 import { ReminderError, type ReminderStore } from "../reminders/store.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -18,6 +19,8 @@ interface ControlOptions {
   calls?: TaskTraceStore;
   host: HostMonitor;
   reminders?: ReminderStore;
+  replyTiming?: ReplyTiming;
+  onReplyTimingChanged?: () => void;
   heartbeat: () => Promise<Record<string, unknown>>;
   mutate: <T>(work: () => Promise<T> | T) => Promise<T>;
 }
@@ -61,7 +64,7 @@ function safeName(name: string): string {
   return name.replace(/[\x00-\x1f\x7f/\\]/g, "_").slice(0, 180) || "attachment";
 }
 
-/** Owner-only data/trace interface. It deliberately has no model or operational controls. */
+/** Owner-only data, trace and reply-timing interface; no provider or deployment controls. */
 export class ControlCenter {
   readonly auth: ControlAuth;
   private url: URL;
@@ -198,6 +201,12 @@ export class ControlCenter {
       }
       let data: unknown;
       switch (action) {
+        case "reply-timing-save": {
+          if(!this.options.replyTiming)throw new HttpError(404,"unavailable","回复等待设置未启用。");
+          if(Object.keys(input).length!==1 || !validReplyWait(input.seconds))throw new HttpError(400,"invalid_seconds","回复等待时间须为 0–30 秒的整数。");
+          data=await mutate(()=>{const value=this.options.replyTiming!.set(input.seconds as number);this.options.onReplyTimingChanged?.();return value;});
+          break;
+        }
         case "conversations": data = await this.options.data.conversations(input); break;
         case "history": data = await this.options.data.history(input as never); break;
         case "history-delete": data = await mutate(() => this.options.data.deleteHistory(input as never)); break;
@@ -233,7 +242,7 @@ export class ControlCenter {
           if (input.before !== undefined && (typeof input.before !== "string" || !/^tr_\d{13}_[a-f0-9-]{36}$/.test(input.before))) {
             throw new HttpError(400, "invalid_cursor", "任务分页游标无效。");
           }
-          data = { ...this.options.traces.list(input as never), retentionDay:this.options.traces.retentionDay(), heartbeat: await this.options.heartbeat(), reminders: await this.options.reminders?.list() ?? [] }; break;
+          data = { ...this.options.traces.list(input as never), retentionDay:this.options.traces.retentionDay(), heartbeat: await this.options.heartbeat(), replyTiming: this.options.replyTiming?.get(), reminders: await this.options.reminders?.list() ?? [] }; break;
         }
         case "reminder-cancel": {
           if(!this.options.reminders)throw new HttpError(404,"reminders_unavailable","提醒功能不可用。");

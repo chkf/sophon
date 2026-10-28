@@ -86,6 +86,7 @@ export interface TelegramAdapterConfig {
   api?: TelegramApiClient;
   onPollingConflict?: () => void;
   inputDebounceMs?: number;
+  getInputDebounceMs?: () => number;
   conversationQueue?: import("../../util/serial-queue.js").SerialQueue;
   onCallback?: (query: NonNullable<TelegramUpdate["callback_query"]>, api: TelegramApiClient) => Promise<boolean>;
   showStageDirections?: () => Promise<boolean>;
