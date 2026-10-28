@@ -384,16 +384,17 @@ test("network, 402 and 429 failures have no automatic retries, fallback or leake
   }
 }));
 
-test("bounded context restores old evidence on demand and includes the latest bootstrap every turn",()=>temp(async root=>{
+test("complete context includes old evidence and the latest bootstrap while preserving history tools",()=>temp(async root=>{
   const history=Array.from({length:100},(_,i)=>({role:i%2?"assistant" as const:"user" as const,content:"原话"+i+" "+"x".repeat(1000)}));
   history[0]!.content="old-key-evidence";
   const {runtime,calls}=fixture(root,[stream({tool_calls:[call("gateway_read_history",{query:"old-key"})]}),stream({content:"找到原话"})]);
-  const result=await runtime.reply({...request(),messages:history});assert.equal(result.contextEffect,"history_windowed");
-  const paid=calls.filter(c=>c.path==="chat/completions");assert.ok(paid[0]!.body.messages.length<30);
+  const result=await runtime.reply({...request(),messages:history});assert.equal(result.contextEffect,"none");
+  const paid=calls.filter(c=>c.path==="chat/completions");
+  assert.deepEqual(paid[0]!.body.messages.slice(1).map((message:any)=>message.content[0].text),history.map(message=>message.content));
   assert.ok(paid[0]!.body.messages[0].content.includes("LIVE"));assert.match(paid[1]!.body.messages.at(-1).content,/old-key-evidence/);
 }));
 
-test("OpenRouter reads a bounded persistent tail and retrieves original evidence outside it",()=>temp(async root=>{
+test("OpenRouter sends complete persistent history and still retrieves original evidence by tool",()=>temp(async root=>{
   const sessions=new SessionStore(root);
   try {
   await sessions.append("telegram","persistent","owner",Array.from({length:180},(_,i)=>({id:"original:"+i,role:i%2?"assistant" as const:"user" as const,
@@ -401,8 +402,10 @@ test("OpenRouter reads a bounded persistent tail and retrieves original evidence
   const history=(await sessions.view("telegram","persistent")).history;
   const {runtime,calls}=fixture(root,[stream({tool_calls:[call("gateway_read_history",{query:"old-persistent"})]}),stream({content:"找到原话"})]);
   const result=await runtime.reply({...request("persistent"),history});
-  assert.equal(result.contextEffect,"history_windowed");
-  const paid=calls.filter(c=>c.path==="chat/completions");assert.ok(paid[0]!.body.messages.length<30);
+  assert.equal(result.contextEffect,"none");
+  const paid=calls.filter(c=>c.path==="chat/completions");
+  assert.deepEqual(paid[0]!.body.messages.slice(1,-1).map((message:any)=>message.content[0].text),
+    (await history.readRange(0,history.count)).map(message=>message.content));
   assert.match(paid[1]!.body.messages.at(-1).content,/old-persistent-evidence/);
   } finally { sessions.close(); }
 }));

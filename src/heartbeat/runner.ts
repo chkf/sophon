@@ -158,7 +158,7 @@ export class HeartbeatRunner {
     this.timer = setTimeout(() => {
       const revision = this.changeRevision;
       const proactive = Date.now() >= this.nextProactiveAt;
-      this.pendingTick = this.dispatch(new Date(), proactive)
+      this.pendingTick = this.dispatch(proactive)
         .catch(() => { this.nextProactiveAt = Date.now() + 20*60_000; console.error("[heartbeat] scheduler_failed"); })
         .then(async () => {
           try { await this.refreshReminderTime(); } catch { this.nextReminderAt=Date.now()+60_000; }
@@ -180,7 +180,8 @@ export class HeartbeatRunner {
   }
   scheduling() { return {waiting:this.waiting,nextActionAt:Number.isFinite(this.nextProactiveAt)?new Date(this.nextProactiveAt).toISOString():null}; }
   private defer(now:Date,waiting:string,at:number):void {
-    this.waiting=waiting;this.nextProactiveAt=Math.min(nextMorning(now,this.config,true),at);
+    this.waiting=waiting;
+    this.nextProactiveAt=this.config.planningEnabled ? Math.min(nextMorning(now,this.config,true),at) : at;
   }
   private resumePlan(state:HeartbeatState,now:Date):void {
     this.defer(now,this.config.planningEnabled?"等待计划唤醒":"等待下次检查",this.config.planningEnabled
@@ -227,24 +228,10 @@ export class HeartbeatRunner {
     return state;
   }
 
-  private async flushPending(state: HeartbeatState, now: Date): Promise<void> {
+  private async flushPending(state: HeartbeatState, clock: () => Date): Promise<void> {
     if (await this.paused()) return;
     const pending = state.pending;
     if (!pending) return;
-    if (this.reminders && reminderBlocks(await this.reminders.list(),now)) {
-      this.traceFinish(pending.traceId,"skipped","scheduled_reminder_priority");
-      delete state.pending;await writeJsonAtomic(this.statePath,state);return;
-    }
-    // Never defer an old evening message until the next morning after quiet hours.
-    const preparedAt = new Date(pending.at).getTime();
-    if (!Number.isFinite(preparedAt) || now.getTime() - preparedAt > 45 * 60_000) {
-      this.traceFinish(pending.traceId,"skipped","pending_expired");
-      delete state.pending;
-      await writeJsonAtomic(this.statePath, state);
-      return;
-    }
-    if (isQuietTime(now, this.config.timezone, this.config.quietStart, this.config.quietEnd)) return;
-
     if (!pending.channel) {
       this.traceFinish(pending.traceId,"skipped","pending_channel_missing");
       delete state.pending;
@@ -265,6 +252,24 @@ export class HeartbeatRunner {
         pending.text = replyText(pending.replySegments);
       } else pending.text = displayText(pending.text, show);
     }
+    const reminders = await this.reminders?.list();
+    // Queue waits, generation and delivery preparation can cross a time boundary.
+    const now = clock();
+    if (reminders && reminderBlocks(reminders,now)) {
+      this.traceFinish(pending.traceId,"skipped","scheduled_reminder_priority");
+      delete state.pending;await writeJsonAtomic(this.statePath,state);return;
+    }
+    // Never defer an old evening message until the next morning after quiet hours.
+    const preparedAt = new Date(pending.at).getTime();
+    if (!Number.isFinite(preparedAt) || now.getTime() - preparedAt > 45 * 60_000) {
+      this.traceFinish(pending.traceId,"skipped","pending_expired");
+      delete state.pending;
+      await writeJsonAtomic(this.statePath, state);
+      return;
+    }
+    if (isQuietTime(now, this.config.timezone, this.config.quietStart, this.config.quietEnd)) return;
+    const today = dateKey(now,this.config.timezone);
+    if (state.dateKey !== today) { state.dateKey=today;state.sentToday=0; }
     // Reserve the attempt before touching the network. Proactive sends are intentionally
     // at-most-once: an ambiguous network failure must not cause the same message to be
     // replayed after restart or on the next heartbeat tick.
@@ -282,14 +287,21 @@ export class HeartbeatRunner {
     try { if (!traceId || this.traces?.get(traceId)?.status !== "running") traceId = this.traceBegin({kind:"heartbeat_delivery",trigger:"pending_delivery",channel:pending.channel,at:now}); } catch { traceId = undefined; }
     this.traceEvent(traceId,{kind:"system",name:"发送尝试已登记"},{deliveryId:"heartbeat:"+pending.at,attemptReserved:true});
     let delivered = false;
+    const canDeliver = () => {
+      if (!isQuietTime(clock(),this.config.timezone,this.config.quietStart,this.config.quietEnd)) return true;
+      this.traceFinish(traceId,delivered ? "completed" : "skipped",delivered ? "partial_delivery" : "quiet_hours");
+      return false;
+    };
     try {
       const deliveryId = "heartbeat:" + pending.at;
       if (pending.images?.length) {
+        if (!canDeliver()) return;
         const sent = await this.traceDelivery(traceId,"图片交付",{channel:pending.channel,count:pending.images.length,deliveryId},() => this.router.sendImagesIfActive(pending.channel!, pending.target, pending.images!, deliveryId));
         if (!sent) { this.traceFinish(traceId,"skipped","channel_unavailable"); return; }
         delivered = true;
       }
       if (pending.text) {
+        if (!canDeliver()) return;
         let platformMessages: PlatformMessageFragment[] | undefined;
         const sent = await this.traceDelivery(traceId,"文字与语音交付",{channel:pending.channel,text:pending.text,voice:Boolean(pending.voiceText),deliveryId:deliveryId+":text"},() => this.router.sendIfActive(pending.channel!, pending.target, pending.text, pending.voiceText, fragments => { platformMessages = fragments; }, { deliveryId: deliveryId + ":text", at: now.toISOString(), ...(pending.replySegments ? {replySegments:pending.replySegments} : {}), ...(pending.channel==="telegram"&&pending.voiceText&&pending.voiceInstruction ? {voiceInstruction:pending.voiceInstruction} : {}) }));
         if (!sent) { this.traceFinish(traceId,delivered ? "completed" : "skipped",delivered ? "partial_delivery" : "channel_unavailable"); return; }
@@ -298,6 +310,7 @@ export class HeartbeatRunner {
           pending.target, pending.text, undefined, deliveryId + ":text", now.toISOString(), { origin: "proactive" }, platformMessages);
       }
       if (pending.stickerIndex) {
+        if (!canDeliver()) return;
         const sent = await this.traceDelivery(traceId,"贴纸交付",{channel:pending.channel,index:pending.stickerIndex},() => this.router.sendStickerIfActive(pending.channel!, pending.target, pending.stickerIndex!));
         if (sent) await recordDeliveredAssistant(this.sessions, pending.channel, pending.target,
           pending.target, "[贴纸]", undefined, deliveryId + ":sticker", now.toISOString());
@@ -457,21 +470,23 @@ export class HeartbeatRunner {
     return due !== undefined && due >= 0 ? plan!.wakes[due]!.intent : undefined;
   }
 
-  async tick(now = new Date()): Promise<void> {
-    return this.dispatch(now,true);
+  async tick(now?: Date): Promise<void> {
+    // Explicit dates retain deterministic checks; live work reads time after waiting.
+    return this.dispatch(true,now ? () => now : undefined);
   }
-  private dispatch(now:Date,proactive:boolean):Promise<void> {
-    const work=()=>this.tickOrdered(now,proactive);
+  private dispatch(proactive:boolean,clock:() => Date = () => new Date()):Promise<void> {
+    const work=()=>this.tickOrdered(clock,proactive);
     return this.conversationQueue ? this.conversationQueue.run(work) : work();
   }
-  private async tickOrdered(now: Date,proactive=true): Promise<void> {
-    await this.reminderDelivery?.tick(now);
+  private async tickOrdered(clock: () => Date,proactive=true): Promise<void> {
+    await this.reminderDelivery?.tick(clock());
     if (!proactive) return;
-    this.defer(now,"等待明日规划",nextMorning(now,this.config,true));
+    const now = clock();
     const state = await this.loadState(now);
     if (!this.config.enabled || this.config.dailyCap<=0 || await this.paused()) {
       await this.consumeDue(state,now,"paused");this.waiting="主动聊天未启用";this.nextProactiveAt=Infinity;return;
     }
+    this.defer(now,this.config.planningEnabled ? "等待明日规划" : "等待下次检查",Infinity);
     if(this.reminders) {
       const reminders=await this.reminders.list(),revision=reminderRevision(reminders);
       if(state.plan){
@@ -482,14 +497,15 @@ export class HeartbeatRunner {
       }
       if(reminderBlocks(reminders,now)) {
         await this.consumeDue(state,now,"scheduled_reminder_priority");
-        if(state.pending)await this.flushPending(state,now);
+        if(state.pending)await this.flushPending(state,clock);
         this.defer(now,"正在避让约定提醒",now.getTime()+30*60_000+1);return;
       }
     }
     if (state.pending) {
-      await this.flushPending(state, now);
-      this.resumePlan(state,now);
-      if(state.pending)this.nextProactiveAt=Math.min(this.nextProactiveAt,now.getTime()+60_000);
+      await this.flushPending(state, clock);
+      const current = clock();
+      this.resumePlan(state,current);
+      if(state.pending)this.nextProactiveAt=Math.min(this.nextProactiveAt,current.getTime()+60_000);
       return;
     }
     const interval=await this.intervalSettings?.();
@@ -629,7 +645,7 @@ export class HeartbeatRunner {
         at: now.toISOString(),
       };
       await writeJsonAtomic(this.statePath, state);
-      await this.flushPending(state, now);
+      await this.flushPending(state, clock);
     } catch (error) { this.traceFinish(traceId,"failed","task_failed"); throw error; }
   }
 }

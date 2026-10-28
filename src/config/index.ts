@@ -36,7 +36,7 @@ export interface GatewayConfig {
   siwcDevkitDir: string;
   model?: string;
   provider?: "api" | "siwc" | "openrouter";
-  api?: { baseUrl?: string; apiKey?: string; defaultModel?: string; contextWindow: number; vision: boolean; heartbeat: boolean; stream: boolean };
+  api?: { baseUrl?: string; apiKey?: string; defaultModel?: string; vision: boolean; heartbeat: boolean; stream: boolean };
   openrouter?: { apiKey?: string; defaultModel?: string; imageModel?: string; webSearch: boolean; heartbeat: boolean };
   credentialKeyFile?: string;
   maxToolRounds: number;
@@ -140,7 +140,6 @@ export function loadConfig(): GatewayConfig {
       baseUrl: apiBaseUrl(),
       apiKey: optional("GATEWAY_API_KEY"),
       defaultModel: optional("GATEWAY_API_MODEL"),
-      contextWindow: integer("GATEWAY_API_CONTEXT_WINDOW", 32768, 8192),
       vision: bool("GATEWAY_API_VISION", false),
       heartbeat: bool("GATEWAY_API_HEARTBEAT_ENABLED", false),
       stream: bool("GATEWAY_API_STREAM", true),

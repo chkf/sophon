@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHistory } from "../history.js";
-import { readRecoveryHistoryWindow, SIWC_COLD_RECOVERY_SAFE_TOKENS } from "./history-window.js";
+import { readRecoveryHistoryWindow } from "./history-window.js";
 import type { ChatMessage } from "../types.js";
 
 test("normal SIWC recovery replays complete SQLite history, independent of age", async () => {
@@ -56,16 +56,28 @@ test("SIWC recovery can retain sparse chats without any time-based expiration", 
   assert.equal(window.expanded, false);
 });
 
-test("checkpoint-free oversize recovery reports suffix degradation, never alters SQLite", async () => {
-  const messages: ChatMessage[] = Array.from({ length: 220 }, (_, i) => ({
-    role: i % 2 ? "assistant" : "user", content: "z".repeat(2_500), at: "2026-10-10T08:00:00Z",
+test("large cold recovery and checkpoint deltas retain every original message", async () => {
+  const messages: ChatMessage[] = Array.from({ length: 600 }, (_, i) => ({
+    role: i % 2 ? "assistant" : "user", content: "Sample record " + i + " ".repeat(2_500), at: "2030-01-02T08:00:00Z",
   }));
   const history = createHistory(messages.length, async (offset, limit) => messages.slice(offset, offset + limit));
   const cold = await readRecoveryHistoryWindow(history);
-  assert.ok(cold.truncated);
-  assert.ok(cold.estimatedTokens <= SIWC_COLD_RECOVERY_SAFE_TOKENS);
-  assert.ok(cold.messages.length < messages.length);
-  assert.equal(cold.messages.at(-1), messages.at(-1));
-  await assert.rejects(readRecoveryHistoryWindow(history, 2), /checkpoint delta exceeds safe capacity/);
-  assert.equal(messages.length, 220);
+  assert.equal(cold.truncated, false);
+  assert.ok(cold.estimatedTokens > 100_000);
+  assert.deepEqual(cold.messages, messages);
+  assert.deepEqual((await readRecoveryHistoryWindow(history, 2)).messages, messages.slice(2));
+  assert.equal(messages.length, 600);
+});
+
+test("a single large recovery message is preserved without a token cutoff", async () => {
+  const messages: ChatMessage[] = [{ role: "user", content: "Sample document. ".repeat(15_000) }];
+  const history = createHistory(messages.length, async (offset, limit) => messages.slice(offset, offset + limit));
+  const window = await readRecoveryHistoryWindow(history);
+  assert.ok(window.estimatedTokens > 100_000);
+  assert.deepEqual(window.messages, messages);
+});
+
+test("recovery rejects incomplete snapshots instead of sending a partial transcript", async () => {
+  const history = createHistory(3, async () => [{ role: "user", content: "Sample document." }]);
+  await assert.rejects(readRecoveryHistoryWindow(history), /历史快照发生变化/);
 });

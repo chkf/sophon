@@ -39,3 +39,18 @@ export function createHistory(count: number, read: (offset: number, limit: numbe
 export function historyFromMessages(messages: ChatMessage[]): RuntimeHistory {
   return createHistory(messages.length, async (offset, limit) => messages.slice(offset, offset + limit));
 }
+
+/** Read a fixed snapshot in batches without dropping messages to fit a local budget. */
+export async function readHistoryMessages(history: RuntimeHistory, start = 0): Promise<ChatMessage[]> {
+  cursor(start);
+  const end = history.count;
+  if (start > end) throw new Error("历史游标超出本轮会话范围。");
+  const messages: ChatMessage[] = [];
+  for (let offset = start; offset < end; offset += 256) {
+    const length = Math.min(256, end - offset);
+    const batch = await history.readRange(offset, length);
+    if (batch.length !== length) throw new Error("历史快照发生变化，未发送不完整的对话。");
+    messages.push(...batch);
+  }
+  return messages;
+}

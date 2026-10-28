@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import type { ChatMessage, MemoryRuntimeContext, RuntimeHistory } from '../types.js';
-import { messageTokens, SIWC_COLD_RECOVERY_SAFE_TOKENS } from './history-window.js';
 import { hasCompaction, transcriptItems } from './responses-codec.js';
 import { dateKey } from '../../util/clock-window.js';
 export interface MemoryRebase {version:1;revision:number;at:string;fromSeq:number;throughSeq:number;seedHash:string;windowDate?:string;timezone?:string}
@@ -16,18 +15,16 @@ export async function memoryWindow(history:RuntimeHistory,now=new Date(),timezon
  // Subtract calendar dates, not elapsed local hours (including across DST changes).
  firstDate.setUTCDate(firstDate.getUTCDate()-2);
  const cutoff=firstDate.toISOString().slice(0,10);
- const messages:ChatMessage[]=[];let from=history.count,tokens=0,stop=false;
+ const messages:ChatMessage[]=[];let from=history.count,stop=false;
  while(from>0&&!stop){
   const start=Math.max(0,from-128),batch=await history.readRange(start,from-start);
   if(batch.length!==from-start)throw new Error('Memory rebase history snapshot changed.');
   for(let i=batch.length-1;i>=0;i--){
-   const m=batch[i]!,cost=messageTokens(m),at=Date.parse(m.at??'');
+   const m=batch[i]!,at=Date.parse(m.at??'');
    const old=Number.isFinite(at)&&dateKey(new Date(at),timezone)<cutoff;
    // A completed reply dates its whole exchange. An unfinished turn is never expired.
    if(m.role==='assistant'&&!m.partial&&old){stop=true;from=start+i+1;break;}
-   // Capacity is a hard failure, never a second, shorter selection window or a model summary.
-   if(tokens+cost>SIWC_COLD_RECOVERY_SAFE_TOKENS)throw new Error('Three-day memory window exceeds the safe recovery budget; preserve the current lane and complete exchanges.');
-   messages.unshift(m);tokens+=cost;from=start+i;
+   messages.unshift(m);from=start+i;
   }
  }
  return {messages,fromSeq:from};

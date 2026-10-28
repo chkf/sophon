@@ -330,11 +330,6 @@ export class StatefulResponsesBridge {
         startedAt: lane.startedAt, lastCompactedAt: lane.lastCompactedAt,
         checkpoint: lane.checkpoint,memoryRebase:lane.memoryRebase }, "control-change");
       const coldHistory = options.history ? await readRecoveryHistoryWindow(options.history) : undefined;
-      if (coldHistory?.truncated) {
-        console.error("[runtime-recovery-degraded] explicit Core/Persona change requires a " +
-          "checkpoint-free transcript; cold-start safety budget truncated older messages. " +
-          "Original SQLite records and archived checkpoint remain available. session=" + options.sessionId);
-      }
       const transcript = coldHistory
         ? await transcriptItems(coldHistory.messages, options.timezone)
         : options.messages.length > 1
@@ -554,7 +549,7 @@ export class StatefulResponsesBridge {
             sources:options.contextSources, policySent:Boolean(policyItem && nextInput.includes(policyItem)),
             continues:Boolean(previousResponseId), replay:!previousResponseId && (continuationRecoveryUsed || recoverySource === "checkpoint"),
             historyItems:nextInput === input ? historyInputItemCount : 0,
-            historyTruncated:window?.truncated === true, currentUserSent:nextInput.includes(currentUser),
+            historyTruncated:false, currentUserSent:nextInput.includes(currentUser),
             toolResults:nextInput.filter(item=>item.type === "function_call_output").length,
             memoryRevision:lane.memoryRebase?.revision,
             tools:tools.length, liveContextSent:Boolean(liveItem && nextInput.includes(liveItem)),
@@ -932,12 +927,11 @@ export class StatefulResponsesBridge {
     }
     if(lane.memoryRebase&&!options.memory)throw new Error("Memory history rebuild requires the current graph.");
     const opaque = options.memory?.ready===false?undefined:[...lane.contextItems].reverse().find(item => item.type === "compaction");
-    // Old checkpoints have no original compaction boundary. Use the existing
-    // bounded cold-recovery suffix rather than guess a cursor and lose messages.
+    // Old checkpoints have no original compaction boundary. Replay the complete
+    // cold-start transcript rather than guess a cursor and lose messages.
     const start = opaque ? lane.checkpoint?.replayFromSeq ?? 0 : 0;
     const window = await readRecoveryHistoryWindow(options.history, start);
     const items = [...(opaque ? [opaque] : []), ...await transcriptItems(window.messages, options.timezone)];
-    if (window.truncated) console.error("[runtime-history-recovery] edited legacy history uses bounded SQLite suffix session=" + lane.sessionId);
     const before = { contextItems: lane.contextItems, historyCursor: lane.historyCursor,
       attachmentCursor: lane.attachmentCursor, coverageVerified: lane.coverageVerified,
       historyRebuildPending: lane.historyRebuildPending, checkpoint: lane.checkpoint,memoryRebase:lane.memoryRebase };

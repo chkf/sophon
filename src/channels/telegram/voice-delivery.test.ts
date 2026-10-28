@@ -151,7 +151,7 @@ test("heartbeat commits TG voice and confirmed text chunks as one partial reply 
         pending: { channel: "telegram", target: "123", at: now.toISOString(),
           fingerprint: "fixture-voice", text: voice + "\n\n" + supplement, voiceText: voice },
       };
-      await (runner as any).flushPending(state, now);
+      await (runner as any).flushPending(state, () => now);
       const messages = (await sessions.get("telegram", "123", "123")).messages;
       assert.equal(messages.length, 1);
       assert.equal(messages[0]!.content, voice + "\n\n" + firstSupplement);
@@ -162,7 +162,7 @@ test("heartbeat commits TG voice and confirmed text chunks as one partial reply 
       assert.equal(recovered.pending, undefined);
       assert.equal(recovered.sentToday, 1);
       const restarted = new HeartbeatRunner(root, config, {} as never, sessions, {} as never, router);
-      await (restarted as any).flushPending(recovered, now);
+      await (restarted as any).flushPending(recovered, () => now);
       assert.equal(f.voiceCalls(), 1);
       assert.equal(f.attemptedText.length, spoken ? 2 : 3);
       assert.equal((await sessions.get("telegram", "123", "123")).messages.length, 1);

@@ -11,7 +11,6 @@ import { GatewayService } from "./service.js";
 import { loadConfig } from "./config/index.js";
 import { localContext } from "./core/context-fixture.js";
 import { ImageTool } from "./runtime/images/tool.js";
-import { assertRequestBudget, historyWindow, estimatedTextTokens } from "./runtime/context-budget.js";
 import { ProviderDeliveryStore } from "./runtime/delivery-store.js";
 import { LaneStore } from "./runtime/siwc/lane-store.js";
 import { replyOutcome } from "./channels/reply.js";
@@ -95,15 +94,6 @@ test("image tool forwards only an actual image and narrow visual fields", async 
   assert.equal(paid.reference.path, "image"); assert.equal(result.response?.images?.[0], image);
 });
 
-test("history budget distinguishes UTF-8 estimates from characters and fails before overflow", () => {
-  assert.ok(estimatedTextTokens("你好") > estimatedTextTokens("hi"));
-  const messages = Array.from({ length: 40 }, () => ({ role: "user" as const, content: "x".repeat(1000) }));
-  const start = historyWindow(messages, 128_000, "rules", [], 0);
-  assert.equal(start, 16);
-  assert.throws(() => historyWindow(messages, 4096, "rules", [], 0), /预算/);
-  assert.throws(() => historyWindow([{ role: "user", content: "x".repeat(24_001) }], 128_000, "", [], 0), /预算/);
-});
-
 test("delivery tickets read legacy state and reject invalid providers without fallback", () => temp(async root => {
   const store = new ProviderDeliveryStore(root);
   await store.write("chat", { provider: "siwc", id: "chat:provider:siwc:1" });
@@ -157,11 +147,6 @@ test("shutdown closes runtime and releases lock even if channel draining fails",
   assert.deepEqual(events, ["telegram", "runtime", "lock"]);
 }));
 
-test("tool budget includes schemas and growing results but not base64 bytes", () => {
-  assert.doesNotThrow(() => assertRequestBudget([{ content: [{ image_url: { url: "data:image/png;base64," + "x".repeat(100000) } }] }], [], 20000));
-  assert.throws(() => assertRequestBudget([{ content: "x".repeat(100000) }], [], 20000), /预算/);
-  assert.throws(() => assertRequestBudget([], [{ schema: "x".repeat(100000) }], 20000), /预算/);
-});
 test("provider close waits for all cleanup even if one fails", async () => {
   await temp(async root => {
     let finish!: () => void; let settled = false;
