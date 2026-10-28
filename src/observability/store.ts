@@ -6,8 +6,8 @@ import { mainPath, openDatabase, putState, schemaVersion, transaction } from "..
 import type { RuntimeTraceObserver, TaskTraceKind, TaskTraceRun, TaskTraceStatus, TaskTraceSummary, TraceStepFinish, TraceStepStart, TraceUsage } from "./types.js";
 
 const MAX_STEPS = 80;
-const MAX_RUN_BYTES = 128 * 1024;
-const MAX_PAYLOAD_BYTES = 12 * 1024;
+const MAX_RUN_BYTES = 512 * 1024;
+const MAX_PAYLOAD_BYTES = 64 * 1024;
 const ID = /^tr_\d{13}_[a-f0-9-]{36}$/;
 const sensitiveKey = /^(?:authorization|proxy.authorization|cookie|set.cookie|api.?key|access.?token|refresh.?token|id.?token|client.?secret|secret|password|credentials|encrypted_content|ciphertext|reasoning|reasoning_content|reasoning_details|accessToken|refreshToken|initData)$/i;
 const usageFields = ["inputTokens", "cachedInputTokens", "outputTokens", "reasoningTokens", "totalTokens", "costUsd"] as const;
@@ -30,7 +30,7 @@ export function sanitizeTrace(value: unknown, secrets: string[] = []): { value: 
       .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted]")
       .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret)\s*[=:]\s*)[^\s&,;]+/gi, "$1[redacted]")
       .replace(/data:[^;\s]+;base64,[A-Za-z0-9+/=]+/g, "[binary omitted]");
-    if (result.length > 6000) { truncated = true; result = result.slice(0, 6000) + "\n[truncated]"; }
+    if (result.length > 24000) { truncated = true; result = result.slice(0, 24000) + "\n[truncated]"; }
     return result;
   };
   const walk = (item: unknown, depth: number): unknown => {

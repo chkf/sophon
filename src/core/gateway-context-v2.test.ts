@@ -1,3 +1,4 @@
+import { selectTestTurn } from "../testing/turn-decision.js";
 import { executeLocalContextTool } from "./tools.js";
 import { writeLegacyPersonaFixture, fixturePresets } from "../../scripts/testing/persona-fixture.mjs";
 import test from "node:test";
@@ -74,7 +75,7 @@ test("manual Core edits refresh chat while model tools only mutate Recent", () =
   const snapshots: Array<ReturnType<LocalCoreContextProvider["peek"]>> = [];
   let failure: unknown;
   const runtime: ChatRuntime = { async reply(request) {
-    requests.push(request);
+    requests.push(request); await selectTestTurn(request, {groups:["recent_manage"]});
     if (requests.length === 1) {
       try {
         const execute = request.executeTool!;
@@ -133,9 +134,9 @@ test("manual Core edits refresh chat while model tools only mutate Recent", () =
   assert.notEqual(requests[1]!.context!.controlRevision, requests[0]!.context!.controlRevision);
   assert.notEqual(requests[1]!.context!.contextRevision, requests[0]!.context!.contextRevision);
   assert.doesNotMatch(requests[1]!.context!.content, new RegExp(DELETED_RECENT));
-  assert.equal(requests[1]!.context!.content, "{}", "Recent is no longer a persisted developer context item");
+  assert.match(requests[1]!.context!.content, new RegExp(KEPT_RECENT), 'Recent is supplied for bootstrap and recovery');
   assert.doesNotMatch(requests[1]!.turnInstructions!, new RegExp(DELETED_RECENT));
-  assert.match(requests[1]!.turnInstructions!, new RegExp(KEPT_RECENT));
+  assert.doesNotMatch(requests[1]!.turnInstructions!, new RegExp(KEPT_RECENT));
   const history = await value.sessions.get("telegram", "123");
   assert.equal(history!.messages[0]!.content, "正式聊天原文应保留");
 }));
@@ -143,7 +144,7 @@ test("manual Core edits refresh chat while model tools only mutate Recent", () =
 for (const version of [0, 1] as const) {
   test("Gateway schema " + version + " keeps legacy Recent writes scoped and exposes session-message history", () => fixture(version, async value => {
     let request: ChatRequest | undefined;
-    const runtime: ChatRuntime = { async reply(input) { request = input; return { text: "旧版正常交流" }; } };
+    const runtime: ChatRuntime = { async reply(input) { request = input; await selectTestTurn(input, {groups:["recent_manage"]}); return { text: "旧版正常交流" }; } };
     const gateway = new Gateway(runtime, value.sessions, value.context,
       8, "Asia/Shanghai", () => new Date(receivedAt), version ? value.personas : undefined, value.knowledge);
     assert.equal((await gateway.handle(incoming("legacy"))).kind, "model_reply");
@@ -152,11 +153,11 @@ for (const version of [0, 1] as const) {
       "gateway_recent_read", "gateway_recent_create", "gateway_recent_write",
     ]);
     assert.ok(toolNames.includes("gateway_read_history"));
-    assert.equal(toolNames.length, 4);
+    assert.equal(toolNames.length, 6);
     assert.match(JSON.stringify(await request!.executeTool!("gateway_read_history", { query: "正式聊天原文应保留" })), /正式聊天原文应保留/);
     for (const name of NEW_TOOLS) await assert.rejects(request!.executeTool!(name, {}), /未开放/);
-    assert.equal(request!.context!.content, "{}");
-    assert.match(request!.turnInstructions!, new RegExp(DELETED_RECENT));
+    assert.match(request!.context!.content, new RegExp(DELETED_RECENT));
+    assert.doesNotMatch(request!.turnInstructions!, new RegExp(DELETED_RECENT));
     assert.match(request!.instructions!, /正式初始指令标记/);
   }));
 }

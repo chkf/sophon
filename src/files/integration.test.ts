@@ -1,3 +1,4 @@
+import { selectTestTurn } from "../testing/turn-decision.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -35,6 +36,7 @@ test("Gateway advertises and executes file tools through the owner Telegram tran
   const files = new FileService(data, join(root, "generated"), "70001", file => telegram.sendDocumentToOwner(file));
   sessions = new SessionStore(data);
   const runtime = { async reply(request: ChatRequest) {
+    await selectTestTurn(request, {groups:["files"]});
     assert.ok(request.tools?.some(tool => tool.name === "gateway_file_list"));
     const result = await request.executeTool!("telegram_send_document", { mode: "generate", filename: "result.csv", content: "label,value\nA,1\n" }) as any;
     assert.equal(result.messageId, 51);

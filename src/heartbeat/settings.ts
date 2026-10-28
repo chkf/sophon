@@ -8,7 +8,7 @@ interface Settings {enabled?:boolean;interval?:ProactiveInterval}
 export class ProactiveSettings {
  private readonly path:string;
  private readonly queue=new SerialQueue();
- constructor(dataDir:string,private readonly initialEnabled:boolean,private readonly initialInterval={minIntervalMinutes:60,maxIntervalMinutes:120}){this.path=join(dataDir,'heartbeat','settings.json');}
+ constructor(dataDir:string,private readonly initialEnabled:boolean,private readonly initialInterval={minIntervalMinutes:60,maxIntervalMinutes:120},private readonly onChanged:()=>void=()=>{}){this.path=join(dataDir,'heartbeat','settings.json');}
  async migrateChannel(router:import('../channels/active.js').ActiveChannelRouter,fallback:import('../channels/types.js').ChannelName):Promise<void>{
   if(await router.getActive()!=="off")return;
   if(!await this.hasChoice())await this.setEnabled(false);
@@ -18,7 +18,7 @@ export class ProactiveSettings {
  async explicitlyEnabled():Promise<boolean>{return (await this.read()).enabled===true;}
  async enabled():Promise<boolean>{const value=(await this.read()).enabled;return typeof value==='boolean'?value:this.initialEnabled;}
  private read():Promise<Settings>{return readJsonFile(this.path,{});}
- private update(change:(state:Settings)=>void):Promise<void>{return this.queue.run(async()=>{const state=await this.read();change(state);await writeJsonAtomic(this.path,state);});}
+ private update(change:(state:Settings)=>void):Promise<void>{return this.queue.run(async()=>{const state=await this.read();change(state);await writeJsonAtomic(this.path,state);this.onChanged();});}
  async setEnabled(enabled:boolean):Promise<void>{await this.update(state=>{state.enabled=enabled;});}
  async interval():Promise<ProactiveInterval>{return (await this.read()).interval??{...this.initialInterval,revision:'environment'};}
  async setInterval(min:number,max:number):Promise<void>{

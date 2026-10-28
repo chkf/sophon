@@ -42,9 +42,8 @@ export class MemoryRecent {
   });
  }
  remainingDirectory(entries:readonly RecentEntry[]):RecentEntry[] {
-  if(!this.enabled())return [...entries];this.sync();
-  const mapped=new Map((this.store.db.prepare('SELECT recent_id,recent_revision FROM memory_recent_links WHERE owner_scope=?').all(this.store.scope) as {recent_id:string;recent_revision:number}[]).map(r=>[r.recent_id,r.recent_revision]));
-  return entries.filter(e=>e.sourceId?.startsWith('media:')||mapped.get(e.id)!==e.revision);
+  this.sync();
+  // References in the graph do not replace live Recent content or its state.
+  return [...entries];
  }
 }
-

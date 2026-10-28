@@ -1,3 +1,4 @@
+import { selectTestTurn } from "../testing/turn-decision.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -29,6 +30,7 @@ test("legacy disabled settings automatically prepare memory, expose files and ru
   const runtime = { getSession: async () => ({ status: "connected", sharing: true }),
     async reply(request: ChatRequest) {
       if (request.purpose === "recent_review") { reviews++; return { text: '{"changes":[],"creates":[],"deletes":[]}' }; }
+      await selectTestTurn(request, {groups:["files"]});
       assert.ok(request.tools?.some(tool => tool.name === "telegram_send_document"));
       await request.executeTool!("telegram_send_document", { mode: "save", filename: "result.txt", content: "Synthetic result" });
       return { text: "文件已保存。" };

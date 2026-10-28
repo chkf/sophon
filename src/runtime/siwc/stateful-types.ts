@@ -129,6 +129,9 @@ export interface StatefulResponseOptions {
   context?: StatefulRuntimeContext;
   attachments?: RuntimeAttachment[];
   tools?: RuntimeTool[];
+  getTools?: () => RuntimeTool[];
+  requiredTool?: () => string | undefined;
+  authorizeTool?: (name: string) => void;
   executeTool?: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   recordReplyText?: (text: string, id: string) => void;
   getPreparedReplySegments?: () => ReplySegment[];

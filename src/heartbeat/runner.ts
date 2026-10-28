@@ -1,3 +1,6 @@
+import { nextMorning, nextPlannedCheck } from "./clock.js";
+import { reminderBlocks, reminderRevision, avoidReminderWakes, reminderPlanningContext } from "../reminders/heartbeat.js";
+import { LOCAL_KNOWLEDGE_TOOLS, LOCAL_KNOWLEDGE_TOOL_NAMES, executeLocalKnowledgeTool } from "../knowledge/tools.js";
 import { CHAT_BUBBLE_GUIDANCE } from "../runtime/chat-format.js";
 import { displayText, replyText, visibleSegments } from "../runtime/reply-segments.js";
 import type { PlatformMessageFragment } from "../channels/types.js";
@@ -42,6 +45,10 @@ export class HeartbeatRunner {
   private readonly statePath: string;
   private running = false;
   private pendingTick?: Promise<void>;
+  private nextProactiveAt = Infinity;
+  private nextReminderAt = Infinity;
+  private changeRevision = 0;
+  private waiting = "等待启动";
   private readonly traceSkipTimes = new Map<string, number>();
 
   constructor(
@@ -53,7 +60,7 @@ export class HeartbeatRunner {
     private readonly router: ActiveChannelRouter,
     private readonly expressions?: ExpressionStore,
     private readonly paused: () => boolean | Promise<boolean> = () => false,
-    _localKnowledge?: LocalKnowledgeStore,
+    private readonly localKnowledge?: LocalKnowledgeStore,
     private readonly conversationQueue?: import("../util/serial-queue.js").SerialQueue,
     private readonly voiceAllowed?: () => Promise<boolean>,
     private readonly traces?: TaskTraceStore,
@@ -61,6 +68,8 @@ export class HeartbeatRunner {
     private readonly mcp?: import("../mcp/client.js").ProactiveMcpSource,
     private readonly proactiveAuthorized?: () => Promise<boolean>,
     private readonly intervalSettings?: () => Promise<import("./settings.js").ProactiveInterval>,
+    private readonly reminders?: import("../reminders/store.js").ReminderStore,
+    private readonly reminderDelivery?: import("../reminders/runner.js").ReminderRunner,
   ) {
     this.statePath = join(dataDir, "heartbeat", "state.json");
   }
@@ -78,7 +87,7 @@ export class HeartbeatRunner {
   }
   private traceSkip(reason: string, now: Date): void {
     if (!this.traces) return;
-    // Timer polling is not a new model task. Coalesce unchanged gate states for 30 minutes.
+    // Repeated gate results for actual wakeups are coalesced for 30 minutes.
     const previous = this.traceSkipTimes.get(reason);
     if (previous !== undefined && now.getTime() - previous < 30 * 60_000) return;
     this.traceSkipTimes.set(reason,now.getTime());
@@ -117,7 +126,8 @@ export class HeartbeatRunner {
   }
 
   async start(): Promise<void> {
-    if (!this.config.enabled || this.config.dailyCap <= 0) return;
+    if (this.running || (!this.config.enabled && !this.reminderDelivery)) return;
+    await this.reminderDelivery?.start();
     this.running = true;
     const now = new Date();
     const state = await this.loadState(now);
@@ -128,6 +138,8 @@ export class HeartbeatRunner {
       state.nextCheckAt = this.nextCheck(now,interval).toISOString();
       await writeJsonAtomic(this.statePath, state);
     }
+    this.nextProactiveAt = this.config.enabled ? now.getTime() : Infinity;
+    await this.refreshReminderTime();
     this.schedule();
   }
 
@@ -135,18 +147,59 @@ export class HeartbeatRunner {
     this.running = false;
     if (this.timer) clearTimeout(this.timer);
     await this.pendingTick?.catch(() => undefined);
+    await this.reminderDelivery?.stop();
   }
 
   private schedule(): void {
     if (!this.running) return;
+    if (this.timer) clearTimeout(this.timer);
+    const deadline = Math.min(this.nextProactiveAt,this.nextReminderAt);
+    if (!Number.isFinite(deadline)) return;
     this.timer = setTimeout(() => {
-      this.pendingTick = this.tick()
-        .catch((error) => {
-          console.error("[heartbeat] tick error:", error instanceof Error ? error.message : error);
-        })
-        .finally(() => { this.pendingTick = undefined; this.schedule(); });
-    }, 60_000);
+      const revision = this.changeRevision;
+      const proactive = Date.now() >= this.nextProactiveAt;
+      this.pendingTick = this.dispatch(new Date(), proactive)
+        .catch(() => { this.nextProactiveAt = Date.now() + 20*60_000; console.error("[heartbeat] scheduler_failed"); })
+        .then(async () => {
+          try { await this.refreshReminderTime(); } catch { this.nextReminderAt=Date.now()+60_000; }
+          if (revision !== this.changeRevision) this.nextProactiveAt = Date.now();
+          this.pendingTick=undefined; this.schedule();
+        });
+    },Math.max(1,Math.min(2_147_483_647,deadline-Date.now())));
     this.timer.unref?.();
+  }
+  private async refreshReminderTime(): Promise<void> {
+    const due = this.reminders ? Math.min(...(await this.reminders.list()).filter(item=>item.status==='pending').map(item=>Date.parse(item.dueAt))) : Infinity;
+    this.nextReminderAt = due <= Date.now() ? Date.now()+60_000 : due;
+  }
+  requestCheck(): void {
+    this.changeRevision++;
+    this.nextProactiveAt = Date.now();
+    if (this.reminderDelivery) this.nextReminderAt=Date.now();
+    if (!this.pendingTick) this.schedule();
+  }
+  scheduling() { return {waiting:this.waiting,nextActionAt:Number.isFinite(this.nextProactiveAt)?new Date(this.nextProactiveAt).toISOString():null}; }
+  private defer(now:Date,waiting:string,at:number):void {
+    this.waiting=waiting;this.nextProactiveAt=Math.min(nextMorning(now,this.config,true),at);
+  }
+  private resumePlan(state:HeartbeatState,now:Date):void {
+    this.defer(now,this.config.planningEnabled?"等待计划唤醒":"等待下次检查",this.config.planningEnabled
+      ? nextPlannedCheck(now,this.config,state) : Math.max(now.getTime()+1,Date.parse(state.nextCheckAt??'')||this.nextCheck(now).getTime()));
+  }
+  async requestReplan(id:string,args:Record<string,unknown>,now:Date):Promise<{accepted:true}> {
+    if (!this.config.enabled || !this.config.planningEnabled || this.config.dailyCap<=0 || await this.paused()) throw Error("每日主动规划尚未启用。");
+    if (Object.keys(args).some(key=>key!=="reason") || typeof args.reason!=='string' || !args.reason.trim() || args.reason.length>500) throw Error("请简短说明调整主动联系安排的原因。");
+    const state=await this.loadState(now);
+    if (state.replanRequestIds?.includes(id)) return {accepted:true};
+    state.replanRequest={id,reason:args.reason.trim(),at:now.toISOString()};
+    state.replanRequestIds=[...(state.replanRequestIds??[]),id].slice(-100);
+    await writeJsonAtomic(this.statePath,state);this.requestCheck();return {accepted:true};
+  }
+  private async consumeDue(state:HeartbeatState,now:Date,reason:string):Promise<void> {
+    if (!state.plan || state.plan.date!==dateKey(now,this.config.timezone)) return;
+    let changed=false;
+    for(const wake of state.plan.wakes)if(!wake.consumed && Number(wake.time.slice(0,2))*60+Number(wake.time.slice(3))<=localMinutes(now,this.config.timezone)){wake.consumed=true;changed=true;}
+    if(changed){await writeJsonAtomic(this.statePath,state);this.traceSkip(reason,now);}
   }
 
   private nextCheck(now: Date, interval: Pick<HeartbeatConfig,"minIntervalMinutes"|"maxIntervalMinutes"> = this.config): Date {
@@ -178,6 +231,10 @@ export class HeartbeatRunner {
     if (await this.paused()) return;
     const pending = state.pending;
     if (!pending) return;
+    if (this.reminders && reminderBlocks(await this.reminders.list(),now)) {
+      this.traceFinish(pending.traceId,"skipped","scheduled_reminder_priority");
+      delete state.pending;await writeJsonAtomic(this.statePath,state);return;
+    }
     // Never defer an old evening message until the next morning after quiet hours.
     const preparedAt = new Date(pending.at).getTime();
     if (!Number.isFinite(preparedAt) || now.getTime() - preparedAt > 45 * 60_000) {
@@ -263,26 +320,25 @@ export class HeartbeatRunner {
 
 
   /**
-   * The persistent plan is only a set of opportunities. A new user message
-   * or a changed Core/expression settings invalidates its intents; the model decides again
+   * Plans survive ordinary conversation. Explicit changes request incremental review; the model decides again
    * when a wake comes due.
    */
   private async plannedDue(now: Date, state: HeartbeatState): Promise<string | undefined> {
     // Do not create today's plan in the midnight–01:00 active window.
     // The first eligible wake at or after 07:00 starts the day's planning.
-    if (!basePlanningWindowOpen(now, this.config.timezone)) { this.traceSkip("planning_window_closed",now); return undefined; }
+    if (!basePlanningWindowOpen(now, this.config.timezone)) { this.defer(now,"等待早间规划",nextMorning(now,this.config)); return undefined; }
     const today = dateKey(now, this.config.timezone);
-    if (state.dateKey === today && state.sentToday >= this.config.dailyCap) { this.traceSkip("daily_cap",now); return undefined; }
-    if (isQuietTime(now, this.config.timezone, this.config.quietStart, this.config.quietEnd)) { this.traceSkip("quiet_hours",now); return undefined; }
+    if (state.dateKey === today && state.sentToday >= this.config.dailyCap) { await this.consumeDue(state,now,"daily_cap"); this.defer(now,"今日主动次数已达上限",nextMorning(now,this.config,true)); return undefined; }
+    if (isQuietTime(now, this.config.timezone, this.config.quietStart, this.config.quietEnd)) { await this.consumeDue(state,now,"quiet_hours"); this.defer(now,"免打扰中",nextMorning(now,this.config)); return undefined; }
     const route = await this.router.resolve();
-    if (!route) { this.traceSkip("channel_unavailable",now); return undefined; }
+    if (!route) { this.defer(now,"等待可用渠道",now.getTime()+30*60_000); return undefined; }
 
     const view = await this.routeView(route.channel, route.target);
     const messages = view?.tail ?? [];
     const lastUser = view?.lastUser;
     const lastUserAt = lastUser?.at;
     const context = await this.gateway.load();
-    if (!context.available || !context.data) { this.traceSkip("core_unavailable",now); return undefined; }
+    if (!context.available || !context.data) { this.defer(now,"等待 Core 恢复",now.getTime()+30*60_000); return undefined; }
     const fallbackExpression = this.expressions && !context.data.expression
       ? expressionInstruction(await this.expressions.snapshot()) : "";
     // Recent are situational evidence, not identity revisions. Check the
@@ -291,21 +347,28 @@ export class HeartbeatRunner {
     const policyRevision = createHash("sha256")
       .update(renderLocalPolicy(context) + "\n" + fallbackExpression).digest("hex");
     let plan = state.plan;
+    const reservations = await this.reminders?.list() ?? [];
+    const reservationsRevision = reminderRevision(reservations);
+    const previous = plan?.date===today && plan.channel===route.channel ? plan : undefined;
+    const reasons = [!isCurrentMorningPlan(plan,now,this.config.timezone)?"今天尚无有效计划":null,
+      plan && plan.channel!==route.channel?"主动渠道变化":null,plan && plan.policyRevision!==policyRevision?"Core 或表达设置变化":null,
+      state.replanRequest?.reason].filter(Boolean);
     const stale = !isCurrentMorningPlan(plan, now, this.config.timezone) ||
-      plan?.channel !== route.channel || plan?.lastUserAt !== lastUserAt ||
+      plan?.channel !== route.channel || Boolean(state.replanRequest) ||
       plan?.policyRevision !== policyRevision;
 
     if (stale) {
       // Avoid planning around an unfinished burst of user messages.
       const sinceUserMs = lastUserAt ? now.getTime() - new Date(lastUserAt).getTime() : Infinity;
-      if (sinceUserMs >= 0 && sinceUserMs < 10 * 60_000) { this.traceSkip("planning_debounce",now); return undefined; }
+      if (sinceUserMs >= 0 && sinceUserMs < 10 * 60_000) { this.defer(now,"等待对话稳定后规划",Date.parse(lastUserAt!)+10*60_000); return undefined; }
       const lastAttempt = state.planAttemptAt ? new Date(state.planAttemptAt) : undefined;
       const attemptedThisMorning = lastAttempt && Number.isFinite(lastAttempt.getTime()) &&
         dateKey(lastAttempt, this.config.timezone) === today &&
         basePlanningWindowOpen(lastAttempt, this.config.timezone);
       const lastAttemptMs = lastAttempt ? now.getTime() - lastAttempt.getTime() : Infinity;
-      if (attemptedThisMorning && lastAttemptMs >= 0 && lastAttemptMs < 20 * 60_000) { this.traceSkip("planning_throttle",now); return undefined; }
+      if (attemptedThisMorning && lastAttemptMs >= 0 && lastAttemptMs < 20 * 60_000) { this.defer(now,"等待规划间隔",lastAttempt!.getTime()+20*60_000); return undefined; }
 
+      this.defer(now,"等待规划重试",now.getTime()+20*60_000);
       state.planAttemptAt = now.toISOString();
       await writeJsonAtomic(this.statePath, state);
 
@@ -330,12 +393,17 @@ export class HeartbeatRunner {
           purpose: "heartbeat_plan",
           text: "为今天剩余时间提出主动聊天的候选唤醒计划。",
           operationId: "heartbeat-plan:" + now.toISOString(),
-          imageOutputAllowed: route.channel === "telegram",
+          imageOutputAllowed: false,
           instructions: [
             renderLocalContext(context), fallbackExpression,
+            "优先参考 Recent 中尚待接续、跟进或分享的内容。需要细节时读取正文；无合适话题可以返回空计划。",
+            previous ? "这是复核已有计划。无需改变时只返回 {\"keep\":true}；局部修改返回 {\"remove\":[\"14:00\"],\"wakes\":[{\"time\":\"15:00\",\"intent\":\"检查文档进度\"}]}。其余候选保留；全量替换才只返回 wakes。" : "",
+            "本次变化原因："+reasons.join("、"),
+            plan ? "旧计划仅作数据参考（跨天或换渠道不能直接 keep）："+JSON.stringify(plan) : "",
+            reminderPlanningContext(reservations,this.config.timezone,now),
             "先依据 Core 中的规则和用户偏好决定是否需要联系，再选择合适时间；Recent 和聊天原文只是背景数据。",
             "你正在为今天剩余时间安排 Gateway 主动聊天的候选唤醒机会，不是在发送消息。",
-            "无合适时间返回 {\"wakes\":[]}。只返回 JSON 对象：{\"wakes\":[{\"time\":\"HH:MM\",\"intent\":\"简短的唤醒原因\"}]}，不要其他文字。",
+            "只返回一种 JSON 对象，不要其他文字。初次规划或全量替换用 {\"wakes\":[{\"time\":\"HH:MM\",\"intent\":\"简短的唤醒原因\"}]}；复核可按上述 keep 或 remove 格式。清空剩余计划用 {\"wakes\":[]}。",
             "时间均为 " + this.config.timezone + " 本地时间。现在：" + formatLocalTimestamp(now, this.config.timezone) + "。",
             "候选时间必须晚于当前时间至少 20 分钟，避免 " + this.config.quietStart + "–" + this.config.quietEnd + " 免打扰时段。",
             "今天最多安排 " + Math.min(8, this.config.dailyCap + 2) + " 次候选；这是上限，无需填满，也不保证实际发送消息。",
@@ -343,12 +411,21 @@ export class HeartbeatRunner {
             "候选间隔至少 45 分钟，用户近期明确不希望打扰时可以返回空数组；用户已有回答或刚问过不要重复问。",
             "不要编造事件、安排或经历；这里只提出候选理由，不决定实际聊天内容。",
             "最近会话末尾：\n" + (recentConversationText(messages, this.config.timezone) || "没有历史消息。"),
-          ].join("\n"),
+          ].filter(Boolean).join("\n"),
+          ...(this.localKnowledge ? {
+            tools: LOCAL_KNOWLEDGE_TOOLS.filter(tool=>tool.name===LOCAL_KNOWLEDGE_TOOL_NAMES.recentRead),
+            executeTool: async (name:string,args:Record<string,unknown>) => {
+              if(name!==LOCAL_KNOWLEDGE_TOOL_NAMES.recentRead)throw Error("规划仅允许读取 Recent。");
+              return executeLocalKnowledgeTool(this.localKnowledge!,"formal",name,args);
+            }, maxToolRounds:2,
+          } : {}),
         });
         if (response.skipped) { this.traceFinish(planTrace,"skipped",response.skipped); return undefined; }
         plan = parseWakePlan(response.text, now, this.config.timezone, this.config.quietStart,
-          this.config.quietEnd, this.config.dailyCap, route.channel, lastUserAt);
+          this.config.quietEnd, this.config.dailyCap, route.channel, lastUserAt, previous);
         plan.policyRevision = policyRevision;
+        plan.reminderRevision=reservationsRevision;
+        avoidReminderWakes(plan,reservations,this.config.timezone);
         this.traceEvent(planTrace,{kind:"system",name:"解析候选计划"},plan);
       } catch (error) {
         this.traceFinish(planTrace,"failed","planning_failed");
@@ -357,6 +434,7 @@ export class HeartbeatRunner {
         return undefined;
       }
       state.plan = plan;
+      delete state.replanRequest;
       try {
         await writeJsonAtomic(this.statePath, state);
         this.traceFinish(planTrace,"completed",plan.wakes.length ? undefined : "empty_plan");
@@ -375,17 +453,43 @@ export class HeartbeatRunner {
       }
     }
     if (changed) await writeJsonAtomic(this.statePath, state);
+    this.resumePlan(state,now);
     return due !== undefined && due >= 0 ? plan!.wakes[due]!.intent : undefined;
   }
 
   async tick(now = new Date()): Promise<void> {
-    return this.conversationQueue ? this.conversationQueue.run(() => this.tickOrdered(now)) : this.tickOrdered(now);
+    return this.dispatch(now,true);
   }
-  private async tickOrdered(now: Date): Promise<void> {
-    if (await this.paused()) { this.traceSkip("paused",now); return; }
+  private dispatch(now:Date,proactive:boolean):Promise<void> {
+    const work=()=>this.tickOrdered(now,proactive);
+    return this.conversationQueue ? this.conversationQueue.run(work) : work();
+  }
+  private async tickOrdered(now: Date,proactive=true): Promise<void> {
+    await this.reminderDelivery?.tick(now);
+    if (!proactive) return;
+    this.defer(now,"等待明日规划",nextMorning(now,this.config,true));
     const state = await this.loadState(now);
+    if (!this.config.enabled || this.config.dailyCap<=0 || await this.paused()) {
+      await this.consumeDue(state,now,"paused");this.waiting="主动聊天未启用";this.nextProactiveAt=Infinity;return;
+    }
+    if(this.reminders) {
+      const reminders=await this.reminders.list(),revision=reminderRevision(reminders);
+      if(state.plan){
+        const before=state.plan.wakes.length;
+        avoidReminderWakes(state.plan,reminders,this.config.timezone);
+        if(before!==state.plan.wakes.length && !state.replanRequest)state.replanRequest={id:"reminder:"+revision,reason:"提醒与候选时间冲突，只调整受影响部分。",at:now.toISOString()};
+        if(state.plan.reminderRevision!==revision || before!==state.plan.wakes.length){state.plan.reminderRevision=revision;await writeJsonAtomic(this.statePath,state);}
+      }
+      if(reminderBlocks(reminders,now)) {
+        await this.consumeDue(state,now,"scheduled_reminder_priority");
+        if(state.pending)await this.flushPending(state,now);
+        this.defer(now,"正在避让约定提醒",now.getTime()+30*60_000+1);return;
+      }
+    }
     if (state.pending) {
       await this.flushPending(state, now);
+      this.resumePlan(state,now);
+      if(state.pending)this.nextProactiveAt=Math.min(this.nextProactiveAt,now.getTime()+60_000);
       return;
     }
     const interval=await this.intervalSettings?.();
@@ -398,9 +502,10 @@ export class HeartbeatRunner {
       plannedIntent = await this.plannedDue(now, state);
       if (!plannedIntent) return;
     } else {
-      if (state.nextCheckAt && new Date(state.nextCheckAt) > now) return;
+      if (state.nextCheckAt && new Date(state.nextCheckAt) > now) {this.resumePlan(state,now);return;}
       state.nextCheckAt = this.nextCheck(now,interval).toISOString();
       await writeJsonAtomic(this.statePath, state);
+      this.resumePlan(state,now);
     }
 
     const lastActivity = await this.sessions.latestActivityAt();
@@ -464,7 +569,7 @@ export class HeartbeatRunner {
     this.traceEvent(traceId,{kind:"condition",name:"基础条件检查"},{eligible:true,...(plannedIntent ? {intent:plannedIntent} : {})});
     try {
       const mcpTools = await this.mcp?.proactiveTools() ?? [];
-      const tools = [...(voice ? [voiceTool] : []), ...mcpTools];
+      const tools = [...(voice ? [voiceTool] : []), ...mcpTools, ...(this.localKnowledge ? LOCAL_KNOWLEDGE_TOOLS.filter(tool=>tool.name===LOCAL_KNOWLEDGE_TOOL_NAMES.recentRead) : [])];
       // A repeated call within this wake must not repeat an external side effect.
       const attempted = new Set<string>();
       const response = await this.tracedReply(traceId,{
@@ -481,6 +586,7 @@ export class HeartbeatRunner {
         ...(tools.length ? { tools, executeTool: async (name: string, args: Record<string, unknown>) => {
           if (await this.paused()) throw new Error("主动模式已关闭，本次工具调用未执行。");
           if (voice && name === VOICE_TOOL) return voice.select(args);
+          if(this.localKnowledge && name===LOCAL_KNOWLEDGE_TOOL_NAMES.recentRead) return executeLocalKnowledgeTool(this.localKnowledge,"formal",name,args);
           if (!mcpTools.some(tool => tool.name === name) || !this.mcp) throw new Error("本轮未授权该工具。");
           const key = name + ":" + JSON.stringify(args, (_key, value) => value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
           if (attempted.has(key)) return {isError:true,error:"MCP_DUPLICATE_CALL",execution:"not repeated"};

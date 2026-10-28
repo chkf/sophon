@@ -31,3 +31,11 @@
 .injection-table td:nth-child(2) { white-space: nowrap; }
 
 .reminder-panel{padding:16px;margin-bottom:16px}.reminder-item{padding:12px 0;border-top:1px solid var(--line);overflow-wrap:anywhere}.reminder-item button{margin-left:12px}.reminder-item p{white-space:pre-wrap}
+
+.graph-prompts{margin-bottom:18px}.graph-prompts summary,.graph-topics summary,.graph-detail summary{cursor:pointer;font-size:13px;overflow-wrap:anywhere}
+
+.graph-prompt-body{display:grid;gap:14px;margin-top:16px;min-width:0}.graph-prompt-body>div{display:grid;gap:14px;min-width:0}.graph-prompt-body>div>.button{justify-self:start}
+
+.graph-editor{display:grid;gap:14px;margin-top:14px;min-width:0}.graph-field{display:grid;gap:6px;min-width:0;font-size:12px;color:var(--muted)}.graph-field input,.graph-field select,.graph-field textarea{display:block;width:100%;min-width:0;color:var(--ink)}.graph-field textarea{min-height:0;background:var(--code);padding:10px 12px}.graph-editor .editor-actions{gap:8px}.graph-editor .button{white-space:normal}
+
+@media(max-width:650px){.graph-field input,.graph-field select,.graph-field textarea{font-size:16px}.graph-editor .editor-actions>.button{flex:1}.graph-prompt-body{gap:12px}}

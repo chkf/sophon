@@ -189,7 +189,7 @@ export class ResponsesTransport {
         ...(captureTraceContent && context ? {context} : {}),
         ...(typeof event.model === "string" ? { model: event.model } : {}),
         input: captureTraceContent ? { input: traceContent(event.input), instructions: event.instructions,
-          tools: Array.isArray(event.tools) ? event.tools.map(tool => tool?.name ?? tool?.type) : [],
+          tools: traceContent(event.tools ?? []),
           continuation: typeof event.previous_response_id === "string", attempt: attempt + 1 } : undefined });
       try {
         const response = await this.completedResponse(socket, event);

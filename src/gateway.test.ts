@@ -1,3 +1,4 @@
+import { selectTestTurn } from "./testing/turn-decision.js";
 import { seedPersonaDatabase } from "../scripts/testing/persona-fixture.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -39,7 +40,8 @@ test("Gateway shares owner history while isolating other users", async () => {
     for (const request of requests) {
       assert.equal(request.tools.filter((tool: any) => tool.name === "gateway_read_history").length, 1);
       assert.equal(request.tools.find((tool: any) => tool.name === "gateway_read_history").readOnly, true);
-      assert.match(request.turnInstructions, /本轮可用函数：.*gateway_read_history/);
+      assert.doesNotMatch(request.turnInstructions, /本轮可用函数/);
+      await selectTestTurn(request);
     }
     const tgResult = await requests[0].executeTool("gateway_read_history", { query: "周末" });
     assert.deepEqual(tgResult.entries.map((entry: any) => entry.id), ["wx-original"]);
@@ -47,6 +49,7 @@ test("Gateway shares owner history while isolating other users", async () => {
     assert.deepEqual(wxResult.entries.map((entry: any) => entry.id), ["tg-original"]);
 
     await gateway.handle(inbound("wechat", "other-user", "other-current"));
+    await selectTestTurn(requests[2]);
     const isolated = await requests[2].executeTool("gateway_read_history", { query: "周末" });
     assert.equal(isolated.total, 0, "another user cannot search the owner's history");
 
@@ -73,15 +76,15 @@ test("shared chat lets Telegram choose speech naturally while WeChat remains tex
     await gateway.handle({ ...base, conversationId: "voice", messageId: "1",
       attachments: [{ kind: "voice", transcription: "你好" }] });
     assert.equal(requests[0]?.tools?.some(tool => tool.name === "send_voice"), true);
-    assert.equal(requests[0]?.resetVoicePreferenceOnReconnect, true);
+    assert.equal(requests[0]?.resetVoicePreferenceOnReconnect, false);
 
     await gateway.handle({ ...base, conversationId: "text", messageId: "2", attachments: [] });
     assert.doesNotMatch(requests[1]?.turnInstructions ?? "", /本轮用户没有发送语音/);
 
     await gateway.handle({ ...base, channel: "wechat", conversationId: "wechat", messageId: "3", attachments: [] });
-    assert.equal(requests[2]?.resetVoicePreferenceOnReconnect, true);
+    assert.equal(requests[2]?.resetVoicePreferenceOnReconnect, false);
     assert.equal(requests[2]?.tools?.some(tool => tool.name === "send_voice") ?? false, false);
-    assert.match(requests[2]?.turnInstructions ?? "", /微信默认文字回复/);
+    assert.match(requests[2]?.instructions ?? "", /本轮台词选文字或语音一种/);
   } finally { sessions.close(); await rm(root, { recursive: true, force: true }); }
 });
 
@@ -328,7 +331,7 @@ test("Gateway explicitly covers trailing unanswered historical user messages", a
   const reply = await gateway.handle(inbound);
   assert.equal(reply.text, "香港可以考虑这些地方");
   assert.match(requests[0].turnInstructions, /还有 2 条用户消息/);
-  assert.match(requests[0].turnInstructions, /优先回答仍有效的实质问题/);
+  assert.match(requests[0].turnInstructions, /优先处理仍有效的问题/);
   assert.deepEqual(requests[0].messages.slice(1).map((m: any) => m.content), ["香港有什么推荐？", "还在吗", "继续"]);
 
   await gateway.commitDeliveredAssistant("telegram", "123", "123", reply.text, undefined, reply.deliveryId);
@@ -374,7 +377,7 @@ test("Gateway changes expression settings without resetting shared chat history"
     assert.ok(requests.every(request => !request.instructions.includes("表达风格")),
       "Persona must not be frozen in local Core instructions");
     for (const [index, expected] of ["关闭", "开启", "开启", "关闭"].entries()) {
-      assert.match(requests[index].turnInstructions, new RegExp("心理和动作描写已" + expected));
+      assert.match(requests[index].instructions, new RegExp("心理和动作描写已" + expected));
       assert.match(requests[index].turnInstructions, /当前渠道本地时间/);
       assert.doesNotMatch(requests[index].turnInstructions, /CLEAR|HELPFUL/);
     }
@@ -418,7 +421,7 @@ test('temporary chat reuses normal file tools, reads formal history and leaves n
   await sessions.append('telegram','80001','80001',[{role:'user',content:'正式文档问题',at:'2026-01-01T00:00:00Z'}]);
   let request:any,writes=0,traces=0;
   const files={tools:()=>[{name:'fixture_write',description:'合成文件操作',parameters:{type:'object',properties:{}}}],execute:async()=>{writes++;return {ok:true};}};
-  const runtime={reply:async(r:any)=>{request=r;await r.executeTool('fixture_write',{});return {text:'临时操作完成'};}};
+  const runtime={reply:async(r:any)=>{request=r;await selectTestTurn(r);await r.executeTool('fixture_write',{});return {text:'临时操作完成'};}};
   const gateway=new Gateway(runtime,sessions,readyContext as any,0,undefined,undefined,undefined,undefined,undefined,undefined,()=>{traces++;},files as any);
   const message={channel:'telegram' as const,conversationId:'80001',senderId:'80001',messageId:'temp-fixture',text:'临时文档请求',attachments:[]};
   const result=await gateway.handle(message,{id:'temporary:fixture',messages:[{role:'user',content:'内存前文'},{role:'assistant',content:'内存答复'}]});

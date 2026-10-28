@@ -27,7 +27,7 @@ npm run memory -- status ./data --owner 70001
 
 ## Recent 和来源
 
-自动准备和手动 `bootstrap` 都会登记 Recent 引用；已有正文仍由 Recent 表保存，记忆图不复制正文。修改、归档、删除会同步引用状态，未完成事项保留。集成后停用重复的普通 Recent 后台整理；聊天中的 Recent 工具仍可用。也可单独执行：
+自动准备和手动 `bootstrap` 都会登记 Recent 引用；已有正文仍由 Recent 表保存，记忆图不复制正文。修改、归档、删除会同步引用状态，未完成事项保留。集成后 Recent 后台整理继续维护待接续话题，与记忆图分类并存；目录保留已被图引用的条目，聊天中的 Recent 读取和管理工具仍可用。也可单独执行：
 
 ```sh
 npm run memory -- recent-migrate ./data --owner 70001 --stopped

@@ -1,3 +1,4 @@
+import { selectTestTurn } from "./testing/turn-decision.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -33,6 +34,7 @@ test("Gateway exposes only native reply selection in TG and hands the verified t
     assert.deepEqual(saved?.source?.platformMessages?.map(x=>x.messageId),["40"]);
   },
   {reply:async(req:ChatRequest)=>{
+    await selectTestTurn(req,{quote:true});
     assert.equal(req.tools?.some(x=>x.name==="gateway_quote_message") ?? false,false);
     assert.equal(req.tools?.some(x=>x.name==="gateway_reply_native"),true);
     await assert.rejects(req.executeTool!("gateway_quote_message",{target:"current"}));
@@ -53,6 +55,7 @@ test("Gateway selects a previously delivered assistant TG bubble by actual platf
     assert.equal(result.kind,"model_reply");
     if(result.kind==="model_reply")assert.equal(result.nativeReply?.messageId,400);
   },{reply:async(req)=>{
+    await selectTestTurn(req,{quote:true});
     const selected=await req.executeTool!("gateway_reply_native",{target:"history",index:1}) as {status:string};
     assert.equal(selected.status,"selected");
     return {text:"当然。"};

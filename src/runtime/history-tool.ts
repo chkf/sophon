@@ -50,9 +50,10 @@ export async function readHistoryTool(history: RuntimeHistory, args: Record<stri
   }) };
 }
 
-export function withHistoryTool<T extends { history?: RuntimeHistory; tools?: RuntimeTool[]; executeTool?: (name: string, args: Record<string, unknown>) => Promise<unknown> }>(request: T, history = request.history): T {
+export function withHistoryTool<T extends { history?: RuntimeHistory; tools?: RuntimeTool[]; getTools?: () => RuntimeTool[]; executeTool?: (name: string, args: Record<string, unknown>) => Promise<unknown> }>(request: T, history = request.history): T {
   if (!history?.count) return request;
-  return { ...request, tools: [...(request.tools ?? []).filter(t => t.name !== HISTORY_TOOL), HISTORY_DEFINITION],
+  const current = () => [...(request.getTools?.() ?? request.tools ?? []).filter(t => t.name !== HISTORY_TOOL), HISTORY_DEFINITION];
+  return { ...request, tools: current(), getTools: current,
     executeTool: async (name: string, args: Record<string, unknown>) => {
       if (name === HISTORY_TOOL) return readHistoryTool(history, args);
       if (!request.executeTool) throw new Error("工具不可用或未授权。");

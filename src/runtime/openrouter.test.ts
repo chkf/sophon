@@ -183,7 +183,7 @@ for (const scenario of [
   const firstSessions = new SessionStore(root);
   try {
     const gateway = new Gateway(first.runtime, firstSessions, context as any,
-      0, undefined, undefined, undefined, undefined, async () => (await settings.get()).tts);
+      0, undefined, undefined, undefined, undefined, async () => (await settings.get()).tts, undefined, undefined, undefined, undefined, undefined, undefined, undefined, {turnDecisionEnabled:false});
     const reply = await gateway.handle(input);
     assert.equal(reply.kind, "model_reply");
     if (reply.kind !== "model_reply") throw new Error("Expected a completed model reply.");
@@ -498,7 +498,7 @@ test("Gateway continuity across SIWC → OpenRouter → SIWC retains history, ge
   await providers.selectProvider("openrouter");revision="recent-2";
   const middle=await gateway.handle(inbound("2","middle"));await gateway.commitDeliveredAssistant("telegram","owner","owner",middle.text,middle.images,middle.deliveryId);
   assert.deepEqual(requests[0]!.messages!.map(m=>m.content),["first","siwc reply","middle"]);
-  assert.equal(requests[0]!.context!.content,"{}");assert.match(requests[0]!.turnInstructions!,/recent-2/);
+  assert.match(requests[0]!.context!.content,/recent-2/);assert.doesNotMatch(requests[0]!.turnInstructions!,/recent-2/);
   await providers.selectProvider("siwc");const last=await gateway.handle(inbound("3","last"));
   assert.deepEqual(siwc.requests[1]!.messages!.map(m=>m.content),["first","siwc reply","middle","OR middle","last"]);
   assert.match(siwc.requests[1]!.instructions!,/本地 Core/);

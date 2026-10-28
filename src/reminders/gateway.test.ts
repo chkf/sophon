@@ -1,3 +1,4 @@
+import { selectTestTurn } from "../testing/turn-decision.js";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,rm} from 'node:fs/promises';
@@ -14,8 +15,9 @@ test('formal owner chat actually creates a persisted reminder through the model 
  const sessions=new SessionStore(root),store=new ReminderStore(root);const now=new Date('2026-01-15T00:00:00Z');
  const tools=new ReminderTools(store,m=>m.senderId==='70001','UTC',()=>now);
  const gateway=new Gateway({reply:async request=>{
+  await selectTestTurn(request,{groups:['plans']});
   assert.ok(request.tools?.some(t=>t.name==='gateway_reminder_create'));
-  assert.match(request.turnInstructions!,/创建成功后确认/);
+  assert.match(request.instructions!,/创建成功后确认/);
   await request.executeTool!('gateway_reminder_create',{text:'Review sample document',dueAt:'2026-01-15T01:00:00Z'});
   return {text:'Reminder scheduled for 01:00 UTC.'};
  }},sessions,new LocalCoreContextProvider(root),1,'UTC',()=>now,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,tools);
