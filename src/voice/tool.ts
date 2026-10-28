@@ -5,7 +5,7 @@ import { speakable, validVoiceInstruction, MAX_VOICE_INSTRUCTION_CHARS } from ".
 export const VOICE_TOOL = "send_voice";
 export const stageDirectionTool: RuntimeTool = {
   name: "gateway_stage_direction", readOnly: true, replaySafe: true,
-  description: "决定回复时，单独登记简短、中性的虚构心理或动作描写。不混入正文，不描述用户内心，不代表执行了现实操作。静默时不要调用。",
+  description: "决定回复时，单独登记简短的虚构心理或动作描写。不混入正文，不描述用户内心，不代表执行了现实操作。静默时不要调用。",
   parameters: {type:"object",additionalProperties:false,required:["text"],properties:{text:{type:"string",minLength:1,maxLength:600}}},
 };
 export class VoiceSupplementError extends Error {
