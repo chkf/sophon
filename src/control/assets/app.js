@@ -72,6 +72,59 @@
   function status(value) { return el('span', { class: `status ${value || 'unknown'}` }, statusNames[value] || value || '未知'); }
   function fact(label, value, note) { return el('div', { class: 'fact' }, el('span', { class: 'fact-label' }, label), el('span', { class: 'fact-value' }, value, note ? el('small', {}, note) : null)); }
   function kv(entries) { return el('dl', { class: 'key-values' }, entries.flatMap(([key, value]) => [el('dt', {}, key), el('dd', {}, value ?? '—')])); }
+  const traceOpen = new Set();
+  const traceLabels = {messages:'消息',input:'本次内容',output:'返回内容',content:'内容',text:'正文',output_text:'回复',arguments:'参数',parameters:'参数说明',tools:'可用工具',instructions:'本轮指令',name:'名称',description:'用途',result:'结果',error:'错误',role:'角色',type:'类型',status:'状态',stage_direction:'动作与心理描写',reply_mode:'回复方式'};
+  function traceToolNames(tools, depth = 0) {
+    if (depth > 10) return ['（深层工具详见原始数据）'];
+    return tools.flatMap(tool => Array.isArray(tool?.tools) ? traceToolNames(tool.tools, depth + 1) : [tool?.function?.name || tool?.name || tool?.type || (typeof tool === 'string' ? tool : '未命名')]);
+  }
+  function traceText(value, depth = 0) {
+    if (depth > 10) return '（深层内容请查看原始数据）';
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (/^[{[]/.test(trimmed)) { try { return traceText(JSON.parse(trimmed), depth + 1); } catch {} }
+      return value || '（空）';
+    }
+    if (value === null || value === undefined) return '无';
+    if (typeof value !== 'object') return typeof value === 'boolean' ? (value ? '是' : '否') : String(value);
+    if (Array.isArray(value)) return value.map(item => traceText(item, depth + 1)).join('\n\n') || '无';
+    // Remove only well-known wrappers; unknown fields stay visible below.
+    const keys = Object.keys(value);
+    if (['text','input_text','output_text'].includes(value.type) && typeof value.text === 'string' && keys.every(k => ['type','text','annotations','logprobs'].includes(k))) return value.text;
+    if ((value.type === 'message' || value.role) && value.content !== undefined && keys.every(k => ['type','role','content','id','status','annotations','refusal'].includes(k))) return ({assistant:'模型回复',user:'用户消息',developer:'运行指令',system:'系统指令'}[value.role] || value.role || '消息') + '：' + traceText(value.content,depth+1);
+    if ((value.type === 'function_call' || value.type === 'function') && keys.every(k => ['type','name','function','description','arguments','parameters','id','call_id','status'].includes(k))) {
+      const fn = value.function || value;
+      return '工具：' + (fn.name || '未命名') + (fn.arguments !== undefined ? '\n' + traceText(fn.arguments,depth+1) : '') +
+        (fn.description ? '\n用途：' + fn.description : '');
+    }
+    return Object.entries(value).map(([key,item]) => {
+      if (key === 'tools' && Array.isArray(item)) return '可用工具：' + traceToolNames(item).join('、');
+      return (traceLabels[key] || key) + '：' + traceText(item,depth+1);
+    }).join('\n');
+  }
+  function traceDisclosure(key, label, child) {
+    const node = el('details', {class:'trace-raw',open:traceOpen.has(key)},el('summary',{},label),child);
+    node.addEventListener('toggle', () => { if (node.open) traceOpen.add(key); else traceOpen.delete(key); });
+    return node;
+  }
+  function traceBody(value, key, previous, step) {
+    let display = value;
+    const repeated = {};
+    if (step?.kind === 'model' && step.provider && step.model && previous && !step.truncated && !previous.truncated &&
+      step.provider === previous.provider && step.model === previous.model && step.name === previous.name && value && typeof value === 'object' && !Array.isArray(value)) {
+      display = {...value};
+      for (const field of ['tools','instructions']) {
+        if (value[field] !== undefined && previous.input?.[field] !== undefined &&
+          !JSON.stringify(value[field]).includes('"truncated":true') && !JSON.stringify(value[field]).includes('[trace projection') && JSON.stringify(value[field]) === JSON.stringify(previous.input[field])) {
+          repeated[field] = value[field];
+          display[field] = '与上一次模型调用相同（本次仍发送）';
+        }
+      }
+    }
+    return el('div',{class:'trace-readable'},el('div',{class:'trace-text'},traceText(display)),
+      Object.keys(repeated).length ? traceDisclosure(key+':same','查看相同的工具定义与指令',el('div',{class:'trace-text'},traceText(repeated))) : null,
+      traceDisclosure(key+':raw','查看原始数据',el('pre',{class:'trace-text'},stringify(value))));
+  }
   function stringify(value) { if (value === undefined || value === null) return '未记录'; return typeof value === 'string' ? value : JSON.stringify(value, null, 2); }
   async function api(action, body = {}) {
     const controller = new AbortController();
@@ -138,7 +191,7 @@
     if (epoch !== state.epoch) return;
     state.task.runs = append ? [...state.task.runs, ...result.runs.filter(run => !state.task.runs.some(existing => existing.id === run.id))] : result.runs;
     retainTaskDay(result);
-    state.task.nextBefore = result.nextBefore; state.task.heartbeat = result.heartbeat; state.task.reminders = result.reminders || [];
+    state.task.nextBefore = result.nextBefore; state.task.heartbeat = result.heartbeat; state.task.replyTiming = result.replyTiming; state.task.reminders = result.reminders || [];
     if (result.heartbeat?.timezone) state.timezone = result.heartbeat.timezone;
     if (!state.task.selected && result.runs.length) state.task.selected = result.runs[0].id;
     renderTasks();
@@ -173,6 +226,21 @@
         : [empty('暂无待执行安排','可在聊天中指定时间创建提醒。')])
     );
   }
+  function replyTimingPanel() {
+    if (!state.task.replyTiming) return null;
+    const input = el('input',{type:'number',min:0,max:30,step:1,value:state.task.replyWaitDraft ?? state.task.replyTiming.seconds,'aria-label':'回复等待秒数',oninput:event=>{state.task.replyWaitDraft=event.target.value;}});
+    const save = button('保存等待时间',async()=>{
+      const seconds=Number(input.value);
+      if(input.value.trim()==='' || !Number.isInteger(seconds) || seconds<0 || seconds>30)throw Error('请输入 0–30 秒的整数。');
+      save.disabled=true;input.disabled=true;
+      try{state.task.replyTiming=await api('reply-timing-save',{seconds});state.task.replyWaitDraft=undefined;showNotice('回复等待时间已保存。');}
+      finally{save.disabled=false;input.disabled=false;}
+    });
+    return el('section',{class:'panel',id:'reply-timing-panel'},el('h3',{},'回复等待时间'),
+      el('p',{class:'small'},'收到最后一条消息后，等待多久再开始回复。连续发消息会重新计时；0 秒表示不额外等待。Telegram 与微信共用，默认 8 秒。'),
+      el('div',{class:'toolbar'},input,el('span',{},'秒'),save),
+      el('p',{class:'small'},'保存后无需重启，不影响已开始生成的回复。微信连续消息仍最多合并等待 30 秒。'));
+  }
   function renderTasks() {
     const filter = el('select', { 'aria-label': '按执行结果筛选', onchange: event => { state.task.filter = event.target.value; renderTaskList(); } },
       ...[['all', '全部结果'], ['delivered', '确认送达'], ['silent', '静默 / 跳过'], ['failed', '失败 / 不确定'], ['running', '运行中']].map(([value, label]) => el('option', { value }, label)));
@@ -180,6 +248,7 @@
     const runPanel = el('section', { class: 'run-list-panel', 'aria-label': '执行记录' }, el('div', { class: 'section-heading' }, el('h3', {}, '执行记录'), filter), el('div', { id: 'task-runs', class: 'run-items' }), el('div', { id: 'task-more', class: 'list-more' }));
     const inspector = el('section', { id: 'task-detail', class: 'inspector', 'aria-label': '调用轨迹' }, empty('选择一次执行', '左侧每条记录对应一次真实任务。'));
     const nodes = [taskToolbar(), reminderPanel()];
+    const timing=replyTimingPanel();if(timing)nodes.push(timing);
     nodes.push(el('div', { class: 'panel workbench' }, runPanel, inspector));
     content.replaceChildren(...nodes); renderTaskList();
   }
@@ -215,7 +284,7 @@
     const sameRun = target._traceId === run.id;
     const position = sameRun ? {x:window.scrollX,y:window.scrollY} : null;
     const scrolls = sameRun ? [...target.querySelectorAll('[data-step-id]')].map(node => ({
-      id:node.dataset.stepId, values:[...node.querySelectorAll('pre,.injection-table')].map(part=>({top:part.scrollTop,left:part.scrollLeft}))
+      id:node.dataset.stepId, values:[...node.querySelectorAll('pre,.trace-text:not(pre),.injection-table')].map(part=>({top:part.scrollTop,left:part.scrollLeft}))
     })) : [];
 
     const allSteps = Array.isArray(run.steps) ? run.steps : [];
@@ -227,6 +296,7 @@
     const partialInput = usage?.inputTokens !== undefined && Array.isArray(run.usageCompleteFields) && !run.usageCompleteFields.includes('inputTokens');
     const total = Math.max(typeof run.durationMs === 'number' ? run.durationMs : 0, ...steps.map(step => Math.max(0, new Date(step.finishedAt || step.startedAt).getTime() - new Date(run.startedAt).getTime())).filter(Number.isFinite), 1);
     const timeline = el('div', { class: 'trace-steps' });
+    let previousModel;
     for (const step of steps) {
       const opened = openedSteps.has(step.id);
       const detail = el('details', { class: `trace-step ${step.kind}`, open: opened, 'data-step-id': step.id });
@@ -236,9 +306,9 @@
       const metadata = [step.provider, step.model].filter(Boolean).join(' · ');
       const stepContent = el('div', { class: 'step-content' });
       if (Array.isArray(step.context)) stepContent.append(injectionTable(step.context, sources));
-      if (step.input !== undefined) stepContent.append(el('div', { class: 'detail-section' }, el('div', { class: 'detail-label' }, step.kind === 'tool' ? '输入 / 参数' : '输入'), el('pre', {}, stringify(step.input))));
-      if (step.output !== undefined) stepContent.append(el('div', { class: 'detail-section' }, el('div', { class: 'detail-label' }, '输出 / 结果'), el('pre', {}, stringify(step.output))));
-      if (step.error !== undefined) stepContent.append(el('div', { class: 'detail-section error' }, el('div', { class: 'detail-label' }, '错误'), el('pre', {}, stringify(step.error))));
+      if (step.input !== undefined) stepContent.append(el('div', { class: 'detail-section' }, el('div', { class: 'detail-label' }, step.kind === 'tool' ? '输入 / 参数' : '输入'), traceBody(step.input,run.id+':'+step.id+':input',previousModel,step)));
+      if (step.output !== undefined) stepContent.append(el('div', { class: 'detail-section' }, el('div', { class: 'detail-label' }, '输出 / 结果'), traceBody(step.output,run.id+':'+step.id+':output')));
+      if (step.error !== undefined) stepContent.append(el('div', { class: 'detail-section error' }, el('div', { class: 'detail-label' }, '错误'), traceBody(step.error,run.id+':'+step.id+':error')));
       if (step.input === undefined && step.output === undefined && step.error === undefined) stepContent.append(el('p', { class: 'small muted' }, '此步骤未记录输入或输出。'));
       if (step.usage) stepContent.append(usageRow(step.usage));
       if (step.truncated) stepContent.append(el('p', { class: 'trace-note' }, '该步骤内容超出记录上限，已截断。'));
@@ -246,6 +316,7 @@
       detail.append(el('summary', {}, el('span', { class: 'trace-node', 'aria-hidden': 'true' }), el('span', { class: 'step-line' }, el('span', { class: 'step-name' }, step.name), el('span', { class: 'step-time' }, duration(step.durationMs)), el('span', { class: 'step-chevron', 'aria-hidden': 'true' }, '›')), el('span', { class: 'step-meta' }, metadata ? el('span', {}, metadata) : null, status(step.status)), el('div', { class: 'waterfall-track', 'aria-hidden': 'true' }, bar)), stepContent);
       detail.addEventListener('toggle', () => { if (detail.open) openedSteps.add(step.id); else openedSteps.delete(step.id); });
       timeline.append(detail);
+      if (step.kind === 'model') previousModel = step;
     }
     const reason = reasonNames[run.reason] || run.reason;
     const descriptions = { delivered: '交付已收到明确确认。', silent: '本次模型选择保持静默，未创建发送任务。', skipped: '本次在条件检查或策略判断后结束。', failed: '本次执行失败，可展开步骤查看已记录的错误。', delivery_unknown: '发送已尝试，但没有可靠的送达确认。', interrupted: '执行未正常结束，保留已记录的步骤。', running: '任务尚在执行，后续步骤会随记录刷新。', completed: '本次任务已完成。' };
@@ -261,7 +332,7 @@
     target._traceSignature = signature; target._traceId = run.id;
     for (const saved of scrolls) {
       const node = [...target.querySelectorAll('[data-step-id]')].find(item=>item.dataset.stepId===saved.id);
-      node?.querySelectorAll('pre,.injection-table').forEach((part,index)=>{
+      node?.querySelectorAll('pre,.trace-text:not(pre),.injection-table').forEach((part,index)=>{
         const value=saved.values[index];if(value){part.scrollTop=value.top;part.scrollLeft=value.left;}
       });
     }
@@ -768,7 +839,7 @@
           .sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id)).slice(0, 1000);
         retainTaskDay(result);
         if (!keepOlder) state.task.nextBefore = result.nextBefore;
-        state.task.heartbeat = result.heartbeat; state.task.reminders = result.reminders || [];
+        state.task.heartbeat = result.heartbeat; state.task.replyTiming = result.replyTiming; state.task.reminders = result.reminders || [];
         if (result.heartbeat?.timezone) state.timezone = result.heartbeat.timezone;
         $('#task-toolbar')?.replaceWith(taskToolbar());
         $('#reminder-panel')?.replaceWith(reminderPanel());

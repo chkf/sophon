@@ -9,7 +9,7 @@ import {ApiRuntime} from './api.js';
 import {historyFromMessages} from './history.js';
 import type {RuntimeTool} from './types.js';
 
-const base={stage_direction:'查看文档后稍作思考',reply_mode:'text',memory:{need_score:0,query:null,ids:null},sticker:'skip',quote:'skip',image:'skip'};
+const base={stage_direction:'查看文档后稍作思考',reply_mode:'text',sticker:'skip',quote:'skip',image:'skip'};
 const tool=(name:string):RuntimeTool=>({name,parameters:{type:'object',properties:{},additionalProperties:false}});
 test('tool groups start empty, validate selection, retain loaded tools only for this message and preserve MCP flags',()=>{
  const mcp=tool('mcp_sample_'+ 'a'.repeat(24));
@@ -23,32 +23,34 @@ test('tool groups start empty, validate selection, retain loaded tools only for 
  assert.equal(new ToolGroups([tool('gateway_recent_read')]).groups.length,0);
 });
 
-test('turn decisions validate capabilities, skip unnecessary recall and perform bounded short-query recall',()=>{
- let calls=0;const queries:unknown[][]=[];
- const memory={search:(...args:unknown[])=>{calls++;queries.push(args);return {items:[]};},read:(ids:string[])=>({ids})};
- const state=new TurnDecisionState({voice:false,sticker:true,quote:false,image:false},memory as any);
- assert.throws(()=>state.allow('gateway_recent_read'));
+test('preparation precedes decision, recall has no score gate and output remains authorized',()=>{
+ const queries:unknown[][]=[];
+ const memory={search:(...args:unknown[])=>{queries.push(args);return [];}};
+ const state=new TurnDecisionState({voice:false,sticker:true,quote:true,image:false},memory as any);
+ state.allow('gateway_recent_read');state.allow('gateway_sticker',{action:'list'});
+ assert.throws(()=>state.allow('gateway_sticker',{action:'select'}));
+ assert.throws(()=>state.allow('gateway_reply_native'));
+ state.search({query:'sample document'});
  assert.throws(()=>state.select({...base,reply_mode:'voice'}));
- state.select({...base,memory:{need_score:.6,query:'document review',ids:null}});
- assert.equal(calls,1);assert.deepEqual(queries[0],['document review',1,8]);
- state.search({query:'review checklist'});assert.equal(calls,2);
+ state.select(base);state.search({query:'sample checklist'});
+ assert.deepEqual(queries,[['sample document',1,8],['sample checklist',1,8]]);
  assert.throws(()=>state.search({query:'third query'}));
  assert.throws(()=>state.allow('send_voice'));assert.throws(()=>state.allow('gateway_generate_image'));
- const skip=new TurnDecisionState({voice:false,sticker:false,quote:false,image:false},memory as any);
- skip.select(base);assert.equal(calls,2);assert.throws(()=>skip.allow('gateway_memory_read'));
- const read=new TurnDecisionState({voice:false,sticker:false,quote:false,image:false},memory as any);
- assert.deepEqual((read.select({...base,memory:{need_score:1,query:null,ids:['sample-record']}}) as any).memory,{ids:['sample-record']});
+ state.allow('gateway_memory_read');state.allow('gateway_sticker',{action:'select'});state.allow('gateway_reply_native');
+ assert.equal((state.tool.parameters.properties as any).memory,undefined);
+ assert.equal((state.tool.parameters.properties as any).tool_groups,undefined);
+ assert.throws(()=>state.select({...base,stage_direction:'Changed decision'}));
 });
 
 test('API snapshots offered tools per response, rejects early writes and preserves dynamic tools through the history wrapper',async()=>{
  const root=await mkdtemp(join(tmpdir(),'sophon-routing-'));
  const groups=new ToolGroups([tool('gateway_file_propose')]);
- const decision=new TurnDecisionState({voice:false,sticker:false,quote:false,image:false},undefined,groups);
+ const decision=new TurnDecisionState({voice:false,sticker:false,quote:false,image:false},undefined);
  groups.tools.push(decision.tool);let writes=0;
  const sent:any[]=[];
  const call=(name:string,args:unknown,id:string)=>({id,type:'function',function:{name,arguments:JSON.stringify(args)}});
  const replies=[
-  [call(DECISION_TOOL_NAME,{...base,tool_groups:[]},'decision'),call('gateway_file_propose',{},'early-one')],
+  [call(DECISION_TOOL_NAME,base,'decision'),call('gateway_file_propose',{},'early-one')],
   [call(LOAD_TOOLS_NAME,{groups:['files']},'load'),call('gateway_file_propose',{},'early-two')],
   [call('gateway_file_propose',{},'allowed')],
   [],

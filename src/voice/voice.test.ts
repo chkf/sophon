@@ -319,12 +319,12 @@ test('valid WeChat platform transcription works without ASR configuration, prese
 }));
 
 
-test('legacy voice directions never reach synthesis or the transcript button',()=>fixture(async f=>{
+test('literal parentheses reach synthesis and the transcript button',()=>fixture(async f=>{
   await f.settings.update({tts:true});
   let spoken='';f.client.synthesize=async(text:string)=>{spoken=text;return Buffer.from('wav');};
-  assert.equal(await f.telegramVoice.send(f.api,'123','（动作说明）你好（停顿）再见','stage-legacy'),true);
-  assert.equal(spoken,'你好 再见');
+  assert.equal(await f.telegramVoice.send(f.api,'123','文档（含附录）已准备','stage-legacy'),true);
+  assert.equal(spoken,'文档（含附录）已准备');
   const data=f.calls.find((c:any)=>c.method==='sendVoice').body.reply_markup.inline_keyboard[0][0].callback_data;
   await f.telegramVoice.callback({id:'q',from:{id:123},message:{message_id:42,date:1,chat:{id:123,type:'private'}},data},f.api);
-  assert.equal(f.calls.find((c:any)=>c.method==='editMessageCaption').body.caption,'你好 再见');
+  assert.equal(f.calls.find((c:any)=>c.method==='editMessageCaption').body.caption,'文档（含附录）已准备');
 }));

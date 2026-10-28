@@ -13,7 +13,7 @@ import { MEMORY_TOOLS, executeMemoryTool } from "./memory/tools.js";
 import { replyText } from "./runtime/reply-segments.js";
 import type { FileService } from "./files/service.js";
 import { DeliveryCoordinator } from "./delivery/coordinator.js";
-import { VoiceTurn, voiceTool, VOICE_TOOL } from "./voice/tool.js";
+import { VoiceTurn, voiceTool, stageDirectionTool, VOICE_TOOL } from "./voice/tool.js";
 import type { InboundMessage, PlatformMessageFragment } from "./channels/types.js";
 import type { ReplyOutcome } from "./channels/reply.js";
 import { randomUUID, createHash } from "node:crypto";
@@ -226,8 +226,9 @@ export class Gateway {
     const groups = new ToolGroups(availableTools);
     const tools = groups.tools;
     const decision = this.options.turnDecisionEnabled !== false ? new TurnDecisionState({voice: Boolean(voice),
-      sticker: Boolean(stickers), quote: Boolean(native?.enabled), image: message.channel === "telegram" && explicitImageRequest(message.text)}, memory, groups) : undefined;
+      sticker: Boolean(stickers), quote: Boolean(native?.enabled), image: message.channel === "telegram" && explicitImageRequest(message.text)}, memory) : undefined;
     if (decision) tools.push(decision.tool);
+    else if (replyTurn.showStageDirections) tools.push(stageDirectionTool);
     const instructions = [renderLocalPolicy(context), !context.data.expression && expression ? expressionInstruction(expression) : "",
       CHAT_BUBBLE_GUIDANCE, voice?.guidance ?? "", REMINDER_GUIDANCE,
       decision ? CHAT_CAPABILITY_GUIDANCE : "缺少历史信息时使用简短关键词搜索记忆，已有记忆 ID 可直接读取；不猜测未知事实。",
@@ -275,11 +276,13 @@ export class Gateway {
         purpose: "chat",
         ...(!temporary && memory?{memory:{...memory.context(),refresh:()=>memory.context()}}:{}),
         finalizeReplyText: text => {
+          if (decision && !decision.current) throw Error("正式回复前必须提交 gateway_turn_decision。");
           if (decision?.current?.reply_mode === "voice" && !replyTurn.text) throw Error("本轮选择语音，但尚未登记语音。");
           return replyTurn.finalize(stripLegacyQuoteTokens(text));
         },
         requiredTool: () => decision && !decision.current ? DECISION_TOOL_NAME : undefined,
-        authorizeTool: name => { if (name !== DECISION_TOOL_NAME) decision?.allow(name); },
+        requiredToolTiming: "before_reply",
+        authorizeTool: (name, args) => { if (name !== DECISION_TOOL_NAME) decision?.allow(name, args); },
         recordReplyText: (text, id) => { if (!decision || decision.current) replyTurn.recordText(stripLegacyQuoteTokens(text), id); },
         getPreparedReplySegments: () => replyTurn.segments,
         ...(stickers ? { getPreparedSticker: () => stickers.prepared } : {}),
@@ -306,15 +309,16 @@ export class Gateway {
         },
         ...(attachments.length ? { attachments } : {}),
         ...(tools.length ? {
-          tools, getTools: () => tools,
+          tools, getTools: () => tools.filter(tool => !decision || decision.current || ![VOICE_TOOL, NATIVE_REPLY_TOOL].includes(tool.name)),
           executeTool: async (name: string, args: Record<string, unknown>) => {
             if (!tools.some(tool => tool.name === name)) throw new Error("本轮未开放该工具。");
             if (decision && name === DECISION_TOOL_NAME) {
               const result = decision.select(args);
-              replyTurn.recordText("（" + decision.current!.stage_direction.replace(/^[（(]|[）)]$/g, "") + "）", "decision-stage");
+              replyTurn.recordStageDirection(decision.current!.stage_direction);
               return result;
             }
-            decision?.allow(name);
+            if (!decision && replyTurn.showStageDirections && name === stageDirectionTool.name) return replyTurn.selectStageDirection(args);
+            decision?.allow(name, args);
             if (name === LOAD_TOOLS_NAME) return groups.execute(args);
             if (decision && name === "gateway_memory_search") return decision.search(args);
             if (name === HEARTBEAT_REPLAN_TOOL.name && this.options.replan && !temporary && reminderTools.length)

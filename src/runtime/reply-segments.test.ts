@@ -20,18 +20,17 @@ const parts: ReplySegment[]=[{kind:"stage_direction",text:"（查看文档）"},
   {kind:"voice",text:"第二段",instruction:"语速较慢、吐字清晰"},{kind:"text",text:"最后文字"}];
 async function temp(run:(root:string)=>Promise<void>){const root=await mkdtemp(join(tmpdir(),"ordered-reply-"));try{await run(root);}finally{await rm(root,{recursive:true,force:true});}}
 
-test("hidden nested, multiline and incomplete stage directions do not become speech or fallback text",()=>{
-  assert.equal(displayText("（动作（翻页））\n你好\n（补充说明：\n示例内容）\n再见",false),"你好\n\n再见");
-  assert.equal(displayText("你好（未闭合说明",false),"你好");
-  assert.equal(spokenText("（动作说明）你好（停顿）再见"),"你好 再见");
-  assert.equal(spokenText("f(x)"),"f(x)");
+test("typed directions respect visibility while literal parentheses remain intact",()=>{
+  const literal="文档（含附录）\n示例（嵌套（数据））\n未闭合（文字";
+  assert.equal(displayText(literal,false),literal);
+  assert.equal(spokenText(literal),literal);
   assert.equal(visibleSegments(parts,false).some(p=>p.kind==="stage_direction"),false);
-  assert.deepEqual(visibleSegments([{kind:"stage_direction",text:"PRIVATE_WITHOUT_BRACKETS"}],false),[]);
-  const turn=new VoiceTurn(false);
-  turn.recordText("（测试动作）\n前文","one");turn.recordText("（测试动作）\n前文","one");
-  turn.select({text:"第一段",instruction:"自然语气"});
-  assert.equal(turn.combine("第一段\n\n（隐藏说明）\n末尾"),"前文\n\n第一段\n\n末尾");
-  assert.doesNotMatch(JSON.stringify(turn.segments),/隐藏说明/);
+  const hidden=new VoiceTurn(false);hidden.recordStageDirection("查看样例");hidden.recordText(literal,"one");
+  assert.deepEqual(hidden.segments,[{kind:"text",text:literal}]);
+  const shown=new VoiceTurn(true);shown.recordStageDirection("查看样例");shown.recordStageDirection("查看样例");shown.recordText(literal,"one");
+  assert.deepEqual(shown.segments,[{kind:"stage_direction",text:"（查看样例）"},{kind:"text",text:literal}]);
+  const recovered=new VoiceTurn(false);recovered.restore(shown.segments);
+  assert.deepEqual(recovered.segments,hidden.segments);
 });
 
 for(const second of ["success","failure","uncertain"] as const) test("ordered fragments preserve delivery progress: "+second,async()=>{
@@ -65,20 +64,21 @@ test("Gateway hidden stage directions are absent from delivered shared history a
   const context=localContext();context.data!.expression={showStageDirections:false};
   const gateway=new Gateway({reply:async request=>{
     assert.match(request.instructions!,/心理和动作描写已关闭/);
-    assert.match(request.instructions!,/回复仅包含正文/);
-    request.recordReplyText!("（PRIVATE_STAGE）\n先说一句","one");
+    assert.match(request.instructions!,/台词仅包含正文/);
+    await request.executeTool!("gateway_turn_decision",{stage_direction:"SYNTHETIC_STAGE",reply_mode:"voice",sticker:"skip",quote:"skip",image:"skip"});
+    request.recordReplyText!("先说一句","one");
     await request.executeTool!("send_voice",{text:"第一段",instruction:"清晰、自然表达"});
     request.recordReplyText!("中间文字","two");
     await request.executeTool!("send_voice",{text:"第二段",instruction:"平稳表达"});
-    return {text:request.finalizeReplyText!("（PRIVATE_END）\n最后文字"),replySegments:request.getPreparedReplySegments!()};
-  }},sessions,{load:async()=>context} as any,0,undefined,undefined,undefined,undefined,async()=>true,undefined,undefined,undefined,undefined,undefined,undefined,undefined,{turnDecisionEnabled:false});
+    return {text:request.finalizeReplyText!("最后文字"),replySegments:request.getPreparedReplySegments!()};
+  }},sessions,{load:async()=>context} as any,0,undefined,undefined,undefined,undefined,async()=>true,undefined,undefined,undefined,undefined,undefined,undefined,undefined,{turnDecisionEnabled:true});
   try{
     const reply=await gateway.handle({channel:"telegram",conversationId:"1",senderId:"1",messageId:"1",text:"你好",receivedAt:new Date().toISOString(),attachments:[]});
     assert.equal(reply.kind,"model_reply");if(reply.kind!=="model_reply")return;
-    assert.doesNotMatch(JSON.stringify(reply),/PRIVATE/);
-    assert.deepEqual(reply.replySegments?.map(p=>p.kind),["text","voice","text","voice","text"]);
+    assert.doesNotMatch(JSON.stringify(reply),/SYNTHETIC_STAGE/);
+    assert.deepEqual(reply.replySegments?.map(p=>p.kind),["voice","voice"]);
     await gateway.commitDeliveredAssistant("telegram","1","1",reply.text);
-    const found:any=await readHistoryTool((await sessions.view("wechat","wx")).history,{query:"PRIVATE"});
+    const found:any=await readHistoryTool((await sessions.view("wechat","wx")).history,{query:"SYNTHETIC_STAGE"});
     assert.equal(found.total,0);
     assert.match((await sessions.view("wechat","wx")).tail.at(-1)!.content,/第二段/);
   }finally{sessions.close();}
@@ -94,19 +94,20 @@ test("SILENT decision suppresses all staged text, voice, directions and images",
 }));
 
 
-test("legacy pending voice text fallback is filtered at delivery time",async()=>{
+test("pending voice fallback preserves literal parentheses",async()=>{
   const sent:string[]=[];
-  await deliverPreparedReply({} as any,{kind:"model_reply",chatId:"1",senderId:"1",deliveryId:"old",text:"（隐藏说明）你好",voiceText:"（隐藏说明）你好"},
-    {showStageDirections:async()=>false,sendVoice:async(_api,_chat,text)=>{assert.equal(text,"你好");return false;}},
+  await deliverPreparedReply({} as any,{kind:"model_reply",chatId:"1",senderId:"1",deliveryId:"old",text:"文档（含附录）",voiceText:"文档（含附录）"},
+    {showStageDirections:async()=>false,sendVoice:async(_api,_chat,text)=>{assert.equal(text,"文档（含附录）");return false;}},
     async(_chat,text)=>{sent.push(text);});
-  assert.equal(sent.length,1);assert.match(sent[0]!,/你好/);assert.doesNotMatch(sent[0]!,/隐藏说明/);
+  assert.equal(sent.length,1);assert.match(sent[0]!,/文档（含附录）/);
 });
 
 test("image failure notice survives ordered fragment delivery",async()=>{
   const turn=new VoiceTurn(false);
   const result=await replyWithPaidImages({reply:async request=>{
     await request.executeTool!("gateway_generate_image",{prompt:"一只猫"});
-    const text=request.finalizeReplyText!("（检查结果）这次图片没出来。");
+    turn.recordStageDirection("检查结果");
+    const text=request.finalizeReplyText!("这次图片没出来。");
     return {text,replySegments:request.getPreparedReplySegments!()};
   }} as any,{getImageSettings:async()=>({route:"openrouter"}),canGenerateImage:async()=>true,
     generateImage:async()=>{throw Error("fixture failed");}} as any,
@@ -120,7 +121,7 @@ test("image failure notice survives ordered fragment delivery",async()=>{
 test("display filtering preserves literal code and generated source citations",()=>{
   const code='```js\nconst value = "（数据）";\n\nconsole.log(value);\n```';
   const citation=renderOutputTextPart({type:"output_text",text:"已查证",annotations:[{type:"url_citation",url:"https://fixture.invalid/source",title:"依据",end_index:3}]});
-  const turn=new VoiceTurn(false);turn.finalize("（隐藏动作）\n"+code+"\n\n"+citation);
+  const turn=new VoiceTurn(false);turn.recordStageDirection("查看代码");turn.finalize(code+"\n\n"+citation);
   assert.equal(turn.segments[0]?.text,code);
   assert.match(turn.segments[1]!.text,/https:\/\/fixture.invalid\/source/);
   assert.doesNotMatch(replyText(turn.segments),/隐藏动作/);

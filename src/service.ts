@@ -1,3 +1,4 @@
+import { ReplyTiming } from "./channels/reply-timing.js";
 import { controlHeartbeatTiming } from "./control/heartbeat.js";
 import { ReminderStore } from "./reminders/store.js";
 import { ReminderTools } from "./reminders/tools.js";
@@ -121,6 +122,7 @@ export class GatewayService {
   ) {
     validateServeConfig(config);
     const mcpServers=readMcpConfig(config.mcpConfigFile);
+    const replyTiming=new ReplyTiming(config.dataDir);
     const proactiveSettings=this.proactiveSettings=new ProactiveSettings(config.dataDir,config.heartbeat.enabled,config.heartbeat,()=>this.heartbeat?.requestCheck());
     this.reminders=new ReminderStore(config.dataDir,()=>this.heartbeat?.requestCheck());
 
@@ -171,6 +173,7 @@ export class GatewayService {
     if (config.telegram) {
       const telegramVoice=new TelegramVoiceTransport(this.voice,config.telegram.ownerId);
       this.telegram = new TelegramAdapter({
+        getInputDebounceMs:()=>replyTiming.milliseconds(),
         showStageDirections: async () => (await this.expressions.snapshot()).showStageDirections === true,
         ...config.telegram,
         dataDir: config.dataDir,
@@ -197,6 +200,7 @@ export class GatewayService {
     }
     if (config.ilink && config.telegram) {
       this.ilink = new IlinkAdapter({
+        getInputDebounceMs:()=>replyTiming.milliseconds(),
         showStageDirections: async () => (await this.expressions.snapshot()).showStageDirections === true, ownerId: config.telegram.ownerId,
         store: new IlinkStore(config.dataDir, createCredentialEncryption(process.platform, config.credentialKeyFile)),
         media, queue: this.conversationQueue,
@@ -232,6 +236,8 @@ export class GatewayService {
       this.callTraces = new TaskTraceStore(config.dataDir,{scope:'calls',maxRuns:20,retentionDays:7,
         secrets:[config.telegram?.token,config.api?.apiKey,config.openrouter?.apiKey,config.voice?.apiKey,...mcpServers.flatMap(server=>Object.values({...server.env,...server.headers}))].filter((value):value is string=>!!value)});
       this.control = new ControlCenter({
+        replyTiming,
+        onReplyTimingChanged:()=>{this.telegram?.refreshInputTiming();this.ilink?.refreshInputTiming();},
         publicUrl: config.control.publicUrl,
         temporary: config.control.tunnel === "cloudflare",
         tunnelReady: config.control.tunnel === "cloudflare" && process.env.SOPHON_MANAGED_HOST === "1" && !!controlTunnelUrl(process.env.SOPHON_CONTROL_TUNNEL_URL),

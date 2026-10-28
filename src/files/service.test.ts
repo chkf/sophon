@@ -153,3 +153,15 @@ test("changed files, expired proposals and restarted confirmation state cannot b
   await assert.rejects(run(f.service, "gateway_file_apply", { confirmation: newer.confirmation }, message("new-approval", newer.instruction as string)), /expired/);
   assert.equal(await readFile(path, "utf8"), "updated independently");
 });
+
+test('confirmed replacement restores original mode despite a restrictive umask', {skip:process.platform==='win32'},async t=>{
+ const {chmod,stat}=await import('node:fs/promises');
+ const f=await fixture(t),path=join(f.root,'permissions.txt');
+ await writeFile(path,'Sample version one');await chmod(path,0o640);
+ const proposal=await run(f.service,'gateway_file_propose',{action:'replace',path,content:'Sample version two'});
+ const originalMask=process.umask(0o077);
+ try{await run(f.service,'gateway_file_apply',{confirmation:proposal.confirmation},message('confirm-mode',proposal.instruction as string));}
+ finally{process.umask(originalMask);}
+ assert.equal((await stat(path)).mode & 0o777,0o640);
+ assert.equal(await readFile(path,'utf8'),'Sample version two');
+});

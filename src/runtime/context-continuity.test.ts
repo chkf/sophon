@@ -37,7 +37,7 @@ for (const provider of ["api", "openrouter"] as const) {
     const groups = new ToolGroups([{ name: remoteName, description: "Read a sample document.", readOnly: true,
       parameters: { type: "object", properties: { key: { type: "string", description: "Sample field. ".repeat(500) } } },
     }]);
-    const decision = new TurnDecisionState({ voice: false, sticker: false, quote: false, image: false }, undefined, groups);
+    const decision = new TurnDecisionState({ voice: false, sticker: false, quote: false, image: false }, undefined);
     groups.tools.push(decision.tool);
     const submitted: SubmittedRequest[] = [];
     let executions = 0;
@@ -48,12 +48,13 @@ for (const provider of ["api", "openrouter"] as const) {
       assert.ok(String(url).endsWith("/chat/completions"));
       const body = JSON.parse(String(init?.body));
       submitted.push(body);
-      if (submitted.length === 1) return replyResponse(body.stream, "", [call("select", DECISION_TOOL_NAME, {
-        stage_direction: "Reviewing the sample document.", reply_mode: "text", memory: { need_score: 0, query: null, ids: null },
-        sticker: "skip", quote: "skip", image: "skip", tool_groups: ["mcp_sample"],
+      if (submitted.length === 3) return replyResponse(body.stream, "", [call("select", DECISION_TOOL_NAME, {
+        stage_direction: "Reviewing the sample document.", reply_mode: "text",
+        sticker: "skip", quote: "skip", image: "skip",
       })]);
+      if (submitted.length === 1) return replyResponse(body.stream, "", [call("load", "gateway_load_tools", {groups:["mcp_sample"]})]);
       if (submitted.length === 2) return replyResponse(body.stream, "", [call("read", remoteName, { key: "sample" })]);
-      assert.equal(submitted.length, 3);
+      assert.equal(submitted.length, 4);
       return replyResponse(body.stream, resultText);
     };
     const runtime = provider === "api"
@@ -63,8 +64,9 @@ for (const provider of ["api", "openrouter"] as const) {
     const request = {
       purpose: "chat" as const, sessionId: "sample-conversation", operationId: "sample-operation", text: current,
       history: createHistory(history.length, async (offset, length) => { reads.push(offset); return history.slice(offset, offset + length); }),
-      tools: groups.tools, getTools: () => groups.tools, requiredTool: () => decision.current ? undefined : DECISION_TOOL_NAME,
+      requiredToolTiming: "before_reply" as const, tools: groups.tools, getTools: () => groups.tools, requiredTool: () => decision.current ? undefined : DECISION_TOOL_NAME,
       executeTool: async (name: string, args: Record<string, unknown>) => {
+        if (name === "gateway_load_tools") return groups.execute(args);
         if (name === DECISION_TOOL_NAME) return decision.select(args);
         assert.equal(name, remoteName); executions++; return { value: toolResult };
       },
@@ -74,14 +76,14 @@ for (const provider of ["api", "openrouter"] as const) {
     assert.equal(response.contextEffect, "none");
     assert.deepEqual(reads, [0, 256]);
     assert.deepEqual(submitted[0]!.messages.slice(1).map(content), [...history.map(message => message.content), current]);
-    assert.deepEqual(submitted[0]!.tools?.map(tool => tool.function.name), [DECISION_TOOL_NAME]);
+    assert.ok(submitted[0]!.tools?.some(tool => tool.function.name === "gateway_load_tools"));
     assert.ok(submitted[1]!.tools?.some(tool => tool.function.name === remoteName));
     assert.equal(JSON.parse(content(submitted[2]!.messages.at(-1)!)).value, toolResult);
     for (const body of submitted) assert.equal(Object.hasOwn(body, "max_tokens"), false);
     assert.equal(executions, 1);
     assert.deepEqual(history, source);
     assert.equal((await runtime.reply(request)).text, resultText.trim());
-    assert.equal(submitted.length, 3, "a completed operation is not billed or executed again");
+    assert.equal(submitted.length, 4, "a completed operation is not billed or executed again");
   });
 }
 

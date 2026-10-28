@@ -610,7 +610,7 @@ test("voice-only completion traverses Gateway and real WS tool loop without requ
   const {Gateway}=await import("../../gateway.js");
   const {localContext}=await import("../../core/context-fixture.js");
   const root=await mkdtemp(join(tmpdir(),"siwc-voice-only-"));
-  const socket=new FakeSocket([{id:"decision",output:[{type:"function_call",call_id:"decision",name:"gateway_turn_decision",arguments:JSON.stringify({stage_direction:"查看文档",reply_mode:"voice",memory:{need_score:0,query:null,ids:null},sticker:"skip",quote:"skip",image:"skip"})}]},{id:"voice-call",output:[{type:"function_call",call_id:"v1",namespace:"gateway",name:"send_voice",arguments:JSON.stringify({text:"语音测试"})}]},messageResponse("voice-done",""),messageResponse("next","收到")]);
+  const socket=new FakeSocket([{id:"decision",output:[{type:"function_call",call_id:"decision",name:"gateway_turn_decision",arguments:JSON.stringify({stage_direction:"查看文档",reply_mode:"voice",sticker:"skip",quote:"skip",image:"skip"})}]},{id:"voice-call",output:[{type:"function_call",call_id:"v1",namespace:"gateway",name:"send_voice",arguments:JSON.stringify({text:"语音测试"})}]},messageResponse("voice-done",""),messageResponse("next","收到")]);
   const bridge=new StatefulResponsesBridge(root,()=>socket);
   const sessions=new SessionStore(root);
   const runtime:any={reply:async(turn:any)=>bridge.reply({...request(),...turn,accessToken:"fixture",model:"test-model"})};
@@ -2295,4 +2295,24 @@ for(const kind of ["none","read","voice","write","image"] as const) test("SIWC t
       }finally{await restarted.close();}
     }
   }finally{await bridge.close();await rm(directory,{recursive:true,force:true});}
+});
+
+test('SIWC prepares information before its required final decision without delivering preparation text',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'prepared-decision-'));
+ let decided=false,reads=0;const recorded:string[]=[];
+ const fn=(id:string,name:string)=>({type:'function_call',call_id:id,name,arguments:'{}'});
+ const socket=new FakeSocket([
+  {id:'prepare',output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'Preparation text must not be delivered'}]},fn('read','sample_read')]},
+  {id:'decision',output:[fn('decide','sample_decision'),{type:'message',role:'assistant',content:[{type:'output_text',text:'Decision-round text must not be delivered'}]}]},
+  messageResponse('final','Sample document checked'),
+ ]);
+ const bridge=new StatefulResponsesBridge(root,()=>socket);
+ try{
+  const result=await bridge.reply({...request(),ephemeral:true,requiredToolTiming:'before_reply',requiredTool:()=>decided?undefined:'sample_decision',
+   tools:['sample_read','sample_decision'].map(name=>({name,readOnly:true,parameters:{type:'object'}})),
+   recordReplyText:text=>recorded.push(text),executeTool:async name=>{if(name==='sample_read'){reads++;assert.equal(decided,false);}else decided=true;return {ok:true};}});
+  assert.equal(reads,1);assert.equal(result.text,'Sample document checked');assert.ok(recorded.every(text=>!text.includes('must not')));
+  assert.equal(socket.sent.length,3);
+  assert.ok((socket.sent[0]!.tools as any[]).some(t=>t.name==='sample_read'||t.tools?.some((f:any)=>f.name==='sample_read')));
+ }finally{await bridge.close();await rm(root,{recursive:true,force:true});}
 });

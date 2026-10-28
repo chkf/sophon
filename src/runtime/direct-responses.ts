@@ -29,7 +29,8 @@ export interface DirectResponseOptions {
   tools?: RuntimeTool[];
   getTools?: () => RuntimeTool[];
   requiredTool?: () => string | undefined;
-  authorizeTool?: (name: string) => void;
+  requiredToolTiming?: "first" | "before_reply";
+  authorizeTool?: (name: string, args?: Record<string, unknown>) => void;
   executeTool?: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   recordReplyText?: (text: string, id: string) => void;
   getPreparedReplySegments?: () => ReplySegment[];
@@ -121,7 +122,7 @@ export async function runDirectResponse(options: DirectResponseOptions): Promise
 
   for (;;) {
     const requiredTool = options.requiredTool?.();
-    const offered = (options.getTools?.() ?? options.tools ?? []).filter(tool => !requiredTool || tool.name === requiredTool);
+    const offered = (options.getTools?.() ?? options.tools ?? []).filter(tool => !requiredTool || options.requiredToolTiming === "before_reply" || tool.name === requiredTool);
     const names = new Set(offered.map(tool => tool.name));
     const tools = toolNamespace(offered);
     const controller = new AbortController();
@@ -179,11 +180,11 @@ export async function runDirectResponse(options: DirectResponseOptions): Promise
       const record = (end: number) => {
         for (; cursor < end; cursor++) {
           const text = textFrom([result.outputItems[cursor]!]);
-          if (text) options.recordReplyText?.(text,"direct:"+toolRounds+":"+cursor);
+          if (text && !requiredTool) options.recordReplyText?.(text,"direct:"+toolRounds+":"+cursor);
         }
       };
       // Older SSE streams may carry only text deltas before their calls.
-      if (!textFrom(result.outputItems) && result.text) options.recordReplyText?.(result.text,"direct:"+toolRounds);
+      if (!requiredTool && !textFrom(result.outputItems) && result.text) options.recordReplyText?.(result.text,"direct:"+toolRounds);
       for (const call of result.calls) {
       record(result.outputItems.findIndex(item=>item.type==="function_call" && item.call_id===call.call_id));
       if (call.namespace && call.namespace !== "gateway") {
@@ -205,7 +206,7 @@ export async function runDirectResponse(options: DirectResponseOptions): Promise
 
       try {
         if (!names.has(call.name)) throw Error("本次请求未提供该工具。");
-        options.authorizeTool?.(call.name);
+        options.authorizeTool?.(call.name, args);
         const output = await options.executeTool(call.name, args);
         input.push({ type: "function_call_output", call_id: call.call_id, output: safeToolOutput(output) });
       } catch (error) {

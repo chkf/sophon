@@ -12,10 +12,11 @@ export function validSticker(value: TelegramSticker | undefined, chatId: string,
 }
 export const STICKER_TOOL: RuntimeTool = {
   name: "gateway_sticker", readOnly: true, replaySafe: true,
-  description: "查找或选择本 TG 私聊收到过的贴纸和 GIF。list 返回当前、近期历史和主库目录的真实素材及备注；query 可按备注等搜索，history_index 可查指定历史条目。select 可使用 list 返回或上下文已知的真实素材 key，登记本轮一个素材；没有合适素材时再查询最多 8 个候选，由 Gateway 实际发送。",
+  description: "查找或选择本 TG 私聊收到过的贴纸和 GIF。list 返回当前、近期历史和主库目录的真实素材及备注；query 或 queries 可按备注等搜索，queries 接受最多 3 个关键词，多词命中的优先，history_index 可查指定历史条目。select 可使用 list 返回或上下文已知的真实素材 key，登记本轮一个素材；没有合适素材时再查询最多 8 个候选，由 Gateway 实际发送。",
   parameters: { type: "object", properties: {
     action: { type: "string", enum: ["list", "select"] },
     history_index: { type: "integer", minimum: 0 }, key: { type: "string" }, query: { type: "string" },
+    queries: { type: "array", minItems: 1, maxItems: 3, items: {type: "string", minLength: 1, maxLength: 100} },
   }, required: ["action"], additionalProperties: false },
 };
 export const STICKER_NOTE_TOOL: RuntimeTool = {
@@ -50,9 +51,9 @@ export class StickerTurn {
   }
   async execute(args: Record<string, unknown>): Promise<unknown> {
     const account = this.account();
-    if (!args || Object.keys(args).some(k => !["action", "history_index", "key", "query"].includes(k))) throw new Error("贴纸参数无效。");
+    if (!args || Object.keys(args).some(k => !["action", "history_index", "key", "query", "queries"].includes(k))) throw new Error("贴纸参数无效。");
     if (args.action === "select") {
-      if (args.history_index !== undefined || args.query !== undefined || typeof args.key !== "string") throw new Error("请选择 list 返回的 key。");
+      if (args.history_index !== undefined || args.query !== undefined || args.queries !== undefined || typeof args.key !== "string") throw new Error("请选择 list 返回的 key。");
       let chosen = this.catalog.get(args.key);
       if (!chosen && /^asset:[a-f0-9]{24}$/.test(args.key)) {
         const saved = await this.saved?.listTelegramReactions(account,this.inbound.conversationId,undefined,5000) ?? [];
@@ -65,6 +66,9 @@ export class StickerTurn {
     }
     if (args.action !== "list" || args.key !== undefined || (args.query !== undefined && (typeof args.query !== "string" || args.query.length > 100)))
       throw new Error("请选择 list 或 select。");
+    if (args.queries !== undefined && (args.query !== undefined || !Array.isArray(args.queries) ||
+      args.queries.length < 1 || args.queries.length > 3 || args.queries.some(q => typeof q !== "string" || !q.trim() || q.length > 100)))
+      throw new Error("queries 需要 1–3 个非空关键词，不能与 query 同时使用。");
     const index = args.history_index;
     if (index !== undefined && (typeof index !== "number" || !Number.isSafeInteger(index) || index < 0 || index >= this.count))
       throw new Error("历史索引超出本轮范围。");
@@ -93,10 +97,12 @@ export class StickerTurn {
       entries.set("saved:" + i, entry.sticker);
       seen.add(entry.sticker.fileId);
     }
-    const query = typeof args.query === "string" ? args.query.trim().toLowerCase() : "";
+    const queries = [...new Set((args.queries as string[] | undefined ?? [typeof args.query === "string" ? args.query : ""]).map(q => q.trim().toLowerCase()).filter(Boolean))];
     const distinct = new Map([...entries.values()].map(sticker => ["asset:" + createHash("sha256").update(sticker.fileId).digest("hex").slice(0,24), sticker]));
-    const visible = [...distinct].filter(([, s]) => !query || [descriptions.get(s.fileId), s.emoji, s.setName, s.format]
-      .some(value => value?.toLowerCase().includes(query))).slice(0, 8);
+    const visible = [...distinct].map(entry => ({entry, score: queries.filter(query =>
+      [descriptions.get(entry[1].fileId), entry[1].emoji, entry[1].setName, entry[1].format]
+        .some(value => value?.toLowerCase().includes(query))).length}))
+      .filter(item => !queries.length || item.score > 0).sort((a,b) => b.score-a.score).slice(0,8).map(item => item.entry);
     for (const entry of visible) {
       this.catalog.set(entry[0],entry[1]);
     }

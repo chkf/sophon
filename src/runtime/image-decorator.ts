@@ -12,7 +12,7 @@ export async function replyWithPaidImages(runtime: ManagedChatRuntime, imagesRun
     const imageTool = new ImageTool(request, autonomous, imageRequest => imagesRuntime.generateImage!(imageRequest));
     const images = imageTool.images;
     const executeTool = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
-      request.authorizeTool?.(name);
+      request.authorizeTool?.(name, args);
       if (name === imageTool.definition.name) return (await imageTool.execute(args)).output;
       if (!request.executeTool || !(request.getTools?.() ?? request.tools)?.some(t => t.name === name)) throw new Error("工具未授权。");
       return request.executeTool(name, args);

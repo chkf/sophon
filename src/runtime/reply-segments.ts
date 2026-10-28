@@ -3,7 +3,6 @@ export type ReplySegment =
   | { kind: "text" | "stage_direction"; text: string }
   | { kind: "voice"; text: string; instruction: string };
 
-const CODE_SPANS = /```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]+`/g;
 
 /** Keep fenced code intact when separating ordinary text bubbles. */
 export function replyParagraphs(text: string): string[] {
@@ -17,36 +16,12 @@ export function replyParagraphs(text: string): string[] {
   return result.map(value => value.trim()).filter(Boolean);
 }
 
-/** Full-width parentheses are reserved for role performance by the reply protocol.
- * Nested/multiline directions are supported; an unfinished direction is fail-closed.
- * ASCII parentheses in ordinary prose/code retain their usual meaning.
- */
+/** Dialogue is literal text; stage directions arrive through a separate typed field. */
 export function splitStageDirections(text: string): ReplySegment[] {
-  const result: ReplySegment[] = [];
-  let start = 0, depth = 0, stageStart = 0;
-  const code = new Map([...text.matchAll(CODE_SPANS)].map(match => [match.index, match[0].length]));
-  const push = (kind: "text" | "stage_direction", value: string) => {
-    if (value.trim()) result.push({ kind, text: value.trim() });
-  };
-  for (let i = 0; i < text.length; i++) {
-    // Code is literal reply data, not role performance. Backticks inside an
-    // already open direction do not turn its hidden body into ordinary text.
-    if (depth === 0 && code.has(i)) { i += code.get(i)! - 1; continue; }
-    if (text[i] === "（") {
-      if (depth++ === 0) { push("text", text.slice(start, i)); stageStart = i; }
-    } else if (text[i] === "）" && depth > 0 && --depth === 0) {
-      push("stage_direction", text.slice(stageStart, i + 1)); start = i + 1;
-    }
-  }
-  if (depth === 0) push("text", text.slice(start));
-  return result;
+  return text.trim() ? [{kind: "text", text: text.trim()}] : [];
 }
-export function spokenText(text: string): string {
-  return splitStageDirections(text).filter(part => part.kind === "text").map(part => part.text).join(" ");
-}
-export function displayText(text: string, show: boolean): string {
-  return splitStageDirections(text).filter(part => show || part.kind !== "stage_direction").map(part => part.text).join("\n\n");
-}
+export function spokenText(text: string): string { return text.trim(); }
+export function displayText(text: string, _show: boolean): string { return text.trim(); }
 export function replyText(segments: readonly ReplySegment[]): string {
   return segments.map(part => part.text).join("\n\n");
 }

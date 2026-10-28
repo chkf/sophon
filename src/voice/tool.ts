@@ -3,6 +3,11 @@ import { displayText, replyParagraphs, replyText, splitStageDirections, spokenTe
 import { speakable, validVoiceInstruction, MAX_VOICE_INSTRUCTION_CHARS } from "./settings.js";
 
 export const VOICE_TOOL = "send_voice";
+export const stageDirectionTool: RuntimeTool = {
+  name: "gateway_stage_direction", readOnly: true, replaySafe: true,
+  description: "决定回复时，单独登记简短的虚构心理或动作描写。不混入正文，不描述用户内心，不代表执行了现实操作。静默时不要调用。",
+  parameters: {type:"object",additionalProperties:false,required:["text"],properties:{text:{type:"string",minLength:1,maxLength:600}}},
+};
 export class VoiceSupplementError extends Error {
   constructor(readonly deliveredText:string){super("回复已部分送达，后续文字发送失败；不重发。");}
 }
@@ -25,7 +30,19 @@ export class VoiceTurn {
   // Legacy getters are retained only for older provider consumers.
   get text(): string | undefined { return this.parts.find(part => part.kind === "voice")?.text; }
   get instruction(): string | undefined { return this.parts.find(part => part.kind === "voice")?.instruction; }
-  readonly guidance="根据内容和情绪自然选择文字或语音，按完整意思组织台词；同一句或简短确认尽量在一次输出中完成，不把时间、数字和说明拆成多个气泡。内容较长或话题转换时可自然分段，不限制合理的语音段数。角色描写遵循 Core 和独立描写开关的设置；如需描写，使用简短、中性的心理或动作描写。instruction 利用对应描写指导表达，语音只朗读正文。本轮选择语音时只用 send_voice 登记台词；选择文字时不调用语音。不要重复输出已登记的台词。工具成功仅代表登记，实际发送和失败回退由 Gateway 完成。";
+  readonly guidance="根据内容和情绪自然选择文字或语音，按完整意思组织台词；同一句或简短确认尽量在一次输出中完成，不把时间、数字和说明拆成多个气泡。内容较长或话题转换时可自然分段，不限制合理的语音段数。角色描写遵循 Core 和独立描写开关的设置；提供 gateway_turn_decision 时用 stage_direction 字段独立登记描写，否则仅在提供 gateway_stage_direction 时用该工具登记，不混入台词；使用简短、中性的虚构心理或动作描写。instruction 利用对应描写指导表达，语音只朗读正文。本轮选择语音时只用 send_voice 登记台词；选择文字时不调用语音。不要重复输出已登记的台词。工具成功仅代表登记，实际发送和失败回退由 Gateway 完成。";
+  selectStageDirection(args: Record<string, unknown>): unknown {
+    if (Object.keys(args).length !== 1 || typeof args.text !== "string" || !args.text.trim() || args.text.length > 600)
+      throw Error("描写需为 1–600 字符的 text 字段。");
+    this.recordStageDirection(args.text);
+    return {accepted:true};
+  }
+  recordStageDirection(text: string, id = "decision-stage"): void {
+    if (this.recorded.has(id)) return;
+    this.recorded.add(id);
+    const body = text.trim().replace(/^[（(]|[）)]$/g, "").trim();
+    if (body && this.showStageDirections) this.parts.push({kind:"stage_direction",text:"（"+body+"）"});
+  }
   recordText(text: string, id: string): void {
     if (this.recorded.has(id)) return;
     this.recorded.add(id);

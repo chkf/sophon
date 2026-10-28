@@ -26,3 +26,17 @@ test('duplicate current/history references do not displace distinct sticker cand
  const result=await new StickerTurn(history,duplicate,store).execute({action:'list'}) as any;
  assert.equal(result.stickers.length,8);assert.equal(new Set(result.stickers.map((s:any)=>s.key)).size,8);
 });
+
+test('multiple keywords rank distinct real assets and retain one selection per turn',async()=>{
+ const notes=['document','chart','document chart','unrelated'];
+ const saved={...store,listTelegramReactions:async()=>stickers.slice(0,4).map((sticker,index)=>({sticker,note:notes[index]}))};
+ const turn=new StickerTurn(historyFromMessages([]),input,saved);
+ const result=await turn.execute({action:'list',queries:['DOCUMENT','chart','document']}) as any;
+ assert.deepEqual(result.stickers.map((item:any)=>item.note),['document chart','document','chart']);
+ await turn.execute({action:'select',key:result.stickers[0].key});
+ await turn.execute({action:'select',key:result.stickers[0].key});
+ await assert.rejects(turn.execute({action:'select',key:result.stickers[1].key}),/只能选择一个/);
+ for(const queries of [[],[''],['a','b','c','d'],[42]])await assert.rejects(turn.execute({action:'list',queries}));
+ await assert.rejects(turn.execute({action:'list',query:'document',queries:['chart']}));
+ assert.equal((await turn.execute({action:'list',queries:['no-match']}) as any).stickers.length,0);
+});

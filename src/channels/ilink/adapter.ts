@@ -24,7 +24,7 @@ interface Options {
   proactiveDelivered?:(user:string,text:string,id:string,at:string,fragments?:PlatformMessageFragment[])=>Promise<void>;
   lookupReference?:(user:string,botId:string,id:string)=>Promise<InboundMessageReference|undefined>;
   discarded:(user:string,id:string)=>Promise<void>;
-  debounceMs?:number; maxWaitMs?:number;
+  debounceMs?:number; maxWaitMs?:number; getInputDebounceMs?:()=>number;
 }
 interface Login { id:string; code:string; base:string; expires:number; abort:AbortController; verify?:string }
 const btn=(text:string,run:()=>Promise<PanelView>)=>({text,run});
@@ -223,13 +223,14 @@ export class IlinkAdapter implements ProactiveSender {
     },ids);
     this.schedule();
   }
+  refreshInputTiming(){this.schedule();}
   private schedule(){
     const generation=++this.scheduleGeneration;
     if(this.flushTimer)clearTimeout(this.flushTimer);
     if(!this.running||this.flushing)return;
     void this.options.store.load().then(state=>{
       const b=state.batches[0];if(!b||b.paused||state.invalid||!this.running||generation!==this.scheduleGeneration)return;
-      const due=b.retryAt??Math.min(b.lastAt+(this.options.debounceMs??8000),b.firstAt+(this.options.maxWaitMs??30_000));
+      const due=b.retryAt??Math.min(b.lastAt+(this.options.getInputDebounceMs?.()??this.options.debounceMs??8000),b.firstAt+(this.options.maxWaitMs??30_000));
       this.flushTimer=setTimeout(()=>{
         // Freeze this batch when it joins the shared FIFO; subsequent events form the next batch.
         this.processing=b.id;

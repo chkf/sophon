@@ -180,8 +180,10 @@ export class TelegramAdapter implements ProactiveSender {
     return await this.config.sendVoice?.(this.api,this.config.ownerId,"你好，这是语音试听示例。","preview:"+Date.now(),undefined,undefined,undefined,true)??false;
   }
 
+  refreshInputTiming(): void { this.scheduleBufferedFlush(); }
+
   private debounceMs(): number {
-    return this.config.inputDebounceMs ?? 8_000;
+    return this.config.getInputDebounceMs?.() ?? this.config.inputDebounceMs ?? 8_000;
   }
 
   private typingRefreshMs(): number {

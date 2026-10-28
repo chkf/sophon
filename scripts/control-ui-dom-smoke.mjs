@@ -11,6 +11,7 @@ w.matchMedia=()=>({matches:false,addEventListener(){}});w.confirm=()=>true;
 w.ResizeObserver=class{observe(){}disconnect(){}};
 w.HTMLElement.prototype.scrollIntoView=function(){};
 w.addEventListener('error',event=>errors.push(event.message));
+let replySeconds=8;
 let reminderStatus='pending';
 let prompt='输出带引用的 JSON。',revision=0,topicName='文档',nodeGist='你计划整理目录。',saves=0;
 const at='2026-01-01T10:00:00Z';
@@ -20,7 +21,8 @@ const run={id:'fixture-call',kind:'chat',status:'completed',channel:'telegram',s
 w.fetch=async(url,init)=>{
  const action=url.split('/').at(-1),body=JSON.parse(init.body);let data;
  if(action==='session') data={authenticated:true,csrfToken:'fixture-csrf'};
- else if(action==='tasks') data={runs:[],nextBefore:null,heartbeat:{enabled:true,planningEnabled:true,activeChannel:'telegram',timezone:'UTC',plan:{date:today,channel:'telegram',wakes:[{time:'09:00',intent:'Review sample report'}]}},reminders:[{id:'rem_'+'a'.repeat(32),text:'检查合成文档 <script>literal</script>',dueAt:today+'T10:00:00Z',status:reminderStatus,channel:'telegram'}]};
+ else if(action==='tasks') data={runs:[],nextBefore:null,replyTiming:{seconds:replySeconds},heartbeat:{enabled:true,planningEnabled:true,activeChannel:'telegram',timezone:'UTC',plan:{date:today,channel:'telegram',wakes:[{time:'09:00',intent:'Review sample report'}]}},reminders:[{id:'rem_'+'a'.repeat(32),text:'检查合成文档 <script>literal</script>',dueAt:today+'T10:00:00Z',status:reminderStatus,channel:'telegram'}]};
+ else if(action==='reply-timing-save'){assert.equal(body.seconds,3);replySeconds=body.seconds;data={seconds:replySeconds};}
  else if(action==='reminder-cancel'){assert.equal(body.id,'rem_'+'a'.repeat(32));reminderStatus='cancelled';data={};}
  else if(action==='context') data={calls:[run],checkpoints:[],usage:{note:'合成用量'}};
  else if(action==='call') data=run;
@@ -39,8 +41,31 @@ const settle=async()=>{for(let i=0;i<12;i++)await new Promise(resolve=>setTimeou
 const click=async(selector)=>{assert.ok(doc.querySelector(selector),selector);doc.querySelector(selector).click();await settle();};
 const save=async(container)=>{const button=[...doc.querySelectorAll(container+' button')].find(b=>b.textContent==='保存修改');assert.ok(button);button.click();await settle();};
 try{
- w.eval(await readFile(new URL('../src/control/assets/app.js',import.meta.url),'utf8'));await settle();
+ w.eval((await readFile(new URL('../src/control/assets/app.js',import.meta.url),'utf8')).replace(/\}\)\(\);\s*$/, 'window.__traceTest={traceBody,traceText};})();'));await settle();
+ {
+ const {traceBody,traceText}=w.__traceTest;
+ const input={tools:[{type:'function',function:{name:'sample_read',description:'Read a synthetic document'}}],instructions:'Sample instruction',input:[{type:'message',role:'user',content:[{type:'input_text',text:'Document <script>literal</script>\nSecond line'}]}]};
+ const step={kind:'model',name:'sample',provider:'api',model:'sample-model',input};
+ const original=JSON.stringify(input);
+ const readable=traceBody(input,'fixture:input',step,{...step});doc.body.append(readable);
+ assert.match(readable.textContent,/与上一次模型调用相同/);
+ assert.match(readable.textContent,/Document <script>literal<\/script>/);assert.equal(readable.querySelector('script'),null);
+ assert.ok(readable.querySelector('.trace-text'));assert.equal(readable.querySelectorAll('details').length,2);
+ assert.equal(JSON.stringify(input),original);
+ const raw=readable.querySelectorAll('details')[1];raw.open=true;await settle();
+ assert.equal(traceBody(input,'fixture:input',step,{...step}).querySelectorAll('details')[1].open,true);
+ for(const change of [{model:'another-model'},{provider:'siwc'},{truncated:true}])
+  assert.doesNotMatch(traceBody(input,'different',step,{...step,...change}).textContent,/与上一次模型调用相同/);
+ const truncated={...input,tools:['[trace projection truncated]']};
+ assert.doesNotMatch(traceBody(truncated,'truncated',{...step,input:truncated},step).textContent,/可用工具：与上一次/);
+ assert.match(traceText({tools:[{type:'namespace',name:'gateway',tools:[{name:'sample_read'},{name:'sample_write'}]},null]}),/sample_read、sample_write、未命名/);
+ assert.equal(traceText({unknown_field:'Sample value'}),'unknown_field：Sample value');
+ assert.match(traceText({type:'function_call',name:'sample_read',arguments:'{"query":"document"}'}),/query：document/);
+ assert.match(traceText(input.input),/用户消息：Document/);
+ readable.remove();delete w.__traceTest;
+ }
  assert.deepEqual([...doc.querySelectorAll('[data-task-kind]')].map(node=>node.dataset.taskKind),['proactive','reminder']);
+ const delayInput=doc.querySelector('[aria-label="回复等待秒数"]');assert.equal(delayInput.value,'8');delayInput.value='3';delayInput.dispatchEvent(new w.Event('input'));await poll();await settle();assert.equal(delayInput.value,'3');await click('#reply-timing-panel button');assert.equal(replySeconds,3);
  assert.match(doc.querySelector('#reminder-panel').textContent,/检查合成文档/);assert.equal(doc.querySelector('#reminder-panel script'),null);
  await click('#reminder-panel button');assert.equal(reminderStatus,'cancelled');assert.match(doc.querySelector('#reminder-panel').textContent,/已取消/);
  await click('[data-page="context"]');assert.match(doc.querySelector('#page-content').textContent,/完整调用流程/);assert.match(doc.querySelector('#call-detail').textContent,/本次传入/);
@@ -54,5 +79,5 @@ try{
  await click('.graph-topic');const title=doc.querySelector('[aria-label="主题名称"]');assert.equal(title.tagName,'INPUT');title.value='资料';title.dispatchEvent(new w.Event('input'));await save('#graph-topics');assert.equal(topicName,'资料');
  await click('.graph-node');const gist=doc.querySelector('[aria-label="检索线索"]');gist.value='你计划整理资料。';gist.dispatchEvent(new w.Event('input'));await save('#graph-detail');assert.equal(nodeGist,'你计划整理资料。');
  assert.equal(saves,3);assert.deepEqual(errors,[]);assert.notEqual(doc.querySelector('#notice').className,'notice error');
- console.log(JSON.stringify({passed:true,checks:['unified task ordering and reminder cancellation','trace refresh scroll retention','graph editor sizing','call attribution rendering','graph prompt save','topic save','node save','revision payloads'],layoutVerified:false}));
+ console.log(JSON.stringify({passed:true,checks:['readable trace, literal HTML and raw data','identical settings fold only when complete and matching','trace disclosure refresh persistence','unified task ordering and reminder cancellation','trace refresh scroll retention','graph editor sizing','call attribution rendering','graph prompt save','topic save','node save','revision payloads'],layoutVerified:false}));
 }finally{w.close();}

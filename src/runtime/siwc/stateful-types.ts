@@ -131,7 +131,8 @@ export interface StatefulResponseOptions {
   tools?: RuntimeTool[];
   getTools?: () => RuntimeTool[];
   requiredTool?: () => string | undefined;
-  authorizeTool?: (name: string) => void;
+  requiredToolTiming?: "first" | "before_reply";
+  authorizeTool?: (name: string, args?: Record<string, unknown>) => void;
   executeTool?: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   recordReplyText?: (text: string, id: string) => void;
   getPreparedReplySegments?: () => ReplySegment[];
