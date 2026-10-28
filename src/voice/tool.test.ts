@@ -13,7 +13,7 @@ import { HeartbeatRunner } from "../heartbeat/runner.js";
 
 test("voice turn queues multiple distinct utterances and deduplicates repeated selections",()=>{
   const turn=new VoiceTurn();
-  for(const text of ["", "x".repeat(501),"```code```","https://example.com","（动作说明）语音测试"])
+  for(const text of ["", "x".repeat(501),"```code```","https://example.com"])
     assert.equal((turn.select({text}) as any).success,false);
   turn.select({text:"语音测试"});turn.select({text:"语音测试"});turn.select({text:"再发一条"});
   assert.equal(turn.combine("文字补充"),"语音测试\n\n再发一条\n\n文字补充");

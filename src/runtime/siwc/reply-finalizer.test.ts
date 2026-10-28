@@ -284,10 +284,11 @@ test("SIWC captures text between multiple function calls and empty live context 
   const {VoiceTurn,voiceTool}=await import("../../voice/tool.js");
   const {replyText}=await import("../reply-segments.js");
   const root=await mkdtemp(join(tmpdir(),"siwc-ordered-")),turn=new VoiceTurn(true);
+  turn.recordStageDirection("动作说明");
   const message=(text:string)=>({type:"message",role:"assistant",content:[{type:"output_text",text}]});
   const voice=(id:string,text:string)=>({type:"function_call",call_id:id,namespace:"gateway",name:"send_voice",arguments:JSON.stringify({text,instruction:"清晰自然"})});
   const socket=new FixtureSocket([
-    completed("ordered-one",[message("（动作说明）\n先说一句"),voice("v1","第一段"),message("中间文字"),voice("v2","第二段")]),
+    completed("ordered-one",[message("先说一句"),voice("v1","第一段"),message("中间文字"),voice("v2","第二段")]),
     completed("ordered-two",[message("最后文字")]),
   ]);
   const runtime=await runtimeFixture(root,new StatefulResponsesBridge(root,()=>socket));

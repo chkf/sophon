@@ -967,9 +967,9 @@ test("OpenRouter preserves ordered multi-voice fragments through its paid journa
   const {VoiceTurn,voiceTool}=await import("../voice/tool.js");
   const turn=new VoiceTurn(false);
   const first=fixture(root,[
-    stream({content:"（隐藏动作）\n前文",tool_calls:[call("send_voice",{text:"第一段",instruction:"平稳表达"},"v1")]}),
+    stream({content:"前文（含附录）",tool_calls:[call("send_voice",{text:"第一段",instruction:"平稳表达"},"v1")]}),
     stream({content:"中间文字",tool_calls:[call("send_voice",{text:"第二段",instruction:"轻快表达"},"v2")]}),
-    stream({content:"（隐藏独白）\n结束"}),
+    stream({content:"结束"}),
   ]);
   const req:ChatRequest={...request("ordered-voices"),tools:[voiceTool],recordReplyText:(text,id)=>turn.recordText(text,id),
     finalizeReplyText:text=>turn.finalize(text),getPreparedVoice:()=>turn.text,getPreparedReplySegments:()=>turn.segments,

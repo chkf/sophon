@@ -81,5 +81,5 @@ test("Old marker is stripped only from newly completed text; incoming/history re
     assert.equal(result.kind,"model_reply");
     if(result.kind==="model_reply")assert.equal(result.text,"正文");
     assert.match((await store.get("telegram","123"))!.messages[0]!.content,/gateway_quote/);
-  },{reply:async(req)=>({text:req.finalizeReplyText?.("正文[[gateway_quote:0123456789abcdef0123456789abcdef]]")??""})}
+  },{reply:async(req)=>{await selectTestTurn(req);return {text:req.finalizeReplyText?.("正文[[gateway_quote:0123456789abcdef0123456789abcdef]]")??""};}}
 ));

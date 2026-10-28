@@ -533,3 +533,22 @@ test("Heartbeat Decision exposes paid image tool only with authorized route and 
     }finally{await rm(root,{recursive:true,force:true});}
   }
 });
+
+for (const silent of [false,true]) test('proactive typed directions stay separate from literal text and respect silence: '+silent,async()=>{
+ const root=await mkdtemp(join(tmpdir(),'sophon-proactive-expression-'));
+ const context=localContext();context.data!.expression={showStageDirections:true};
+ const sent:string[]=[];
+ const runner=new HeartbeatRunner(root,{enabled:true,timezone:'UTC',quietStart:'23:00',quietEnd:'08:00',cooldownMinutes:0,dailyCap:4,minIntervalMinutes:1,maxIntervalMinutes:2},
+  {reply:async request=>{
+   assert.ok(request.tools?.some(tool=>tool.name==='gateway_stage_direction'));
+   await request.executeTool!('gateway_stage_direction',{text:'查看文档'});
+   const text=request.finalizeReplyText!(silent?'SILENT':'文档（含附录）已准备');
+   return {text,replySegments:request.getPreparedReplySegments!()};
+  }},{latestActivityAt:async()=>undefined,latestConversation:async()=>undefined} as any,{load:async()=>context} as any,
+  {resolve:async()=>({channel:'telegram',target:'70001'}),isActive:async()=>true,sendIfActive:async(_channel:string,_target:string,text:string)=>{sent.push(text);return true;}} as any);
+ try{
+  await runner.tick(new Date('2030-01-02T10:00:00Z'));
+  if(silent)assert.deepEqual(sent,[]);
+  else {assert.equal(sent.length,1);assert.match(sent[0]!,/（查看文档）/);assert.match(sent[0]!,/文档（含附录）已准备/);}
+ }finally{await rm(root,{recursive:true,force:true});}
+});

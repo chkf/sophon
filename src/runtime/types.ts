@@ -125,7 +125,8 @@ export type ChatRequest = ChatInput & {
   tools?: RuntimeTool[];
   getTools?: () => RuntimeTool[];
   requiredTool?: () => string | undefined;
-  authorizeTool?: (name: string) => void;
+  requiredToolTiming?: "first" | "before_reply";
+  authorizeTool?: (name: string, args?: Record<string, unknown>) => void;
   executeTool?: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   /** Local per-turn getter; only validated, actually selected speech counts as output. */
   recordReplyText?: (text: string, id: string) => void;

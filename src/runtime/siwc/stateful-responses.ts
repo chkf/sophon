@@ -525,10 +525,10 @@ export class StatefulResponsesBridge {
       for (;;) {
         stepIndex += 1;
         const requiredTool = options.requiredTool?.();
-        const offered = (options.getTools?.() ?? options.tools ?? []).filter(tool => !requiredTool || tool.name === requiredTool);
+        const offered = (options.getTools?.() ?? options.tools ?? []).filter(tool => !requiredTool || options.requiredToolTiming === "before_reply" || tool.name === requiredTool);
         const offeredNames = new Set(offered.map(tool => tool.name));
         const replayableTools = new Set(offered.filter(tool => tool.readOnly === true || tool.replaySafe === true).map(tool => tool.name));
-        const webSearch = !requiredTool && options.webSearchAllowed !== false && !this.unsupportedWebSearchModels.has(options.model);
+        const webSearch = (!requiredTool || options.requiredToolTiming === "before_reply") && options.webSearchAllowed !== false && !this.unsupportedWebSearchModels.has(options.model);
         const tools = responseTools(offered, webSearch);
         const usedPreviousResponseId = Boolean(previousResponseId);
         const stepInputItems = nextInput.length;
@@ -733,7 +733,7 @@ export class StatefulResponsesBridge {
           for (; outputCursor < end; outputCursor++) {
             const item = output[outputCursor]!;
             const value = textFrom([item]);
-            if (value) options.recordReplyText?.(blockTextualToolCall(value,[...offeredNames],"siwc"), response.id + ":" + outputCursor);
+            if (value && !requiredTool) options.recordReplyText?.(blockTextualToolCall(value,[...offeredNames],"siwc"), response.id + ":" + outputCursor);
           }
         };
         for (const [index, call] of calls.entries()) {
@@ -759,7 +759,7 @@ export class StatefulResponsesBridge {
           const toolTrace = safeTraceStart(options.trace, { kind: "tool", name: call.name, provider: "siwc", parentId: traceStepId, input: captureTraceContent ? args : undefined });
           try {
             if (!offeredNames.has(call.name)) throw Error("本次请求未提供该工具，请先加载对应工具组。");
-            options.authorizeTool?.(call.name);
+            options.authorizeTool?.(call.name, args);
             if (!replayableTools.has(call.name)) unsafeToolInvocationStarted = true;
             const outputValue = await options.executeTool(call.name, args);
             outputs[index] = {

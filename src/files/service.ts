@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, mkdtemp, open, readdir, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, open, readdir, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { InboundMessage } from "../channels/types.js";
 import { getState, mainPath, openDatabase, putState } from "../state/database.js";
@@ -193,6 +193,7 @@ export class FileService {
       const temporary = join(dirname(proposal.path), ".file-update-" + randomUUID());
       try {
         await writeFile(temporary, proposal.content!, { flag: "wx", mode: proposal.mode });
+        await chmod(temporary, proposal.mode);
         await rename(temporary, proposal.path);
       } finally { await unlink(temporary).catch(() => undefined); }
     }

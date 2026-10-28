@@ -6,6 +6,7 @@ import { displayText } from "./reply-segments.js";
  */
 export function textualToolCall(text:string,offered:readonly string[]):boolean {
   let value=displayText(text,false).trim();
+  value=value.replace(/^(?:（[^）]*）\s*)+(?=\{|<|to=)/, "");
   if(!value)return false;
   const fence=value.match(/^\x60\x60\x60(?:json|javascript|text)?\s*\n([\s\S]*?)\n\x60\x60\x60$/i);
   if(fence)value=fence[1]!.trim();

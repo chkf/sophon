@@ -112,7 +112,7 @@ test('recall instructions retain original-history access with and without graph 
  const request=captured[0];assert.match(request.instructions,/先判断当前上下文是否足够/);assert.doesNotMatch(request.turnInstructions,/相关记忆线索/);
  assert.match(request.instructions,/不主动播报检索过程/);assert.match(request.instructions,/询问出处.*如实说明/);
  assert.match(request.instructions,/不把已知内容说成忘了/);assert.match(request.instructions,/讨论日程/);
- await request.executeTool('gateway_turn_decision',{stage_direction:'查看文档',reply_mode:'text',memory:{need_score:.8,query:'文档整理',ids:null},sticker:'skip',quote:'skip',image:'skip'});
+ await request.executeTool('gateway_turn_decision',{stage_direction:'查看文档',reply_mode:'text',sticker:'skip',quote:'skip',image:'skip'});
  const hits=await request.executeTool('gateway_memory_search',{query:'文档整理'});assert.equal(hits.length,1);
  assert.match(JSON.stringify(await request.executeTool('gateway_memory_read',{ids:[hits[0].id],detail_level:'detail'})),/下周整理文档索引/);
  const original=await request.executeTool('gateway_read_history',{query:'下周整理文档索引'});

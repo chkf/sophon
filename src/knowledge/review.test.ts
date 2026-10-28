@@ -124,9 +124,9 @@ test("bounded batches advance only over complete message content", async t => {
   assert.equal(f.knowledge.getReviewCursor(scope), 40);
   assert.equal(JSON.parse(f.calls[1]!.text!).messages[0].seq, 40);
   await f.append(["x".repeat(24_001)]);
-  assert.equal(await f.review.tick(time(10)), "failed");
-  assert.equal(f.knowledge.getReviewCursor(scope), 40);
-  assert.equal(f.calls.length, 2);
+  assert.equal(await f.review.tick(time(10)), "committed");
+  assert.equal(f.knowledge.getReviewCursor(scope), 41);
+  assert.equal(f.calls.length, 3);
 });
 
 test("provider background opt-out and empty transcripts never advance review", async t => {
@@ -180,4 +180,36 @@ test('Recent review continues after graph integration and keeps linked ongoing t
  const entries=f.knowledge.listRecent();assert.equal(entries.length,1);assert.deepEqual(linked.remainingDirectory(entries),entries);
  assert.equal(await review.tick(time(2)),'idle');assert.equal(f.calls.length,1);
  assert.match(f.calls[0]!.instructions!,/事实、偏好和已结束经历交给记忆图/);
+});
+
+for (const outcome of ['success','failure','skipped'] as const) test('long review preserves all source text and commits only after the final part: '+outcome,async t=>{
+ const f=await fixture(t);
+ const source='合成文档📄\n"table"\t'.repeat(9000)+'END_OF_DOCUMENT';
+ await f.append([source]);
+ const original=f.knowledge.createRecent({body:'Original sample note'});
+ const seen:string[]=[];
+ f.respond(async request=>{
+  const input=JSON.parse(request.text!);seen.push(input.messages[0].content);
+  assert.ok(Buffer.byteLength(request.text!)+Buffer.byteLength(request.instructions!)<=64000);
+  assert.equal(f.knowledge.getReviewCursor(scope),-1);
+  assert.equal(f.knowledge.getRecent(original.id)?.body,'Original sample note');
+  if(seen.length===2 && outcome==='failure')throw Error('Synthetic interruption');
+  if(seen.length===2 && outcome==='skipped')return {text:'',skipped:'background_disabled'};
+  if(seen.length>1)assert.equal(input.continuation.previousProposal.changes[0].body,'Reviewed sample part');
+  return {text:JSON.stringify({...empty,changes:[{id:original.id,expectedRevision:1,body:input.continuation.final?'Complete sample review':'Reviewed sample part'}]})};
+ });
+ assert.equal(await f.review.tick(time()),outcome==='success'?'committed':outcome==='skipped'?'background_disabled':'failed');
+ assert.ok(seen.length>1);
+ if(outcome==='success'){
+  assert.equal(seen.join(''),source);assert.equal(f.knowledge.getReviewCursor(scope),0);
+  assert.equal(f.knowledge.getRecent(original.id)?.body,'Complete sample review');
+ }else{
+  assert.equal(f.knowledge.getReviewCursor(scope),-1);assert.equal(f.knowledge.getRecent(original.id)?.body,'Original sample note');
+ }
+ assert.ok(seen.every(text=>!/[\uD800-\uDBFF]$/.test(text)));
+ if(outcome==='failure'){
+  const firstIds=f.calls.map(call=>call.operationId);seen.length=0;
+  assert.equal(await f.create().tick(time(15)),'failed');
+  assert.deepEqual(f.calls.slice(2).map(call=>call.operationId),firstIds,'uncertain parts reuse their operation IDs');
+ }
 });

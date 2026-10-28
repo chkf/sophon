@@ -310,10 +310,10 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
       const maxRounds=request.maxToolRounds && request.maxToolRounds>0 ? Math.min(request.maxToolRounds,TOOL_LIMITS.rounds):TOOL_LIMITS.rounds;
       for(let round=0;round<=maxRounds;round++) {
         const requiredTool = request.requiredTool?.();
-        const offered = [...exposed(), ...(imageTool ? [imageTool.definition] : [])].filter(tool => !requiredTool || tool.name === requiredTool);
+        const offered = [...exposed(), ...(imageTool ? [imageTool.definition] : [])].filter(tool => !requiredTool || request.requiredToolTiming === "before_reply" || tool.name === requiredTool);
         const offeredNames = new Set(offered.map(tool => tool.name));
         const tools: any[] = offered.map(tool => ({type:"function",function:{name:tool.name,description:tool.description,parameters:tool.parameters}}));
-        if (!requiredTool && this.provider === "openrouter" && this.config.webSearch && !sandbox && request.purpose !== "recent_review")
+        if ((!requiredTool || request.requiredToolTiming === "before_reply") && this.provider === "openrouter" && this.config.webSearch && !sandbox && request.purpose !== "recent_review")
           tools.push({type:"openrouter:web_search",parameters:{engine:"exa",max_results:3,max_uses:1,max_total_results:3}});
         if (request.ephemeral && request.testAuthorized?.() === false) throw this.failure("测试模式已经切换或关闭，未发送付费请求。");
         const stream = this.provider === "openrouter" || this.config.stream !== false;
@@ -364,7 +364,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
           await persist(request.ephemeral ? { status:"completed", usage } : {status:"completed",response:result}); return result;
         }
         if(round===maxRounds || toolCount+calls.length>TOOL_LIMITS.calls) throw this.failure("OpenRouter 工具调用达到本轮上限。");
-        if (typeof reply.content === "string") request.recordReplyText?.(blockTextualToolCall(reply.content,tools.map(t=>String(t.function?.name??"")),this.provider), this.provider + ":" + round);
+        if (!requiredTool && typeof reply.content === "string") request.recordReplyText?.(blockTextualToolCall(reply.content,tools.map(t=>String(t.function?.name??"")),this.provider), this.provider + ":" + round);
         messages.push(this.provider === "api" ? {role:"assistant",content:reply.content ?? null,tool_calls:calls} : reply);
         for(const call of calls) {
           toolCount++;
@@ -377,7 +377,7 @@ export class ChatCompletionsRuntime implements ManagedChatRuntime {
             if(!args || typeof args!=="object" || Array.isArray(args)) throw new Error("Invalid arguments.");
             const name=call.function?.name;
             if (!offeredNames.has(name)) throw Error("本次请求未提供该工具。");
-            request.authorizeTool?.(name);
+            request.authorizeTool?.(name, args);
             if(name===IMAGE_TOOL && imageAllowed) {
               toolTrace = safeTraceStart(request.trace, { kind: "tool", name, provider: this.provider, parentId: traceStep, input: captureTraceContent ? args : undefined });
               const result = await imageTool!.execute(args);
