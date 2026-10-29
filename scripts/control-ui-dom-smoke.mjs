@@ -62,13 +62,21 @@ try{
  assert.equal(traceText({unknown_field:'Sample value'}),'unknown_field：Sample value');
  assert.match(traceText({type:'function_call',name:'sample_read',arguments:'{"query":"document"}'}),/query：document/);
  assert.match(traceText(input.input),/用户消息：Document/);
+ const placeholder={role:'user',content:'〔聊天正文已省略；仅影响展示〕'};
+ const grouped=traceText([placeholder,{...placeholder,role:'assistant'},{type:'function_call_output',output:'sample result'},placeholder]);
+ assert.match(grouped,/聊天消息 × 2 条/);assert.match(grouped,/聊天消息 × 1 条/);assert.ok(grouped.indexOf('sample result')>grouped.indexOf('× 2'));
+ const metadata={input:[placeholder],attempt:2,continuation:'sample cursor',context:'sample attribution'};
+ const filtered=traceBody(metadata,'filtered',null,{kind:'model'});
+ assert.doesNotMatch(filtered.querySelector('.trace-text').textContent,/attempt|sample cursor|sample attribution/);
+ assert.match(filtered.querySelector('pre').textContent,/sample cursor/);
+ assert.equal(metadata.attempt,2);
  readable.remove();delete w.__traceTest;
  }
  assert.deepEqual([...doc.querySelectorAll('[data-task-kind]')].map(node=>node.dataset.taskKind),['proactive','reminder']);
  const delayInput=doc.querySelector('[aria-label="回复等待秒数"]');assert.equal(delayInput.value,'8');delayInput.value='3';delayInput.dispatchEvent(new w.Event('input'));await poll();await settle();assert.equal(delayInput.value,'3');await click('#reply-timing-panel button');assert.equal(replySeconds,3);
  assert.match(doc.querySelector('#reminder-panel').textContent,/检查合成文档/);assert.equal(doc.querySelector('#reminder-panel script'),null);
  await click('#reminder-panel button');assert.equal(reminderStatus,'cancelled');assert.match(doc.querySelector('#reminder-panel').textContent,/已取消/);
- await click('[data-page="context"]');assert.match(doc.querySelector('#page-content').textContent,/完整调用流程/);assert.match(doc.querySelector('#call-detail').textContent,/本次传入/);
+ await click('[data-page="context"]');assert.match(doc.querySelector('#page-content').textContent,/完整调用流程/);assert.doesNotMatch(doc.querySelector('#call-detail').textContent,/本次传入|本轮上下文来源/);
  const detail=doc.querySelector('#call-detail'),step=detail.querySelector('[data-step-id="model"]');step.open=true;await settle();
  const pre=step.querySelector('pre');pre.scrollTop=73;pre.scrollLeft=19;await poll();await settle();assert.equal(detail.querySelector('[data-step-id="model"] pre'),pre,'unchanged trace retains DOM');
  run.steps[1].output={message:'Revised sample response'};await poll();await settle();
@@ -79,5 +87,5 @@ try{
  await click('.graph-topic');const title=doc.querySelector('[aria-label="主题名称"]');assert.equal(title.tagName,'INPUT');title.value='资料';title.dispatchEvent(new w.Event('input'));await save('#graph-topics');assert.equal(topicName,'资料');
  await click('.graph-node');const gist=doc.querySelector('[aria-label="检索线索"]');gist.value='你计划整理资料。';gist.dispatchEvent(new w.Event('input'));await save('#graph-detail');assert.equal(nodeGist,'你计划整理资料。');
  assert.equal(saves,3);assert.deepEqual(errors,[]);assert.notEqual(doc.querySelector('#notice').className,'notice error');
- console.log(JSON.stringify({passed:true,checks:['readable trace, literal HTML and raw data','identical settings fold only when complete and matching','trace disclosure refresh persistence','unified task ordering and reminder cancellation','trace refresh scroll retention','graph editor sizing','call attribution rendering','graph prompt save','topic save','node save','revision payloads'],layoutVerified:false}));
+ console.log(JSON.stringify({passed:true,checks:['readable trace, literal HTML and raw data','identical settings fold only when complete and matching','trace disclosure refresh persistence','unified task ordering and reminder cancellation','trace refresh scroll retention','graph editor sizing','request-only presentation and grouped placeholders','graph prompt save','topic save','node save','revision payloads'],layoutVerified:false}));
 }finally{w.close();}
