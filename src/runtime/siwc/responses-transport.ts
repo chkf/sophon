@@ -1,3 +1,4 @@
+import { normalizeImageFileInput } from "../responses/attachments.js";
 import OpenAI from "openai";
 import { ResponsesWS } from "openai/resources/responses/ws";
 import { isMissingPreviousResponseError, isRetryableTransportError } from "../retry-policy.js";
@@ -183,6 +184,7 @@ export class ResponsesTransport {
     trace?: RuntimeTraceObserver,
     context?: import("../../observability/types.js").ContextInjection[],
   ): Promise<{ response: ResponseSnapshot; retries: number; traceStepId?: string }> {
+    event = {...event, input:normalizeImageFileInput(event.input)};
     const captureTraceContent = Boolean(trace && trace.captureContent !== false);
     for (let attempt = 0; ; attempt += 1) {
       const traceStepId = safeTraceStart(trace, { kind: "model", name: "responses.create", provider: "siwc",

@@ -87,7 +87,15 @@
     }
     if (value === null || value === undefined) return '无';
     if (typeof value !== 'object') return typeof value === 'boolean' ? (value ? '是' : '否') : String(value);
-    if (Array.isArray(value)) return value.map(item => traceText(item, depth + 1)).join('\n\n') || '无';
+    if (Array.isArray(value)) {
+      const lines = []; let chats = 0;
+      const flush = () => { if (chats) { lines.push(`聊天消息 × ${chats} 条（正文已省略）`); chats = 0; } };
+      for (const item of value) {
+        if (item && ['user','assistant'].includes(item.role) && item.content === '〔聊天正文已省略；仅影响展示〕') { chats++; continue; }
+        flush(); lines.push(traceText(item, depth + 1));
+      }
+      flush(); return lines.join('\n\n') || '无';
+    }
     // Remove only well-known wrappers; unknown fields stay visible below.
     const keys = Object.keys(value);
     if (['text','input_text','output_text'].includes(value.type) && typeof value.text === 'string' && keys.every(k => ['type','text','annotations','logprobs'].includes(k))) return value.text;
@@ -120,6 +128,10 @@
           display[field] = '与上一次模型调用相同（本次仍发送）';
         }
       }
+    }
+    if (step?.kind === 'model' && display && typeof display === 'object' && !Array.isArray(display)) {
+      display = {...display};
+      for (const field of ['context','continuation','attempt']) delete display[field];
     }
     return el('div',{class:'trace-readable'},el('div',{class:'trace-text'},traceText(display)),
       Object.keys(repeated).length ? traceDisclosure(key+':same','查看相同的工具定义与指令',el('div',{class:'trace-text'},traceText(repeated))) : null,
@@ -288,7 +300,6 @@
     })) : [];
 
     const allSteps = Array.isArray(run.steps) ? run.steps : [];
-    const sources = allSteps.filter(step => step.kind === 'context');
     const steps = allSteps.filter(step => step.kind !== 'context');
     const models = run.modelStepCount ?? steps.filter(step => step.kind === 'model').length, tools = steps.filter(step => step.kind === 'tool').length;
     const usage = run.usage;
@@ -305,7 +316,6 @@
       const bar = el('span', { class: 'waterfall-bar' }); bar.style.left = `${Number.isFinite(spanStart) ? spanStart : 0}%`; bar.style.width = `${Number.isFinite(spanWidth) ? spanWidth : .3}%`;
       const metadata = [step.provider, step.model].filter(Boolean).join(' · ');
       const stepContent = el('div', { class: 'step-content' });
-      if (Array.isArray(step.context)) stepContent.append(injectionTable(step.context, sources));
       if (step.input !== undefined) stepContent.append(el('div', { class: 'detail-section' }, el('div', { class: 'detail-label' }, step.kind === 'tool' ? '输入 / 参数' : '输入'), traceBody(step.input,run.id+':'+step.id+':input',previousModel,step)));
       if (step.output !== undefined) stepContent.append(el('div', { class: 'detail-section' }, el('div', { class: 'detail-label' }, '输出 / 结果'), traceBody(step.output,run.id+':'+step.id+':output')));
       if (step.error !== undefined) stepContent.append(el('div', { class: 'detail-section error' }, el('div', { class: 'detail-label' }, '错误'), traceBody(step.error,run.id+':'+step.id+':error')));
@@ -322,7 +332,6 @@
     const descriptions = { delivered: '交付已收到明确确认。', silent: '本次模型选择保持静默，未创建发送任务。', skipped: '本次在条件检查或策略判断后结束。', failed: '本次执行失败，可展开步骤查看已记录的错误。', delivery_unknown: '发送已尝试，但没有可靠的送达确认。', interrupted: '执行未正常结束，保留已记录的步骤。', running: '任务尚在执行，后续步骤会随记录刷新。', completed: '本次任务已完成。' };
     replace(target, el('div', { class: 'run-heading' }, el('h2', {}, taskNames[run.kind] || run.kind), status(run.status)), el('p', { class: 'record-id' }, run.id), el('p', { class: 'run-trigger' }, `触发：${triggerNames[run.trigger] || run.trigger || '未记录'}${run.channel ? ` · ${run.channel === 'wechat' ? '微信' : run.channel === 'telegram' ? 'Telegram' : run.channel}` : ''}`),
       el('div', { class: 'facts' }, fact('开始时间', time(run.startedAt)), fact('总耗时', duration(run.durationMs)), fact('调用次数', `${models} / ${tools}`, '模型 / 工具'), fact('输入 token', number(usage?.inputTokens), partialInput ? '部分回报' : undefined)),
-      sources.length ? sourceSnapshots(sources, openedSteps) : null,
       run.kind === 'chat' && !models && run.status !== 'running' ? el('p', { class: 'trace-note' }, '本轮没有记录到新的模型请求；可能复用了已有结果，或在请求前结束。') : null,
       el('div', { class: 'trace-head' }, el('h3', {}, '调用轨迹'), el('div', { class: 'trace-legend' }, ...[['model', '模型'], ['tool', '工具'], ['system', '系统']].map(([kind, label]) => el('span', {}, el('i', { class: kind, 'aria-hidden': 'true' }), label)))),
       steps.length ? el('div', { class: 'trace-scale' }, el('span', {}, '0'), el('span', {}, duration(total))) : null,
@@ -337,27 +346,6 @@
       });
     }
     if(position)window.scrollTo({left:position.x,top:position.y,behavior:'instant'});
-  }
-  const sourceNames = { core: 'Core', local_guidance: '本地指导 / 表达规则', memory_hints: '记忆图线索', recent: 'Recent 活跃目录', time: '时间与消息间隔', history: '聊天历史 / 恢复条目', history_index: '较早历史摘录', memory_seed: '记忆图重建摘要', checkpoint: '已有会话 / 检查点', current_user: '本轮消息与引用', tool_results: '工具返回', tools: '工具定义', live_context: '额外实时数据', runtime_guidance: 'Provider 运行指导' };
-  const injectionNames = { sent: '本次传入', inherited: '沿用会话', replayed: '恢复重放', omitted: '本次未传入' };
-  function injectionTable(items, sources) {
-    const labels = new Map(sources.map(step => [step.input?.source, step.name]));
-    return el('div', { class: 'detail-section' }, el('div', { class: 'detail-label' }, '上下文注入来源'),
-      el('div', { class: 'injection-table' }, el('table', {}, el('thead', {}, el('tr', {}, ...['来源', '本次处理', '说明'].map(label => el('th', {}, label)))),
-        el('tbody', {}, ...items.map(item => el('tr', {}, el('td', {}, labels.get(item.source) || sourceNames[item.source] || item.source), el('td', {}, injectionNames[item.delivery] || '未记录'), el('td', {}, item.detail || '—')))))));
-  }
-  function sourceSnapshots(sources, opened) {
-    sources=[...sources].sort((a,b)=>{const order={policy:0,recovery:1,turn:2};return (order[a.input?.placement]??3)-(order[b.input?.placement]??3);});
-    return el('section', { class: 'source-snapshots' }, el('h3', {}, '本轮上下文来源'),
-      el('p', { class: 'trace-note' }, '下方是本轮准备的内容快照。每次模型调用内会分别标出实际传入、沿用或恢复重放；准备完成不等于已发给模型。'),
-      ...sources.map(step => {
-        const detail = el('details', { open: opened.has(step.id), 'data-step-id': step.id }, el('summary', {}, step.name),
-          el('p', { class: 'trace-note' }, step.input?.placement === 'policy' ? '基础指令：可能沿用已有会话。' : step.input?.placement === 'recovery' ? '会话建立或重建时提供的快照；传入状态见下方模型调用。' : '本轮指导：随请求传入。'),
-          el('pre', {}, step.input?.content ?? '快照未保留或已达到记录上限。'),
-          step.truncated || step.input?.contentTruncated ? el('p', { class: 'trace-note' }, '内容已截断，仅显示预览。') : null);
-        detail.addEventListener('toggle', () => { if (detail.open) opened.add(step.id); else opened.delete(step.id); });
-        return detail;
-      }));
   }
   async function loadCallDetail(id, epoch = state.epoch) {
     const run = await api('call', { id });

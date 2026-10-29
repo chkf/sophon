@@ -803,7 +803,11 @@ export class TelegramAdapter implements ProactiveSender {
           mimeType: typed.mime_type,
           remoteId: candidate.file.file_id,
         }), ...(["voice","audio"].includes(candidate.kind) ? { sourceMessageId: String(message.message_id) } : {}),
-          ...(typed.duration !== undefined ? { durationSeconds: typed.duration } : {}) });
+          ...(typed.duration !== undefined ? { durationSeconds: typed.duration } : {}),
+          ...((String(message.from?.id) === this.config.ownerId && telegramAccountId(this.config.token) && (candidate.kind === "image" || (candidate.kind === "document" &&
+            (/^image\/(jpeg|png|webp)$/i.test(typed.mime_type ?? "") || /\.(jpe?g|png|webp)$/i.test(typed.file_name ?? ""))))) ? {
+            sticker: {fileId:candidate.file.file_id,accountId:telegramAccountId(this.config.token) ?? "",chatId:String(message.chat.id),format:"image" as const}
+          } : {}) });
       } catch (error) {
         attachments.push({ kind: candidate.kind, error: "附件下载失败、格式不支持或超过 20MB 限制，请缩小文件后重发。" });
       }
