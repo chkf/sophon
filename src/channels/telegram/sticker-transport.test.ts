@@ -9,7 +9,7 @@ import type { TelegramApiClient, TelegramMessage, TelegramAdapterConfig, Telegra
 import type { Attachment, TelegramSticker } from "../types.js";
 import { MediaStore } from "../../media/store.js";
 
-const sticker: TelegramSticker = { fileId: "fixture_document_icon", accountId: "telegram-bot:70002", chatId: "70001", format: "static" };
+const sticker: TelegramSticker = { fileId: "fixture_document_icon", accountId: "telegram-bot:70002", chatId: "70001", format: "animated" };
 const pending: TelegramPendingReply = { kind: "model_reply", chatId: "70001", senderId: "70001", text: "", deliveryId: "fixture-delivery", sticker };
 async function preview(format: "static" | "animated" | "video", failure?: "missing" | "download" | "size") {
   const root = await mkdtemp(join(tmpdir(), "sticker-preview-"));

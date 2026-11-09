@@ -126,7 +126,7 @@ export class SessionStore {
           if (!sticker || !/^telegram-bot:[1-9][0-9]*$/.test(sticker.accountId) ||
             sticker.accountId!==fragment.accountId || sticker.chatId!==fragment.conversationId ||
             !/^[A-Za-z0-9_-]{1,512}$/.test(sticker.fileId) ||
-            !['static','animated','video','gif','gif_document','mp4_document'].includes(sticker.format)) continue;
+            !['static','animated','video','gif','gif_document','mp4_document','image'].includes(sticker.format)) continue;
           const key=sticker.accountId+'\0'+sticker.chatId+'\0'+sticker.fileId;
           const existing=known.get(key);
           if (existing) { if (row.at>existing.seenAt) existing.seenAt=row.at; }

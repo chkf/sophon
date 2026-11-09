@@ -8,7 +8,7 @@ export function validSticker(value: TelegramSticker | undefined, chatId: string,
   return Boolean(value && accountId && /^telegram-bot:[1-9][0-9]*$/.test(accountId) &&
     value.accountId === accountId && value.chatId === chatId &&
     typeof value.fileId === "string" && /^[A-Za-z0-9_-]{1,512}$/.test(value.fileId) &&
-    ["static", "animated", "video", "gif", "gif_document", "mp4_document"].includes(value.format));
+    ["static", "animated", "video", "gif", "gif_document", "mp4_document", "image"].includes(value.format));
 }
 export const STICKER_TOOL: RuntimeTool = {
   name: "gateway_sticker", readOnly: true, replaySafe: true,
@@ -62,7 +62,7 @@ export class StickerTurn {
       if (!validSticker(chosen, this.inbound.conversationId, account)) throw new Error("请先 list，再选择真实表情包。");
       if (this.selection && this.selection.fileId !== chosen.fileId) throw new Error("每轮只能选择一个表情包。");
       this.selection = chosen;
-      return { status: "selected", note: "已登记表情包；实际送达由 Gateway 确认。" };
+      return { status: "selected", source_format: chosen.format, note: "已登记表情包；实际送达由 Gateway 确认。" };
     }
     if (args.action !== "list" || args.key !== undefined || (args.query !== undefined && (typeof args.query !== "string" || args.query.length > 100)))
       throw new Error("请选择 list 或 select。");

@@ -1,3 +1,4 @@
+import { prepareReactionMedia } from "./reaction-media.js";
 import { displayText, spokenText, replyText, visibleSegments, type ReplySegment } from "../../runtime/reply-segments.js";
 import { readFile } from "node:fs/promises";
 import { voiceSupplement } from "../../voice/tool.js";
@@ -104,6 +105,7 @@ export async function deliverPreparedReply(api: TelegramApiClient, pending: Tele
     ? nativeReplyParameters(pending.nativeReply, pending.chatId, accountId) : undefined;
   const native = verified && pending.kind === "model_reply" ? pending.nativeReply : undefined;
   let attached = false;
+  let reactionLabel = "";
   const record = (messageId: number, text: string) => {
     if (accountId && Number.isSafeInteger(messageId) && messageId > 0) {
       platformMessages.push({ accountId, conversationId: pending.chatId,
@@ -124,16 +126,14 @@ export async function deliverPreparedReply(api: TelegramApiClient, pending: Tele
       if (pending.senderId !== pending.chatId || !validSticker(pending.sticker, pending.chatId, accountId))
         throw new Error("Prepared sticker is not authorized for this bot and chat.");
       const reply = attached ? undefined : verified;
-      const gif = pending.sticker.format === "gif";
-      const gifDocument = pending.sticker.format === "gif_document" || pending.sticker.format === "mp4_document";
-      const sent = await api.call<{ message_id?: number }>(gif ? "sendAnimation" : gifDocument ? "sendDocument" : "sendSticker", {
-        chat_id: pending.chatId,
-        [gif ? "animation" : gifDocument ? "document" : "sticker"]: pending.sticker.fileId,
+      const media = await prepareReactionMedia(api, pending.sticker);
+      const sent = await api.call<{ message_id?: number }>(media.method, {
+        chat_id: pending.chatId, [media.field]: media.media,
         ...(reply ? { reply_parameters: reply } : {}) });
       const id = sent?.message_id;
       if (id === undefined || !Number.isSafeInteger(id) || id <= 0) throw new Error("Reaction delivery is uncertain: missing message_id.");
       if (reply) attached = true;
-      const label = pending.sticker.format === "mp4_document" ? "[已发送 MP4 动图]" : gif || gifDocument ? "[已发送 GIF]" : "[已发送贴纸]";
+      const label = reactionLabel = media.label;
       deliveredText.push(label);
       record(id, label);
       if (platformMessages.length) platformMessages[platformMessages.length - 1]!.attachments = [{ kind: "image", sticker: pending.sticker }];
@@ -179,8 +179,7 @@ export async function deliverPreparedReply(api: TelegramApiClient, pending: Tele
     if (pending.kind === "model_reply") {
       try {
         await callbacks.onReplyDelivered?.({
-          conversationId: pending.chatId, senderId: pending.senderId, reply: pending.text || (pending.sticker
-            ? (pending.sticker.format === "mp4_document" ? "[已发送 MP4 动图]" : pending.sticker.format.startsWith("gif") ? "[已发送 GIF]" : "[已发送贴纸]") : ""),
+          conversationId: pending.chatId, senderId: pending.senderId, reply: pending.text || reactionLabel,
           images: pending.images, deliveryId: pending.deliveryId,
           ...(platformMessages.length ? { platformMessages } : {}),
         });
